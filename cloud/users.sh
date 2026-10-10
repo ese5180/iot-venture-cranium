@@ -102,17 +102,6 @@ user_groups() {
     --query 'Groups[].GroupName' --output text < /dev/null | tr '\t\n' '  '
 }
 
-# Prints "yes" when the user has registered an authenticator app, else "no".
-has_authenticator() {
-  local settings
-  settings="$(aws cognito-idp admin-get-user --user-pool-id "$POOL" --username "$1" \
-    --query 'UserMFASettingList' --output text < /dev/null)" || return 1
-  case "$settings" in
-    *SOFTWARE_TOKEN_MFA*) echo yes ;;
-    *) echo no ;;
-  esac
-}
-
 # Prints the user names (not the e-mail addresses) in a group, separated by spaces.
 group_members() {
   aws cognito-idp list-users-in-group --user-pool-id "$POOL" --group-name "$1" \
@@ -185,14 +174,12 @@ cmd_resend() {
 }
 
 cmd_reset_mfa() {
-  local email="$1" status registered out
+  local email="$1" status out
   status="$(user_status "$email")"
   [ "$status" != NONE ] || die "there is no account for $email"
-  registered="$(has_authenticator "$email")"
-  if [ "$registered" = no ]; then
-    echo "$email has no authenticator app registered; nothing to reset."
-    return 0
-  fi
+  # Cognito does not report whether an authenticator registered through the sign-in
+  # page exists (the user's MFA settings stay empty while the pool requires MFA), so
+  # the token is removed without asking first.
   if ! out="$(aws cognito-idp admin-delete-software-token --user-pool-id "$POOL" \
       --username "$email" 2>&1)"; then
     case "$out" in
@@ -222,7 +209,7 @@ cmd_remove() {
 }
 
 cmd_list() {
-  local users managers viewers username email status enabled role state registered
+  local users managers viewers username email status enabled role state
   users="$(aws cognito-idp list-users --user-pool-id "$POOL" \
     --query "Users[].[Username, Attributes[?Name=='email'].Value | [0], UserStatus, Enabled]" \
     --output text)"
@@ -236,7 +223,7 @@ cmd_list() {
   managers=" $(group_members release-managers) "
   viewers=" $(group_members viewers) "
 
-  printf '%-40s %-16s %-9s %s\n' "E-MAIL" "ROLE" "STATE" "AUTHENTICATOR"
+  printf '%-40s %-16s %s\n' "E-MAIL" "ROLE" "STATE"
   while IFS=$'\t' read -r username email status enabled; do
     [ -n "$username" ] || continue
     role="none"
@@ -248,8 +235,7 @@ cmd_list() {
       *) state="$status" ;;
     esac
     [ "$enabled" = True ] || state="disabled"
-    registered="$(has_authenticator "$username")"
-    printf '%-40s %-16s %-9s %s\n' "$email" "$role" "$state" "$registered"
+    printf '%-40s %-16s %s\n' "$email" "$role" "$state"
   done <<< "$users"
 }
 
