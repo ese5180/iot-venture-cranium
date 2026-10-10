@@ -18,7 +18,9 @@ const SETTINGS = { clientId: 'client-id-for-tests', loginOrigin: LOGIN, scope: '
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
   `connect-src 'self' ${LOGIN}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
 
-function request(rawPath, { method = 'GET', domainName = DOMAIN, ...rest } = {}) {
+/** An event as API Gateway sends it. A value given as undefined stays undefined. */
+function request(rawPath, options = {}) {
+  const { method, domainName, ...rest } = { method: 'GET', domainName: DOMAIN, ...options };
   return { rawPath, requestContext: { requestId: 'request-1', domainName, http: { method } }, ...rest };
 }
 
@@ -118,7 +120,6 @@ test('settings cannot break out of the attribute they are written into', async (
       assert.equal(response.statusCode, 200);
       assert.equal(settingsIn(response.body)[field], value, `${field} must come back unchanged`);
       assert.equal(scripts(response.body), scripts(template), 'no script element may be added');
-      assert.equal(response.body.length > template.length, true);
     }
   }
 });

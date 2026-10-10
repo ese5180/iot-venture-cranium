@@ -194,8 +194,8 @@ export function createApp({
     });
     if (failure !== null) throw failure;
     if (!recorded) {
-      throw new HttpError(500, 'audit_failed',
-        'The change was made, but it could not be written to the activity log. Check the result before you repeat it.');
+      throw new HttpError(500, 'audit_failed', 'The change was made, but it could not be written to ' +
+        'the activity log. Check the result before you repeat it.');
     }
     return result;
   }

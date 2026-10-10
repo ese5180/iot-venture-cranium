@@ -311,7 +311,8 @@ export function createAws(env) {
           const out = await iot.send(new ListThingsInThingGroupCommand({
             thingGroupName: thingGroup, maxResults: PAGE_SIZE, nextToken,
           }));
-          return { items: (out.things ?? []).filter((name) => typeof name === 'string'), next: out.nextToken };
+          const items = (out.things ?? []).filter((name) => typeof name === 'string');
+          return { items, next: out.nextToken };
         });
       } catch (cause) {
         throw nameOf(cause) === 'AwsError' ? cause : failure('ListThingsInThingGroup', cause);
@@ -324,7 +325,8 @@ export function createAws(env) {
           const out = await iot.send(new ListThingPrincipalsCommand({
             thingName: thing, maxResults: PAGE_SIZE, nextToken,
           }));
-          return { items: (out.principals ?? []).filter((arn) => typeof arn === 'string'), next: out.nextToken };
+          const items = (out.principals ?? []).filter((arn) => typeof arn === 'string');
+          return { items, next: out.nextToken };
         });
       } catch (cause) {
         if (nameOf(cause) === 'ResourceNotFoundException') return [];
@@ -492,7 +494,7 @@ export function createAws(env) {
         if (nameOf(cause) === 'ResourceNotFoundException') return { ok: false, reason: 'not_found' };
         // The request itself is built from checked values, so a refusal is about the
         // state of the job: it is over, or being deleted.
-        if (nameOf(cause) === 'InvalidRequestException' || nameOf(cause) === 'InvalidStateTransitionException') {
+        if (['InvalidRequestException', 'InvalidStateTransitionException'].includes(nameOf(cause))) {
           return { ok: false, reason: 'refused', detail: String(cause?.message ?? '').slice(0, 200) };
         }
         throw failure('CancelJob', cause);
@@ -622,7 +624,9 @@ export function createAws(env) {
           // False for an item that does not exist, too.
           ConditionExpression: '#status = :active',
           ExpressionAttributeNames: { '#status': 'status', '#revoked': 'revoked' },
-          ExpressionAttributeValues: { ':active': { S: 'active' }, ':revoked': { S: 'revoked' }, ':info': info },
+          ExpressionAttributeValues: {
+            ':active': { S: 'active' }, ':revoked': { S: 'revoked' }, ':info': info,
+          },
           ReturnValues: 'ALL_NEW',
         }));
         return { ok: true, release: out.Attributes ? fromItem(out.Attributes) : null };

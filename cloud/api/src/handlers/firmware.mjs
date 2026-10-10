@@ -190,10 +190,11 @@ export function createFirmwareHandlers({ aws, config, now, log }, { deployments 
           const highest = versionOfKey(registered.highest);
           throw unprocessable('version_not_newer', highest === null
             ? `Version ${info.version} is not newer than the releases that already exist.`
-            : `Version ${info.version} is not newer than ${highest}, the highest version ever registered. ` +
-              'Versions only go up, revoked releases included.');
+            : `Version ${info.version} is not newer than ${highest}, the highest version ever ` +
+              'registered. Versions only go up, revoked releases included.');
         }
-        throw conflict('upload_conflict', 'Another upload was being registered at the same moment. Try again.');
+        throw conflict('upload_conflict',
+          'Another upload was being registered at the same moment. Try again.');
       }
       return { status: 201, body: { release } };
     },
@@ -207,21 +208,28 @@ export function createFirmwareHandlers({ aws, config, now, log }, { deployments 
       if (existing === null) throw notFound('unknown_version', `There is no release ${version.text}.`);
 
       // 1. The record: from here on no new deployment of this release can be created.
-      const revoked = { by: { sub: actor.sub, email: actor.email }, at: new Date(now()).toISOString(), reason };
+      const revoked = {
+        by: { sub: actor.sub, email: actor.email }, at: new Date(now()).toISOString(), reason,
+      };
       const marked = await aws.markReleaseRevoked({ sk: releaseKey(version.parts), revoked });
       if (marked.ok) entry.detail.reason = reason;
 
       // 2. and 3. are repeated even if the record was revoked before, so that a
       // revocation that was interrupted half way can be completed by asking again.
       const incomplete = [];
+      const failed = (step, error) => {
+        incomplete.push(step);
+        log({
+          level: 'error', event: 'revoke_incomplete', step, version: version.text, error: describeError(error),
+        });
+      };
 
       // 2. The image: the bucket refuses to serve a tagged object, whatever URL is used.
       try {
         const tagged = await aws.tagFirmwareRevoked(objectKey(existing.sha256));
         if (!tagged.ok) log({ level: 'warn', event: 'revoked_image_missing', version: version.text });
       } catch (error) {
-        incomplete.push('tag');
-        log({ level: 'error', event: 'revoke_tag_failed', version: version.text, error: describeError(error) });
+        failed('tag', error);
       }
 
       // 3. The deployments: boards that have not installed it yet stop before they do.
@@ -231,14 +239,13 @@ export function createFirmwareHandlers({ aws, config, now, log }, { deployments 
         cancelled = result.cancelled;
         if (result.failed.length > 0) incomplete.push('cancel');
       } catch (error) {
-        incomplete.push('cancel');
-        log({ level: 'error', event: 'revoke_cancel_failed', version: version.text, error: describeError(error) });
+        failed('cancel', error);
       }
       entry.detail.cancelled = String(cancelled.length);
 
       if (incomplete.length > 0) {
-        throw new HttpError(500, 'revoke_incomplete',
-          `Release ${version.text} is marked revoked, but not every step after that completed. Revoke it again to finish.`);
+        throw new HttpError(500, 'revoke_incomplete', `Release ${version.text} is marked revoked, but ` +
+          'not every step after that completed. Revoke it again to finish.');
       }
       if (!marked.ok) {
         throw conflict('already_revoked', `Release ${version.text} is already revoked.`);

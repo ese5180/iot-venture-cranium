@@ -66,7 +66,11 @@ export function errorResponse(error, requestId) {
   if (errorCode(error) === 'throttled') {
     return {
       response: json(429, {
-        error: { code: 'throttled', message: 'AWS is limiting requests right now. Try again in a moment.', requestId },
+        error: {
+          code: 'throttled',
+          message: 'AWS is limiting requests right now. Try again in a moment.',
+          requestId,
+        },
       }),
       internal: describeError(error),
     };

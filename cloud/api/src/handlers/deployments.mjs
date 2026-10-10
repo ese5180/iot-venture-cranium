@@ -62,6 +62,10 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
     details.delete(id);
   }
 
+  function warn(event, fields, error) {
+    log({ level: 'warn', event, ...fields, error: describeError(error).message });
+  }
+
   function rememberSummary(id, summary) {
     put(summaries, id, { summary, settled: isSettled(summary), at: now() });
   }
@@ -83,16 +87,16 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
   async function describeExecution(id, listed) {
     const key = `${id}/${listed.thing}`;
     const cached = closed.get(key);
-    if (cached !== undefined && cached.status === listed.status && cached.lastUpdatedAt === listed.lastUpdatedAt) {
-      return cached.row;
-    }
+    const unchanged = cached !== undefined && cached.status === listed.status &&
+      cached.lastUpdatedAt === listed.lastUpdatedAt;
+    if (unchanged) return cached.row;
+
     let described = null;
     try {
       described = await aws.describeJobExecution(id, listed.thing);
     } catch (error) {
       // The list entry still says where the board is; the details follow on the next poll.
-      log({ level: 'warn', event: 'execution_unreadable', deployment: id, thing: listed.thing,
-        error: describeError(error).message });
+      warn('execution_unreadable', { deployment: id, thing: listed.thing }, error);
     }
     const complete = described !== null && EXECUTION_STATUSES.includes(described.status);
     const source = complete ? described : listed;
@@ -198,7 +202,9 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
           const summary = summarizeJob(await aws.describeJob(job.jobId));
           if (summary === null || summary.counts.inProgress === 0) return;
         }
-        const result = await aws.cancelJob({ jobId: job.jobId, force: true, reasonCode: 'RELEASE_REVOKED', comment });
+        const result = await aws.cancelJob({
+          jobId: job.jobId, force: true, reasonCode: 'RELEASE_REVOKED', comment,
+        });
         forget(job.jobId);
         if (result.ok) cancelled.push(job.jobId);
       } catch (error) {
@@ -262,10 +268,9 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
           .map((execution) => ({ thing, deployment: execution.jobId })))).flat();
       if (busy.length > 0) {
         const names = [...new Set(busy.map((item) => item.thing))];
-        throw conflict('device_busy', names.length === 1
-          ? `${names[0]} still has an update that is not finished. Wait for it or cancel it first.`
-          : `${names.length} boards still have an update that is not finished. Wait for those or cancel them first.`,
-        busy);
+        const who = names.length === 1 ? `${names[0]} still has` : `${names.length} boards still have`;
+        throw conflict('device_busy',
+          `${who} an update that is not finished. Wait for it or cancel it first.`, busy);
       }
 
       const document = buildJobDocument({
@@ -300,11 +305,12 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
         current = releaseFromItem(await aws.getRelease(sortKey));
       } catch (error) {
         // It was active a moment ago, and the bucket refuses a revoked image anyway.
-        log({ level: 'warn', event: 'release_recheck_failed', deployment: id, error: describeError(error).message });
+        warn('release_recheck_failed', { deployment: id }, error);
       }
       if (current === null || current.status !== 'active') {
         await aws.cancelJob({ jobId: id, force: true, reasonCode: 'RELEASE_REVOKED', comment: actor.sub });
-        throw conflict('release_revoked', `Release ${version.text} was revoked just now; the deployment was cancelled.`);
+        throw conflict('release_revoked',
+          `Release ${version.text} was revoked just now; the deployment was cancelled.`);
       }
 
       // The job exists from here on, so the answer is 201 even if it cannot be read
@@ -313,7 +319,7 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
       try {
         detail = await detailOf(id, { fresh: true });
       } catch (error) {
-        log({ level: 'warn', event: 'deployment_unreadable', deployment: id, error: describeError(error).message });
+        warn('deployment_unreadable', { deployment: id }, error);
       }
       if (detail === null) {
         const createdAt = now();
@@ -321,7 +327,8 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
           jobId: id, status: 'IN_PROGRESS', description, things, createdAt, lastUpdatedAt: createdAt,
           completedAt: null, counts: {},
         });
-        const executions = things.map((thing) => present(summary, queuedRow(thing, createdAt), unknownDevice(thing)));
+        const executions = things.map((thing) =>
+          present(summary, queuedRow(thing, createdAt), unknownDevice(thing)));
         detail = { ...summary, counts: countExecutions(executions), executions };
       }
       return { status: 201, body: { deployment: detail } };
@@ -340,11 +347,13 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
       // Only a forced cancel reaches those.
       if (summary.status === 'CANCELED' && !(force && summary.counts.inProgress > 0)) throw alreadyFinished();
 
-      const result = await aws.cancelJob({ jobId: job.id, force, reasonCode: 'CONSOLE_CANCEL', comment: actor.sub });
+      const result = await aws.cancelJob({
+        jobId: job.id, force, reasonCode: 'CONSOLE_CANCEL', comment: actor.sub,
+      });
       forget(job.id);
       if (!result.ok) {
         if (result.reason === 'not_found') throw unknownDeployment();
-        log({ level: 'warn', event: 'cancel_refused', deployment: job.id, detail: String(result.detail ?? '') });
+        warn('cancel_refused', { deployment: job.id }, new Error(String(result.detail ?? '')));
         throw alreadyFinished();
       }
 

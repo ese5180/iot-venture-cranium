@@ -7,8 +7,9 @@
  *
  *   { "op": "fw_update", "v": 1,
  *     "fw": { "version": "1.1.0+7", "size": 815284, "sha256": "<64 hex>",
- *             "url": "${aws:iot:s3-presigned-url-v2:https://s3.<region>.amazonaws.com/<bucket>/firmware/<sha256>.bin}" } }
+ *             "url": "${aws:iot:s3-presigned-url-v2:<S3 URL of the image>}" } }
  *
+ * where the S3 URL is https://s3.<region>.amazonaws.com/<bucket>/firmware/<sha256>.bin.
  * AWS IoT replaces the placeholder with a short-lived download URL each time a board
  * asks for the document. This module never sees such a URL.
  */
@@ -46,7 +47,7 @@ export function isActiveExecution(status) {
 }
 
 export function emptyCounts() {
-  return { queued: 0, inProgress: 0, succeeded: 0, failed: 0, rejected: 0, canceled: 0, timedOut: 0, removed: 0 };
+  return Object.fromEntries(Object.values(COUNT_NAMES).map((name) => [name, 0]));
 }
 
 export function countExecutions(executions) {
@@ -91,17 +92,21 @@ function timeInJobId(id) {
  * the document would not fit the board's buffer.
  */
 export function buildJobDocument({ version, size, sha256, region, bucket }) {
+  const matches = (value, pattern) => typeof value === 'string' && pattern.test(value);
   if (strictVersion(version)?.text !== version) throw new TypeError('The version is not canonical');
   if (!Number.isInteger(size) || size <= 0) throw new TypeError('The size is not a positive integer');
-  if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) throw new TypeError('The digest is not SHA-256 hex');
-  if (typeof region !== 'string' || !/^[a-z0-9-]{1,32}$/.test(region)) throw new TypeError('The region is not usable');
-  if (typeof bucket !== 'string' || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) {
+  if (!matches(sha256, /^[0-9a-f]{64}$/)) throw new TypeError('The digest is not SHA-256 hex');
+  if (!matches(region, /^[a-z0-9-]{1,32}$/)) throw new TypeError('The region is not usable');
+  if (!matches(bucket, /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/)) {
     throw new TypeError('The bucket name is not usable');
   }
-  const url = `\${aws:iot:s3-presigned-url-v2:https://s3.${region}.amazonaws.com/${bucket}/firmware/${sha256}.bin}`;
+  // Nothing in this URL needs encoding, which is the form the v2 placeholder expects.
+  const object = `https://s3.${region}.amazonaws.com/${bucket}/firmware/${sha256}.bin`;
+  const url = `\${aws:iot:s3-presigned-url-v2:${object}}`;
   const document = JSON.stringify({ op: 'fw_update', v: 1, fw: { version, size, sha256, url } });
-  if (Buffer.byteLength(document) >= DOCUMENT_LIMIT) {
-    throw new RangeError(`The job document is ${Buffer.byteLength(document)} bytes; the board accepts fewer than ${DOCUMENT_LIMIT}`);
+  const bytes = Buffer.byteLength(document);
+  if (bytes >= DOCUMENT_LIMIT) {
+    throw new RangeError(`The job document is ${bytes} bytes; the board accepts fewer than ${DOCUMENT_LIMIT}`);
   }
   return document;
 }

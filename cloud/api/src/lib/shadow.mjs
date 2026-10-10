@@ -21,8 +21,10 @@ import { parseJobId, strictVersion } from './validate.mjs';
 
 export const ONLINE_WINDOW_MS = 150_000;
 
-const OTA_STATES = Object.freeze(['idle', 'awaiting_user', 'downloading', 'verifying', 'rebooting', 'testing']);
-const OTA_RESULTS = Object.freeze(['none', 'succeeded', 'failed', 'rolled_back', 'declined', 'refused', 'cancelled']);
+const OTA_STATES = Object.freeze(
+  ['idle', 'awaiting_user', 'downloading', 'verifying', 'rebooting', 'testing']);
+const OTA_RESULTS = Object.freeze(
+  ['none', 'succeeded', 'failed', 'rolled_back', 'declined', 'refused', 'cancelled']);
 const SHORT_ASCII = /^[\x20-\x7e]{0,64}$/;
 // Later than any real timestamp, small enough to stay a valid date in milliseconds.
 const MAX_EPOCH_SEC = 99_999_999_999;

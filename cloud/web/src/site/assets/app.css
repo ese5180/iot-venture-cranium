@@ -1557,6 +1557,10 @@ textarea.input {
   color: var(--accent);
 }
 
+.device:has(.cover-link:hover) {
+  border-color: var(--line-strong);
+}
+
 .device .fact-link,
 .device .badge {
   position: relative;

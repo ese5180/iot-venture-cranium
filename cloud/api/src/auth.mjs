@@ -86,7 +86,8 @@ function displayEmail(value) {
 /** Every route is for members of the console's groups only. */
 export function requireMember(caller) {
   if (caller.groups.length === 0) {
-    throw forbidden('forbidden', 'Your account has no access to this console. Ask a release manager to add you.');
+    throw forbidden('forbidden',
+      'Your account has no access to this console. Ask a release manager to add you.');
   }
 }
 
