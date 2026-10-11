@@ -352,7 +352,7 @@ test('one client per service is created for the function\'s region', () => {
   sdk.clients.length = 0;
   createAws(ENV);
   assert.deepEqual(sdk.clients.map((client) => client.package).sort(), Object.keys(REFERENCE).sort());
-  for (const client of sdk.clients) assert.deepEqual(client.config, { region: 'eu-west-1' });
+  for (const client of sdk.clients) assert.equal(client.config.region, 'eu-west-1');
 
   for (const name of Object.keys(ENV)) {
     assert.throws(() => createAws({ ...ENV, [name]: undefined }), new RegExp(name));
@@ -363,6 +363,27 @@ test('one client per service is created for the function\'s region', () => {
   assert.equal(Object.isFrozen(createAws(ENV)), true);
 });
 
+test('no client waits for AWS without a limit', () => {
+  sdk.clients.length = 0;
+  createAws(ENV);
+  assert.equal(sdk.clients.length, 5);
+  for (const { config } of sdk.clients) {
+    assert.deepEqual(Object.keys(config).sort(), ['maxAttempts', 'region', 'requestHandler']);
+    assert.equal(config.maxAttempts, 2);
+    // The options of the SDK's HTTP handler for Node.js, given as a plain object (SDK
+    // 3.521 and later), so that the adapter imports nothing but the five clients.
+    assert.deepEqual(config.requestHandler,
+      { connectionTimeout: 1000, socketTimeout: 3000, requestTimeout: 4000, throwOnRequestTimeout: true });
+    // A call that gets no answer at all is over, both attempts, well inside the 16 s
+    // that a request has.
+    const { connectionTimeout, requestTimeout } = config.requestHandler;
+    assert.ok(config.maxAttempts * (connectionTimeout + requestTimeout) <= 10_000);
+  }
+  // Every client has settings of its own: the SDK keeps the object it is given.
+  assert.equal(new Set(sdk.clients.map((client) => client.config)).size, 5);
+  assert.equal(new Set(sdk.clients.map((client) => client.config.requestHandler)).size, 5);
+});
+
 test('the adapter and the in-memory fake have the same methods', () => {
   const real = createAws(ENV);
   const fake = createFakeAws();
@@ -370,8 +391,8 @@ test('the adapter and the in-memory fake have the same methods', () => {
   assert.deepEqual(methods, [
     'cancelJob', 'createJob', 'describeJob', 'describeJobExecution', 'getRelease', 'getShadow', 'getUser',
     'highestReleaseKey', 'listGroupThings', 'listJobExecutionsForJob', 'listJobExecutionsForThing', 'listJobs', 'listReleases',
-    'listThingPrincipals', 'listUserGroups', 'markReleaseRevoked', 'putAudit', 'putFirmwareObject',
-    'queryAudit', 'registerRelease', 'tagFirmwareRevoked',
+    'listThingPrincipals', 'listUserGroups', 'markReleaseRevoked', 'markRevocationEnforced', 'putAudit',
+    'putFirmwareObject', 'queryAudit', 'registerRelease', 'tagFirmwareRevoked',
   ]);
   for (const method of methods) {
     assert.equal(typeof real[method], 'function');
@@ -1038,6 +1059,45 @@ test('markReleaseRevoked changes an active release and nothing else', async () =
   await rejectsWith(aws.markReleaseRevoked({ sk: SK, revoked }), { code: 'throttled', operation: 'UpdateItem' });
 });
 
+test('markRevocationEnforced records once when a revocation was completed', async () => {
+  const aws = adapter();
+  const at = '2026-10-11T08:00:02.500Z';
+  const revoked = { by: { sub: 'who', email: 'address' }, at: '2026-10-11T08:00:00.000Z', reason: 'bad build' };
+  const enforcedItem = {
+    ...RELEASE_ITEM,
+    status: { S: 'revoked' },
+    revoked: {
+      M: {
+        by: { M: { sub: { S: 'who' }, email: { S: 'address' } } }, at: { S: revoked.at }, reason: { S: 'bad build' },
+        enforcedAt: { S: at },
+      },
+    },
+  };
+  sdk.reply('UpdateItemCommand', { Attributes: enforcedItem });
+  assert.deepEqual(await aws.markRevocationEnforced({ sk: SK, at }),
+    { ok: true, release: { ...RELEASE, pk: 'REL', sk: SK, status: 'revoked', revoked: { ...revoked, enforcedAt: at } } });
+  assert.deepEqual(sdk.inputs('UpdateItemCommand'), [{
+    TableName: 'state-table',
+    Key: { pk: { S: 'REL' }, sk: { S: SK } },
+    // One member of the map that the revocation wrote; the rest of it is not touched.
+    UpdateExpression: 'SET #revoked.#enforcedAt = :at',
+    ConditionExpression: '#status = :revoked AND attribute_not_exists(#revoked.#enforcedAt)',
+    ExpressionAttributeNames: { '#status': 'status', '#revoked': 'revoked', '#enforcedAt': 'enforcedAt' },
+    ExpressionAttributeValues: { ':revoked': { S: 'revoked' }, ':at': { S: at } },
+    ReturnValues: 'ALL_NEW',
+  }]);
+
+  // Not revoked, no such release, or on record already.
+  sdk.reply('UpdateItemCommand', fails('ConditionalCheckFailedException'));
+  assert.deepEqual(await aws.markRevocationEnforced({ sk: SK, at }), { ok: false, reason: 'not_pending' });
+  // A record whose "revoked" is not a map cannot take the member.
+  sdk.reply('UpdateItemCommand', fails('ValidationException'));
+  await rejectsWith(aws.markRevocationEnforced({ sk: SK, at }),
+    { code: 'failed', operation: 'UpdateItem', awsError: 'ValidationException' });
+  sdk.reply('UpdateItemCommand', fails('ThrottlingException'));
+  await rejectsWith(aws.markRevocationEnforced({ sk: SK, at }), { code: 'throttled', operation: 'UpdateItem' });
+});
+
 test('putAudit appends and never overwrites', async () => {
   const aws = adapter();
   const item = {
@@ -1273,6 +1333,16 @@ test('the fake answers in the same shapes as the adapter', async () => {
   }, fails('ConditionalCheckFailedException'));
   assert.deepEqual(await fake.markReleaseRevoked({ sk: SK, revoked }), await aws.markReleaseRevoked({ sk: SK, revoked }));
   assert.deepEqual(await fake.markReleaseRevoked({ sk: SK, revoked }), await aws.markReleaseRevoked({ sk: SK, revoked }));
+
+  const at = '2026-10-11T08:00:02.500Z';
+  sdk.reply('UpdateItemCommand', {
+    Attributes: { ...RELEASE_ITEM, status: { S: 'revoked' },
+      revoked: { M: { by: { M: { sub: { S: 'who' }, email: { S: 'address' } } }, at: { S: revoked.at }, reason: { S: revoked.reason },
+        enforcedAt: { S: at } } } },
+  }, fails('ConditionalCheckFailedException'), fails('ConditionalCheckFailedException'));
+  assert.deepEqual(await fake.markRevocationEnforced({ sk: SK, at }), await aws.markRevocationEnforced({ sk: SK, at }));
+  assert.deepEqual(await fake.markRevocationEnforced({ sk: SK, at }), await aws.markRevocationEnforced({ sk: SK, at }));
+  assert.deepEqual(await fake.markRevocationEnforced({ sk: 'none', at }), await aws.markRevocationEnforced({ sk: 'none', at }));
 
   const item = { sk: '2026-10-10T22:15:00.000Z#r1', action: 'firmware.upload', outcome: 'ok', actor: { sub: 'who', email: '' } };
   sdk.reply('PutItemCommand', {}, fails('ConditionalCheckFailedException'));

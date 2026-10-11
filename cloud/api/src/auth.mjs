@@ -11,7 +11,9 @@
  *
  * A token is valid for up to an hour, so it cannot prove that its owner is still
  * allowed to change things. Every write therefore asks Cognito at that moment whether
- * the user is enabled, confirmed and a release manager.
+ * the user is enabled, confirmed and a release manager, and Cognito's answer is the
+ * one that counts: a user who lost the role cannot write with the old token, and a
+ * user who was given it can write without signing in again.
  */
 
 import { forbidden, unauthorized } from './http.mjs';
@@ -91,13 +93,6 @@ export function requireMember(caller) {
   }
 }
 
-/** The token itself must already say release manager before Cognito is asked. */
-export function requireReleaseManager(caller) {
-  if (!caller.groups.includes(RELEASE_MANAGERS)) {
-    throw forbidden('release_manager_required', 'Only release managers can do this.');
-  }
-}
-
 /**
  * The part of authorization that needs Cognito.
  *
@@ -130,22 +125,32 @@ export function createDirectory({ aws, now }) {
     }
   }
 
+  /** The address if it was looked up in the last five minutes, else ''. Asks nobody. */
+  function knownEmail(sub) {
+    const cached = emails.get(sub);
+    return cached !== undefined && now() - cached.at < EMAIL_CACHE_MS ? cached.email : '';
+  }
+
   /**
-   * Ask Cognito, now, whether this user may still change things. Returns the user's
+   * Ask Cognito, now, whether this caller may change things: the account is enabled
+   * and confirmed, and it is in the release-managers group. The groups in the token do
+   * not decide this; they only choose the words of the refusal. Returns the user's
    * e-mail address, or throws 403. A failure to ask is a failure of the request.
    */
-  async function requireLiveWriter(sub) {
-    const [user, groups] = await Promise.all([aws.getUser(sub), aws.listUserGroups(sub)]);
+  async function requireLiveWriter(caller) {
+    const [user, groups] = await Promise.all([aws.getUser(caller.sub), aws.listUserGroups(caller.sub)]);
+    const email = user === null ? '' : displayEmail(user.email);
+    if (user !== null) remember(caller.sub, email);
     if (user === null || user.enabled !== true || user.status !== 'CONFIRMED') {
       throw forbidden('account_inactive', 'Your account is disabled or not confirmed.');
     }
     if (!Array.isArray(groups) || !groups.includes(RELEASE_MANAGERS)) {
-      throw forbidden('release_manager_required', 'You are no longer a release manager.');
+      throw forbidden('release_manager_required', caller.groups.includes(RELEASE_MANAGERS)
+        ? 'You are no longer a release manager.'
+        : 'Only release managers can do this.');
     }
-    const email = displayEmail(user.email);
-    remember(sub, email);
     return email;
   }
 
-  return { emailOf, requireLiveWriter };
+  return { emailOf, knownEmail, requireLiveWriter };
 }

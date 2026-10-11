@@ -5,6 +5,10 @@
  * checked, the AWS clients are created, and the handler keeps its short-lived caches
  * in memory between requests. A bad configuration fails here, before any request is
  * served.
+ *
+ * Lambda calls the handler with the event and with its context object. The handler
+ * asks the context how much time is left, so that it can answer and record a request
+ * before Lambda would stop the function (see app.mjs).
  */
 
 import { createApp } from './app.mjs';

@@ -27,11 +27,23 @@
 // Time comes from the `now` function passed in (the system clock by default). Jobs
 // behave as in AWS IoT: an execution in progress times out after the job's timeout, a
 // snapshot job completes when all its executions have ended, and a cancelled job stays
-// cancelled. fake.calls lists every adapter call; fake.failNext makes one fail.
+// cancelled. AWS creates the executions of a job a moment after the job and cancels
+// them a moment after a cancellation; the stand-in does both at once unless it is given
+// a delay. fake.calls lists every adapter call; fake.failNext makes one fail.
+//
+// One thing AWS does not document: what CancelJob with force does to a job that was
+// cancelled before, without force, and still has a board at work. Measured on AWS IoT
+// in October 2026, the call is accepted and the board is stopped 5 to 15 seconds
+// later, as for a job in progress. Because that is not documented, the stand-in can do
+// each of the three things AWS could do (the `repeatedCancel` option): refuse the call,
+// which is the worst case and what it does unless told otherwise, accept it and stop
+// the board, or accept it and leave the board alone. The console has to tell the
+// truth in all three cases.
 //
 // Also exported: fixture and fakeEnv (the fixture images and a configuration that
-// accepts them), accessClaims and apiEvent (a request as API Gateway delivers it), and
-// createTestConsole (the real handlers on a fake, as the tests use them).
+// accepts them), accessClaims and apiEvent (a request as API Gateway delivers it),
+// manualTimers (timers that a test fires by hand), and createTestConsole (the real
+// handlers on a fake, as the tests use them).
 //
 // This file is test and preview code. It is never packaged with the function.
 
@@ -48,6 +60,7 @@ const REASON_CODE = /^[\p{Lu}\p{Nd}_]+$/u;
 const DETAIL_KEY = /^[a-zA-Z0-9:_-]{1,128}$/;
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'TIMED_OUT', 'REJECTED', 'REMOVED', 'CANCELED']);
 const DEVICE_STATUSES = new Set(['IN_PROGRESS', 'SUCCEEDED', 'FAILED', 'REJECTED']);
+const REPEATED_CANCEL = Object.freeze(['refused', 'accepted', 'ignored']);
 const ACCOUNT = '000000000000';
 const REGION = 'us-east-1';
 
@@ -118,8 +131,22 @@ function mergeReported(state, metadata, update, stamp) {
  * @param {number} [options.rolloutDelayMs]      how long after a job is created its
  *                                               executions appear (AWS creates them
  *                                               shortly after the job, not with it)
+ * @param {number} [options.cancelDelayMs]       how long after a job is cancelled its
+ *                                               executions change (AWS cancels them a
+ *                                               few seconds after it accepted the call;
+ *                                               until then a board's updates still pass)
+ * @param {string} [options.repeatedCancel]      what a forced cancellation does to a job
+ *                                               that is cancelled already and has a board
+ *                                               at work: "refused", "accepted" (the board
+ *                                               is stopped) or "ignored" (the call
+ *                                               succeeds and changes nothing)
  */
-export function createFakeAws({ now = Date.now, rolloutDelayMs = 0 } = {}) {
+export function createFakeAws({
+  now = Date.now, rolloutDelayMs = 0, cancelDelayMs = 0, repeatedCancel = 'refused',
+} = {}) {
+  if (!REPEATED_CANCEL.includes(repeatedCancel)) {
+    throw new TypeError(`repeatedCancel must be one of: ${REPEATED_CANCEL.join(', ')}`);
+  }
   const things = new Map();     // name -> { inGroup, principals }
   const shadows = new Map();    // name -> shadow document
   const booted = new Map();     // name -> when the board's uptime started, in ms
@@ -144,7 +171,19 @@ export function createFakeAws({ now = Date.now, rolloutDelayMs = 0 } = {}) {
     };
   }
 
-  /** Bring a job up to the current time: roll out, time out, complete. */
+  /**
+   * Carry out a cancellation on one execution: a queued one always, one in progress
+   * only if the cancellation was forced. `at` is when it takes effect.
+   */
+  function cancelExecution(execution, force, at) {
+    if (execution.status !== 'QUEUED' && !(force && execution.status === 'IN_PROGRESS')) return;
+    execution.forceCanceled = execution.status === 'IN_PROGRESS';
+    execution.status = 'CANCELED';
+    execution.lastUpdatedAt = at;
+    execution.versionNumber += 1;
+  }
+
+  /** Bring a job up to the current time: roll out, cancel, time out, complete. */
   function settle(job) {
     const at = clock();
     if (!job.rolledOut && at >= job.rolloutAt) {
@@ -152,6 +191,11 @@ export function createFakeAws({ now = Date.now, rolloutDelayMs = 0 } = {}) {
       if (job.status === 'IN_PROGRESS') {
         for (const thing of job.things) job.executions.set(thing, newExecution(job.rolloutAt));
       }
+    }
+    // Cancellations that were accepted earlier and are due by now, oldest first.
+    while (job.cancellations.length > 0 && at >= job.cancellations[0].at) {
+      const due = job.cancellations.shift();
+      for (const execution of job.executions.values()) cancelExecution(execution, due.force, due.at);
     }
     for (const execution of job.executions.values()) {
       if (execution.status === 'IN_PROGRESS' && at - execution.startedAt >= job.timeoutMs) {
@@ -286,7 +330,7 @@ export function createFakeAws({ now = Date.now, rolloutDelayMs = 0 } = {}) {
         jobId, status: 'IN_PROGRESS', description, document, things: [...targets], createdAt: at,
         lastUpdatedAt: at, completedAt: null, forceCanceled: false, reasonCode: null, comment: null,
         urlExpiresInSec, timeoutMs: inProgressTimeoutMinutes * 60_000, executions: new Map(),
-        rolloutAt: at + rolloutDelayMs, rolledOut: false,
+        rolloutAt: at + rolloutDelayMs, rolledOut: false, cancellations: [],
       }));
       return { ok: true };
     },
@@ -305,24 +349,24 @@ export function createFakeAws({ now = Date.now, rolloutDelayMs = 0 } = {}) {
       if (job.status === 'COMPLETED' || job.status === 'DELETION_IN_PROGRESS') {
         return { ok: false, reason: 'refused', detail: `job is ${job.status}` };
       }
-      const running = [...job.executions.values()].some((execution) => execution.status === 'IN_PROGRESS');
-      if (job.status === 'CANCELED' && !(force && running)) {
-        return { ok: false, reason: 'refused', detail: 'job is CANCELED' };
-      }
-      const at = clock();
-      for (const execution of job.executions.values()) {
-        if (execution.status === 'QUEUED' || (force && execution.status === 'IN_PROGRESS')) {
-          execution.forceCanceled = execution.status === 'IN_PROGRESS';
-          execution.status = 'CANCELED';
-          execution.lastUpdatedAt = at;
-          execution.versionNumber += 1;
+      if (job.status === 'CANCELED') {
+        // Cancelled already: there is nothing more to do, unless a board is still at
+        // work and force is asked for. What AWS does then is not documented.
+        const running = [...job.executions.values()].some((execution) => execution.status === 'IN_PROGRESS');
+        if (!(force && running) || repeatedCancel === 'refused') {
+          return { ok: false, reason: 'refused', detail: 'job is CANCELED' };
         }
+        if (repeatedCancel === 'ignored') return { ok: true };
       }
+      // The job is cancelled at once; its executions follow, at once or after the delay.
+      const at = clock();
       job.status = 'CANCELED';
       job.forceCanceled = job.forceCanceled || force;
       job.reasonCode = reasonCode;
       job.comment = comment;
       job.lastUpdatedAt = at;
+      job.cancellations.push({ at: at + cancelDelayMs, force });
+      settle(job);
       return { ok: true };
     },
 
@@ -376,6 +420,19 @@ export function createFakeAws({ now = Date.now, rolloutDelayMs = 0 } = {}) {
       if (item === undefined || item.status !== 'active') return { ok: false, reason: 'not_active' };
       item.status = 'revoked';
       item.revoked = copy(revoked);
+      return { ok: true, release: copy(item) };
+    },
+
+    async markRevocationEnforced({ sk, at }) {
+      if (typeof at !== 'string' || at === '') throw new TypeError('at is required');
+      const item = releases.get(sk);
+      if (item === undefined || item.status !== 'revoked') return { ok: false, reason: 'not_pending' };
+      // DynamoDB can only set a member of a map that is there.
+      if (item.revoked === null || typeof item.revoked !== 'object' || Array.isArray(item.revoked)) {
+        throw awsError('UpdateItem', 'ValidationException', { status: 400 });
+      }
+      if (Object.hasOwn(item.revoked, 'enforcedAt')) return { ok: false, reason: 'not_pending' };
+      item.revoked.enforcedAt = at;
       return { ok: true, release: copy(item) };
     },
 
@@ -670,6 +727,41 @@ export function apiEvent(method, path, { claims, body, query, requestId, base64 
   return event;
 }
 
+/**
+ * Stand-ins for setTimeout and clearTimeout that fire when a test says so. The handler
+ * sets one timer per request, for the time the request may take.
+ *
+ *   const timers = manualTimers();
+ *   const console_ = createTestConsole({ timers });
+ *   ...                         // a request that waits for something
+ *   timers.expire();            // its time is up
+ */
+export function manualTimers() {
+  const pending = new Map();   // id -> { run, ms }
+  let last = 0;
+  return {
+    set(run, ms) {
+      last += 1;
+      pending.set(last, { run, ms });
+      return last;
+    },
+    clear(id) {
+      pending.delete(id);
+    },
+    /** The delays of the timers that are set and have neither fired nor been cleared. */
+    waiting() {
+      return [...pending.values()].map((timer) => timer.ms);
+    },
+    /** Fire every timer that is waiting. */
+    expire() {
+      for (const [id, timer] of [...pending]) {
+        pending.delete(id);
+        timer.run();
+      }
+    },
+  };
+}
+
 // A reserved domain that can never receive mail.
 const MAIL_DOMAIN = 'example.invalid';
 
@@ -681,10 +773,13 @@ const MAIL_DOMAIN = 'example.invalid';
  *   const manager = console_.addUser('manager', ['release-managers']);
  *   const { status, body } = await console_.call('GET', '/api/firmware', { as: manager });
  */
-export function createTestConsole({ rolloutDelayMs = 0, env = {}, startMs = Date.UTC(2026, 9, 10, 22, 15, 0) } = {}) {
+export function createTestConsole({
+  rolloutDelayMs = 0, cancelDelayMs = 0, repeatedCancel, timers, env = {},
+  startMs = Date.UTC(2026, 9, 10, 22, 15, 0),
+} = {}) {
   const clock = { ms: startMs };
   const now = () => clock.ms;
-  const fake = createFakeAws({ now, rolloutDelayMs });
+  const fake = createFakeAws({ now, rolloutDelayMs, cancelDelayMs, repeatedCancel });
   const config = loadConfig(fakeEnv(env));
   const logs = [];
   let draws = 0;
@@ -692,6 +787,7 @@ export function createTestConsole({ rolloutDelayMs = 0, env = {}, startMs = Date
     aws: fake,
     config,
     now,
+    timers,
     log: (line) => logs.push(line),
     // Repeatable, so that ids in a test are the same on every run.
     randomHex: (count) => {
@@ -722,10 +818,13 @@ export function createTestConsole({ rolloutDelayMs = 0, env = {}, startMs = Date
       return { sub, email, claims: accessClaims({ sub, groups: tokenGroups, clientId: config.userPoolClientId }) };
     },
 
-    /** Send one request through the handler. `as` is a user from addUser. */
-    async call(method, path, { as, claims, body, query, requestId, base64 } = {}) {
+    /**
+     * Send one request through the handler. `as` is a user from addUser; `invocation`
+     * is what Lambda passes as the second argument, if the test has a use for it.
+     */
+    async call(method, path, { as, claims, body, query, requestId, base64, invocation } = {}) {
       const event = apiEvent(method, path, { claims: claims ?? as?.claims, body, query, requestId, base64 });
-      const response = await app(event);
+      const response = await app(event, invocation);
       return { status: response.statusCode, headers: response.headers, body: JSON.parse(response.body) };
     },
   };

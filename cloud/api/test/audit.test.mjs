@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import {
   ACTIONS, OUTCOMES, auditItem, decodeCursor, encodeCursor, entryFromItem,
 } from '../src/lib/audit.mjs';
-import { createTestConsole, fixture } from './fake-aws.mjs';
+import { createTestConsole, fixture, manualTimers } from './fake-aws.mjs';
 
 const BOARD = 'cranium-00000000000000aa';
 const NOW = Date.UTC(2026, 9, 10, 22, 15, 0);
@@ -17,8 +17,8 @@ const image = () => fixture('valid-1.2.3+4.signed.bin').toString('base64');
 const uploadBody = () => ({ filename: 'zephyr.signed.bin', data: image() });
 
 /** A console with a board, a release manager and a viewer. */
-function setup() {
-  const console_ = createTestConsole();
+function setup(options) {
+  const console_ = createTestConsole(options);
   console_.fake.addThing(BOARD);
   const manager = console_.addUser('manager', ['release-managers']);
   const viewer = console_.addUser('viewer', ['viewers']);
@@ -301,6 +301,49 @@ test('every write route records exactly one entry when the server fails', async 
       assert.deepEqual([added[0].action, added[0].outcome, added[0].detail.code], [write.action, 'error', code]);
       assert.deepEqual(added[0].actor, { sub: manager.sub, email: manager.email });
     }
+  }
+});
+
+test('every write route records exactly one entry when the request runs out of time', async () => {
+  // The call each route makes to change something, and what is known when it is made.
+  const hanging = {
+    'firmware.upload': ['putFirmwareObject', '1.2.3+4'],
+    'firmware.revoke': ['markReleaseRevoked', '1.2.3+4'],
+    'deployment.create': ['createJob', '1.2.3+4'],
+    'deployment.cancel': ['cancelJob', null],
+  };
+  for (const index of [0, 1, 2, 3]) {
+    const timers = manualTimers();
+    const context = setup({ timers });
+    const { fake, manager } = context;
+    const write = writes(context)[index];
+    await write.prepare();
+    const [method, target] = hanging[write.action];
+    const before = fake.auditLog().length;
+    const jobsBefore = [...fake.jobs.values()].map((job) => job.status).join();
+    const original = fake[method];
+    fake[method] = () => new Promise(() => {});
+
+    const pending = write.send({ as: manager, requestId: 'request-out-of-time' });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(timers.waiting(), [16000], write.action);
+    timers.expire();
+    const response = await pending;
+    fake[method] = original;
+
+    assert.equal(response.status, 500, write.action);
+    assert.equal(response.body.error.code, 'timeout');
+    assert.match(response.body.error.message, /check the result before you repeat it/);
+    const added = fake.auditLog().slice(before);
+    assert.equal(added.length, 1, write.action);
+    const [entry] = added;
+    assert.deepEqual([entry.action, entry.outcome, entry.detail.code, entry.requestId],
+      [write.action, 'error', 'timeout', 'request-out-of-time']);
+    assert.equal(entry.target, target ?? context.jobId);
+    assert.deepEqual(entry.actor, { sub: manager.sub, email: manager.email });
+    assert.equal([...fake.jobs.values()].map((job) => job.status).join(), jobsBefore);
+    const line = context.logs.at(-1);
+    assert.deepEqual([line.requestId, line.route.startsWith('POST /api/'), line.status], ['request-out-of-time', true, 500]);
   }
 });
 

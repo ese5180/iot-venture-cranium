@@ -15,6 +15,12 @@
  * The image itself is stored once, under the SHA-256 of the file, and never
  * overwritten. Revoking a release tags that object; the bucket policy then refuses
  * every download of it, including through URLs that were already handed out.
+ *
+ * Revoking is three steps: mark the record, tag the object, cancel the deployments.
+ * The mark comes first, so that nothing new can start, which also means that a request
+ * that fails or is cut off after it leaves a release that reads "revoked" with work
+ * outstanding. The record therefore says when the other two steps were completed
+ * (revoked.enforcedAt). Until then it is null, and revoking again completes the work.
  */
 
 import { HttpError, conflict, describeError, field, notFound, unprocessable } from '../http.mjs';
@@ -28,6 +34,7 @@ export const UPLOAD_BODY_LIMIT = 1_400_000;
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const SORT_KEY = /^(\d{3})\.(\d{3})\.(\d{5})\.(\d{10})$/;
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /** The sort key of a version: fixed-width fields, so that text order is version order. */
 export function releaseKey(parts) {
@@ -71,9 +78,15 @@ function person(value) {
   return { sub: text(value?.sub, 128), email: text(value?.email, 320) };
 }
 
+/** A time as this API writes it, or null. */
+function instant(value) {
+  return typeof value === 'string' && ISO_TIME.test(value) ? value : null;
+}
+
 /**
  * Turn a stored item into a Release, or null if it is not one. A release whose status
- * is not exactly "active" is treated as revoked.
+ * is not exactly "active" is treated as revoked, and a revocation counts as completed
+ * only if the record says when.
  */
 export function releaseFromItem(item) {
   if (item === null || typeof item !== 'object') return null;
@@ -100,6 +113,7 @@ export function releaseFromItem(item) {
       by: person(item.revoked?.by),
       at: text(item.revoked?.at, 40) || uploadedAt,
       reason: text(item.revoked?.reason, MAX_REASON),
+      enforcedAt: instant(item.revoked?.enforcedAt),
     },
   };
 }
@@ -115,6 +129,36 @@ function versionNotNewer(version, highestKey) {
     ? `Version ${version} is not newer than the releases that already exist.`
     : `Version ${version} is not newer than ${highest}, the highest version ever ` +
       'registered. Versions only go up, revoked releases included.');
+}
+
+/**
+ * A revocation whose record is written but whose other steps are not all done. Says
+ * which, in the words of the console; what went wrong inside is in the log.
+ *
+ * @param {string} version
+ * @param {string[]} steps        "tag", "cancel" or "record"
+ * @param {string[]} unconfirmed  deployments with a board that may still be at work
+ */
+function revokeIncomplete(version, steps, unconfirmed) {
+  if (steps.includes('record')) {
+    return new HttpError(500, 'revoke_incomplete', `Release ${version} is revoked: its image is blocked and ` +
+      'its deployments are cancelled. Only the record that this is done could not be written. Revoke it ' +
+      'again to finish.');
+  }
+  const open = [];
+  if (steps.includes('tag')) open.push('its image could not be blocked');
+  if (steps.includes('cancel')) {
+    if (unconfirmed.length === 0) {
+      open.push('its deployments could not be checked');
+    } else {
+      const which = unconfirmed.length > 3
+        ? `${unconfirmed.length} deployments`
+        : `${unconfirmed.length === 1 ? 'deployment' : 'deployments'} ${unconfirmed.join(', ')}`;
+      open.push(`${which} could not be confirmed as stopped (a board may still be at work)`);
+    }
+  }
+  return new HttpError(500, 'revoke_incomplete', `Release ${version} is marked revoked, but ${open.join(' and ')}. ` +
+    'Revoke it again to finish.');
 }
 
 export function createFirmwareHandlers({ aws, config, now, log }, { deployments }) {
@@ -218,12 +262,13 @@ export function createFirmwareHandlers({ aws, config, now, log }, { deployments 
 
       const existing = await findRelease(version);
       if (existing === null) throw notFound('unknown_version', `There is no release ${version.text}.`);
+      const sk = releaseKey(version.parts);
 
       // 1. The record: from here on no new deployment of this release can be created.
       const revoked = {
         by: { sub: actor.sub, email: actor.email }, at: new Date(now()).toISOString(), reason,
       };
-      const marked = await aws.markReleaseRevoked({ sk: releaseKey(version.parts), revoked });
+      const marked = await aws.markReleaseRevoked({ sk, revoked });
       if (marked.ok) entry.detail.reason = reason;
 
       // 2. and 3. are repeated even if the record was revoked before, so that a
@@ -246,23 +291,50 @@ export function createFirmwareHandlers({ aws, config, now, log }, { deployments 
 
       // 3. The deployments: boards that have not installed it yet stop before they do.
       let cancelled = [];
+      let unconfirmed = [];
       try {
         const result = await deployments.cancelUnfinished(version.text, actor.sub);
         cancelled = result.cancelled;
-        if (result.failed.length > 0) incomplete.push('cancel');
+        unconfirmed = result.failed;
+        if (unconfirmed.length > 0) incomplete.push('cancel');
       } catch (error) {
         failed('cancel', error);
       }
       entry.detail.cancelled = String(cancelled.length);
 
-      if (incomplete.length > 0) {
-        throw new HttpError(500, 'revoke_incomplete', `Release ${version.text} is marked revoked, but ` +
-          'not every step after that completed. Revoke it again to finish.');
+      // 4. The record again: that 2. and 3. are done, and since when. It is written
+      // once, by the first request that got that far.
+      const enforcedAt = new Date(now()).toISOString();
+      let enforced = null;
+      if (incomplete.length === 0) {
+        try {
+          enforced = await aws.markRevocationEnforced({ sk, at: enforcedAt });
+        } catch (error) {
+          failed('record', error);
+        }
       }
-      if (!marked.ok) {
+
+      if (incomplete.length > 0) {
+        entry.detail.incomplete = incomplete.join(' ');
+        throw revokeIncomplete(version.text, incomplete, unconfirmed);
+      }
+      if (!marked.ok && !enforced.ok) {
+        // Revoked before, and nothing was outstanding.
         throw conflict('already_revoked', `Release ${version.text} is already revoked.`);
       }
-      const release = releaseFromItem(marked.release) ?? { ...existing, status: 'revoked', revoked };
+      // This request completed a revocation that an earlier one had begun.
+      if (!marked.ok) entry.detail.resumed = 'true';
+
+      let release = enforced.ok ? releaseFromItem(enforced.release) : null;
+      if (release === null) {
+        // Another request recorded the completion at the same moment: read what it wrote.
+        try {
+          release = await findRelease(version);
+        } catch (error) {
+          log({ level: 'warn', event: 'release_unreadable', version: version.text, error: describeError(error).message });
+        }
+      }
+      release ??= { ...existing, status: 'revoked', revoked: { ...(existing.revoked ?? revoked), enforcedAt } };
       return { body: { release, cancelled } };
     },
   };

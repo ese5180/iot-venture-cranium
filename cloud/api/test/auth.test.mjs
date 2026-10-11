@@ -201,10 +201,13 @@ test('a viewer cannot change anything', async () => {
     const response = await console_.call(method, path, { as: viewer, body });
     assert.equal(response.status, 403, path);
     assert.equal(response.body.error.code, 'release_manager_required');
+    assert.equal(response.body.error.message, 'Only release managers can do this.');
   }
-  // Nothing was read or written on the viewer's behalf except the address for the log.
+  // Cognito was asked who the viewer is, and the refusal was logged. Nothing else was
+  // read or written on the viewer's behalf.
   const touched = new Set(console_.fake.methodsCalled());
-  assert.deepEqual([...touched].sort(), ['getUser', 'putAudit']);
+  assert.deepEqual([...touched].sort(), ['getUser', 'listUserGroups', 'putAudit']);
+  assert.equal(console_.fake.calls.filter((call) => call.method === 'getUser').length, writes.length);
   assert.equal(console_.fake.objects.size, 0);
 });
 
@@ -218,6 +221,7 @@ test('a write asks Cognito at that moment, whatever the token says', async () =>
   let response = await attempt();
   assert.equal(response.status, 403);
   assert.equal(response.body.error.code, 'release_manager_required');
+  assert.equal(response.body.error.message, 'You are no longer a release manager.');
 
   // Disabled.
   console_.fake.user(manager.sub).setGroups(['release-managers']);
@@ -248,14 +252,25 @@ test('a write asks Cognito at that moment, whatever the token says', async () =>
   assert.equal((await console_.call('GET', '/api/firmware', { as: manager })).status, 200);
 });
 
-test('both the token and Cognito must name the release-managers group', async () => {
+test('Cognito, not the token, says who is a release manager', async () => {
   const console_ = createTestConsole();
-  // Promoted in Cognito, but still holding a viewer's token.
+  // Made a release manager after signing in: the token still says viewer. The change
+  // counts at once for what the user may do, as a removal does.
   const promoted = console_.addUser('promoted', ['release-managers'], { tokenGroups: ['viewers'] });
   const response = await console_.call('POST', '/api/firmware', { as: promoted, body: upload() });
-  assert.equal(response.status, 403);
-  assert.equal(response.body.error.code, 'release_manager_required');
-  assert.ok(!console_.fake.methodsCalled().includes('listUserGroups'));
+  assert.equal(response.status, 201);
+  assert.deepEqual(response.body.release.uploadedBy, { sub: promoted.sub, email: promoted.email });
+  assert.equal(console_.fake.auditLog().at(-1).outcome, 'ok');
+  // What the console shows still follows the token, until the next sign-in.
+  const me = await console_.call('GET', '/api/me', { as: promoted });
+  assert.deepEqual([me.body.groups, me.body.canWrite], [['viewers'], false]);
+
+  // A token without either group opens nothing, whatever Cognito would say.
+  const outsider = console_.addUser('outsider', ['release-managers'], { tokenGroups: [] });
+  const refused = await console_.call('POST', '/api/firmware', { as: outsider, body: upload() });
+  assert.equal(refused.status, 403);
+  assert.equal(refused.body.error.code, 'forbidden');
+  assert.equal(console_.fake.calls.filter((call) => call.method === 'listUserGroups').length, 1);
 
   // The token in the forms the gateway sends for a member of both groups.
   for (const groups of [['release-managers'], ['viewers', 'release-managers']]) {

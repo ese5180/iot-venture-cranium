@@ -9,6 +9,11 @@
  * What a board reports never decides anything here. Whether a release may be deployed
  * is decided by its record; whether a board is free is decided by its executions in
  * AWS IoT Jobs. The shadow only adds the live step and progress to the picture.
+ *
+ * Cancelling is asked of AWS and then read back. AWS applies a cancellation a few
+ * seconds after it accepted it, and a job that was cancelled without force keeps the
+ * boards that had started. So nothing here says that a deployment is over because the
+ * job is cancelled: that is read from its executions.
  */
 
 import { conflict, describeError, field, notFound, unprocessable } from '../http.mjs';
@@ -28,6 +33,12 @@ const CACHE_MS = 2000;
 const LIST_LIMIT = 25;
 const MAX_CACHED = 1000;
 const ANY_JOB_ID = /^[A-Za-z0-9_-]{1,64}$/;
+// The states of a job in which AWS rolls out nothing more.
+const OVER = Object.freeze(['COMPLETED', 'CANCELED', 'DELETION_IN_PROGRESS']);
+// AWS stops the boards of a job a few seconds after it accepted a forced cancellation
+// (5 to 15 s were measured). For this long after one, a board that is still listed as
+// waiting or at work is taken to be on its way out. After that it was not stopped.
+const STOPPING_MS = 120_000;
 
 function unknownDeployment() {
   return notFound('unknown_deployment', 'There is no deployment with that id.');
@@ -35,6 +46,74 @@ function unknownDeployment() {
 
 function alreadyFinished() {
   return conflict('already_finished', 'This deployment has already finished; there is nothing left to cancel.');
+}
+
+/** "1 board is" or "3 boards are". */
+function boardsAre(count) {
+  return count === 1 ? '1 board is' : `${count} boards are`;
+}
+
+const running = (executions) => executions.filter((execution) => execution.status === 'IN_PROGRESS').length;
+
+/**
+ * A cancellation of a deployment that is cancelled already and still has `executions`
+ * open, where there is nothing to send to AWS. Says why they are open:
+ *
+ * @param {object[]} executions  the executions that are queued or in progress
+ * @param {boolean} forced       the deployment was cancelled with force
+ * @param {boolean} stopping     and AWS accepted that so recently that it is still at it
+ */
+function alreadyCancelled(executions, { forced, stopping }) {
+  const atWork = running(executions);
+  let rest;
+  if (stopping) {
+    rest = `AWS takes a few seconds to stop its boards: ${boardsAre(executions.length)} still listed as unfinished.`;
+  } else if (atWork === 0) {
+    rest = `AWS takes a few seconds to withdraw the offer: ${boardsAre(executions.length)} still listed as waiting.`;
+  } else if (forced) {
+    rest = `${boardsAre(atWork)} still at work on it all the same. Cancel with force to try again.`;
+  } else {
+    rest = `${boardsAre(atWork)} still at work on it, because a cancellation without force leaves boards ` +
+      'that had started alone. Cancel with force to stop them.';
+  }
+  return conflict('already_cancelled',
+    `This deployment is already cancelled${forced ? ' with force' : ''}. ${rest}`);
+}
+
+/** AWS refused a cancellation, and the deployment is not over: `executions` are still open. */
+function cancelRefused(executions) {
+  const atWork = running(executions);
+  if (atWork > 0) {
+    return conflict('cancel_refused', 'AWS did not accept the cancellation, and ' +
+      `${boardsAre(atWork)} still at work on this deployment. A board that is not stopped carries ` +
+      `on until it finishes or its ${IN_PROGRESS_TIMEOUT_MIN} minutes are over.`);
+  }
+  return conflict('cancel_refused', executions.length > 0
+    ? `AWS did not accept the cancellation, and ${boardsAre(executions.length)} still offered this ` +
+      'update. Try again in a moment.'
+    : 'AWS did not accept the cancellation, and the deployment is still open. Try again in a moment.');
+}
+
+function deviceBusy(busy, withdrawn = false) {
+  const names = [...new Set(busy.map((item) => item.thing))];
+  if (withdrawn) {
+    const who = names.length === 1 ? `${names[0]} was` : `${names.length} boards were`;
+    return conflict('device_busy', `${who} given another update at the same moment, so this deployment ` +
+      'was withdrawn. Wait for the other update or cancel it first.', busy);
+  }
+  const who = names.length === 1 ? `${names[0]} still has` : `${names.length} boards still have`;
+  return conflict('device_busy', `${who} an update that is not finished. Wait for it or cancel it first.`, busy);
+}
+
+/** True if deployment `a` was created before `b`. Both are summaries; ids break a tie. */
+function createdBefore(a, b) {
+  return a.createdAt < b.createdAt || (a.createdAt === b.createdAt && a.id < b.id);
+}
+
+/** True if two lists name the same boards, in whatever order. */
+function sameThings(a, b) {
+  const others = new Set(b);
+  return a.length === others.size && a.every((thing) => others.has(thing));
 }
 
 function put(cache, key, value) {
@@ -185,8 +264,112 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
   }
 
   /**
+   * The executions of a job that have not ended: boards still waiting or at work. Read
+   * from the executions themselves; the counts AWS keeps with a job lag behind them.
+   */
+  async function openExecutions(id) {
+    return (await aws.listJobExecutionsForJob(id)).filter((execution) => isActiveExecution(execution.status));
+  }
+
+  /**
+   * True if AWS accepted a forced cancellation of this job a moment ago, so that it is
+   * still stopping the job's boards. `job` is a job as the adapter describes it.
+   */
+  function beingStopped(job) {
+    return job !== null && job.status === 'CANCELED' && job.forceCanceled === true &&
+      Number.isFinite(job.lastUpdatedAt) && now() - job.lastUpdatedAt < STOPPING_MS;
+  }
+
+  /**
+   * The unfinished updates on these boards, as [{ thing, deployment }], leaving out the
+   * deployment `except`. Decided by what AWS holds, never by what a board reports:
+   *
+   *   - every execution of a board that is queued or in progress, whichever tool
+   *     created its job, and
+   *   - every deployment of this console that is not over and names the board but has
+   *     no execution for it yet. AWS creates the executions of a job shortly after the
+   *     job; until then the board is queued by definition, and a check of the
+   *     executions alone would miss a deployment made a moment ago.
+   */
+  async function unfinishedOn(things, except = null) {
+    const listed = await mapLimit(things, MAX_IN_FLIGHT, (thing) => aws.listJobExecutionsForThing(thing));
+    const busy = [];
+    const rolledOut = new Set();   // "job thing" for every execution that exists
+    things.forEach((thing, index) => {
+      for (const execution of listed[index]) {
+        if (typeof execution.jobId !== 'string' || !ANY_JOB_ID.test(execution.jobId)) continue;
+        rolledOut.add(`${execution.jobId} ${thing}`);
+        if (execution.jobId !== except && isActiveExecution(execution.status)) {
+          busy.push({ thing, deployment: execution.jobId });
+        }
+      }
+    });
+    const open = (await listedJobs({ fresh: true })).filter((job) =>
+      job.jobId !== except && (job.status === 'IN_PROGRESS' || job.status === 'SCHEDULED'));
+    const summaries = await mapLimit(open, MAX_IN_FLIGHT, (job) => summaryOf(job.jobId));
+    for (const summary of summaries) {
+      if (summary === null) continue;
+      for (const thing of things) {
+        if (summary.things.includes(thing) && !rolledOut.has(`${summary.id} ${thing}`)) {
+          busy.push({ thing, deployment: summary.id });
+        }
+      }
+    }
+    return busy.sort((a, b) => (a.thing === b.thing
+      ? (a.deployment < b.deployment ? -1 : 1)
+      : (a.thing < b.thing ? -1 : 1)));
+  }
+
+  /**
+   * Of the unfinished updates on these boards, those that the deployment `id`, which
+   * was created a moment ago, has to give way to.
+   *
+   * Two requests for the same board at the same moment both find it free, and each
+   * creates its job before it can see the other's. Each therefore looks again once its
+   * job exists, and of two deployments the one AWS created later gives way: it was
+   * created when the other existed, so it is the one that is sure to see both. A job
+   * of another tool does not look out for this console, so a deployment always gives
+   * way to it.
+   */
+  async function rivalsOf(id, things) {
+    const others = await unfinishedOn(things, id);
+    if (others.length === 0) return [];
+    const own = await summaryOf(id);
+    const first = new Map();   // deployment -> whether it comes before this one
+    for (const deployment of new Set(others.map((item) => item.deployment))) {
+      if (parseJobId(deployment) === null || own === null) {
+        first.set(deployment, true);
+      } else {
+        const other = await summaryOf(deployment);
+        // Gone in the meantime: nothing to give way to.
+        first.set(deployment, other !== null && createdBefore(other, own));
+      }
+    }
+    return others.filter((item) => first.get(item.deployment));
+  }
+
+  /**
    * Cancel, with force, every deployment of a version that is not over. Used when a
    * release is revoked. One job that cannot be cancelled does not stop the others.
+   *
+   * Returns { cancelled, failed }: the deployments this call cancelled, and those
+   * with a board that could not be confirmed as stopped.
+   *
+   * AWS documents what a forced cancellation does to a job that is in progress: its
+   * boards are stopped, a few seconds later, and a board looks at its job once more
+   * before it installs. So a job that was in progress counts as cancelled when AWS
+   * accepted the call.
+   *
+   * AWS does not document what a second cancellation does to a job that is cancelled
+   * already and still has a board waiting or at work. Measured in October 2026, it
+   * accepts a forced one and stops the board 5 to 15 seconds later; it could also
+   * refuse it, or accept it and change nothing. For such a job, and whenever AWS
+   * refuses, only the executions say whether the boards were stopped, so they are
+   * read again after the call. A job
+   * with a board that is still open then counts as failed, never as cancelled. That
+   * also holds for a job that someone cancelled with force a few seconds ago and
+   * that AWS is still stopping: it cannot be told apart, and asking again later
+   * settles it.
    */
   async function cancelUnfinished(version, comment) {
     const jobs = (await listedJobs({ fresh: true }))
@@ -197,16 +380,28 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
     await mapLimit(jobs, MAX_IN_FLIGHT, async (job) => {
       try {
         if (job.status === 'COMPLETED' || job.status === 'DELETION_IN_PROGRESS') return;
-        if (job.status === 'CANCELED') {
-          // Cancelled without force, a job can still have boards that had started.
-          const summary = summarizeJob(await aws.describeJob(job.jobId));
-          if (summary === null || summary.counts.inProgress === 0) return;
-        }
+        const cancelledBefore = job.status === 'CANCELED';
+        if (cancelledBefore && (await openExecutions(job.jobId)).length === 0) return;
+
         const result = await aws.cancelJob({
           jobId: job.jobId, force: true, reasonCode: 'RELEASE_REVOKED', comment,
         });
         forget(job.jobId);
-        if (result.ok) cancelled.push(job.jobId);
+        if (!result.ok && result.reason === 'not_found') return;
+        if (result.ok && !cancelledBefore) {
+          cancelled.push(job.jobId);
+          return;
+        }
+        const [after, left] = await Promise.all([aws.describeJob(job.jobId), openExecutions(job.jobId)]);
+        if ((after === null || OVER.includes(after.status)) && left.length === 0) {
+          if (result.ok) cancelled.push(job.jobId);
+          return;
+        }
+        failed.push(job.jobId);
+        log({
+          level: 'error', event: 'cancel_unconfirmed', deployment: job.jobId, accepted: result.ok,
+          open: left.length, atWork: running(left),
+        });
       } catch (error) {
         failed.push(job.jobId);
         log({ level: 'error', event: 'cancel_failed', deployment: job.jobId, error: describeError(error) });
@@ -260,18 +455,8 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
           : `These are not registered boards: ${strangers.join(', ')}.`);
       }
 
-      // Decided by the executions AWS holds, never by what a board reports.
-      const busy = (await mapLimit(things, MAX_IN_FLIGHT, async (thing) =>
-        (await aws.listJobExecutionsForThing(thing))
-          .filter((execution) => isActiveExecution(execution.status) &&
-            typeof execution.jobId === 'string' && ANY_JOB_ID.test(execution.jobId))
-          .map((execution) => ({ thing, deployment: execution.jobId })))).flat();
-      if (busy.length > 0) {
-        const names = [...new Set(busy.map((item) => item.thing))];
-        const who = names.length === 1 ? `${names[0]} still has` : `${names.length} boards still have`;
-        throw conflict('device_busy',
-          `${who} an update that is not finished. Wait for it or cancel it first.`, busy);
-      }
+      const busy = await unfinishedOn(things);
+      if (busy.length > 0) throw deviceBusy(busy);
 
       const document = buildJobDocument({
         version: release.version, size: release.size, sha256: release.sha256,
@@ -292,6 +477,14 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
           throw unprocessable('unknown_device', 'One of the chosen boards is no longer registered.');
         } else if (created.reason !== 'exists') {
           throw new Error(`The job could not be created: ${String(created.reason)}`);
+        } else {
+          // The id is taken. Either by another job, and another id is drawn; or by
+          // this very request: a call whose answer got lost is sent again, and the
+          // second attempt then finds the job that the first one made.
+          const taken = await aws.describeJob(candidate);
+          if (taken !== null && taken.description === description && sameThings(taken.things ?? [], things)) {
+            id = candidate;
+          }
         }
       }
       if (id === null) throw new Error('No free job id after three attempts');
@@ -309,8 +502,27 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
       }
       if (current === null || current.status !== 'active') {
         await aws.cancelJob({ jobId: id, force: true, reasonCode: 'RELEASE_REVOKED', comment: actor.sub });
+        forget(id);
         throw conflict('release_revoked',
           `Release ${version.text} was revoked just now; the deployment was cancelled.`);
+      }
+
+      // Another deployment to one of these boards may have been created in the same
+      // moment: neither request could see the other's job when it checked. Look again
+      // now that this job exists, and withdraw it if it is the one to give way.
+      let rivals = [];
+      try {
+        rivals = await rivalsOf(id, things);
+      } catch (error) {
+        // The boards were free a moment ago; this second look only narrows a race.
+        warn('busy_recheck_failed', { deployment: id }, error);
+      }
+      // The lists were read for a decision; the next reader gets fresh ones.
+      forget(id);
+      if (rivals.length > 0) {
+        await aws.cancelJob({ jobId: id, force: true, reasonCode: 'DEVICE_BUSY', comment: actor.sub });
+        forget(id);
+        throw deviceBusy(rivals, true);
       }
 
       // The job exists from here on, so the answer is 201 even if it cannot be read
@@ -340,12 +552,23 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
       const force = requireBoolean(field(json(), 'force'), 'force', false);
       entry.detail.force = String(force);
 
-      const summary = summarizeJob(await aws.describeJob(job.id));
+      const described = await aws.describeJob(job.id);
+      const summary = summarizeJob(described);
       if (summary === null) throw unknownDeployment();
       if (summary.status === 'COMPLETED' || summary.status === 'DELETION_IN_PROGRESS') throw alreadyFinished();
-      // A deployment cancelled without force can still have boards that had started.
-      // Only a forced cancel reaches those.
-      if (summary.status === 'CANCELED' && !(force && summary.counts.inProgress > 0)) throw alreadyFinished();
+      if (summary.status === 'CANCELED') {
+        // Whether anything is left of a cancelled deployment is read from its
+        // executions. What can be left: boards that AWS has yet to take the offer
+        // from or to stop, which it does a few seconds after a cancellation, and
+        // boards that had started when the deployment was cancelled without force.
+        // Only for the last is there something to ask of AWS, and only with force.
+        const open = await openExecutions(job.id);
+        if (open.length === 0) throw alreadyFinished();
+        const stopping = beingStopped(described);
+        if (stopping || running(open) === 0 || !force) {
+          throw alreadyCancelled(open, { forced: described.forceCanceled === true, stopping });
+        }
+      }
 
       const result = await aws.cancelJob({
         jobId: job.id, force, reasonCode: 'CONSOLE_CANCEL', comment: actor.sub,
@@ -354,7 +577,17 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
       if (!result.ok) {
         if (result.reason === 'not_found') throw unknownDeployment();
         warn('cancel_refused', { deployment: job.id }, new Error(String(result.detail ?? '')));
-        throw alreadyFinished();
+        // AWS has the last word. What it left behind is said as it is: a refusal only
+        // means that there was nothing to cancel if the job is over and no board is
+        // waiting or at work.
+        const [after, left] = await Promise.all([aws.describeJob(job.id), openExecutions(job.id)]);
+        if (after === null) throw unknownDeployment();
+        if (OVER.includes(after.status) && left.length === 0) throw alreadyFinished();
+        // Somebody else cancelled it with force in this very moment.
+        if (summary.status !== 'CANCELED' && beingStopped(after)) {
+          throw alreadyCancelled(left, { forced: true, stopping: true });
+        }
+        throw cancelRefused(left);
       }
 
       // Cancelling is eventually consistent: answer with what AWS says after the call.
@@ -367,6 +600,15 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
         throw error;
       }
       if (detail === null) throw unknownDeployment();
+      if (summary.status === 'CANCELED' && detail.counts.inProgress > 0) {
+        // AWS accepted a second cancellation, which is where it documents nothing, and
+        // the board is still listed as at work. It may be stopped in a few seconds or
+        // not at all; the answer shows it as it is, and the log keeps the case.
+        log({
+          level: 'warn', event: 'cancel_unconfirmed', deployment: job.id, accepted: true,
+          atWork: detail.counts.inProgress,
+        });
+      }
       return { body: { deployment: detail } };
     },
   };

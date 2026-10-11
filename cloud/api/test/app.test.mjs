@@ -8,7 +8,9 @@ import { test } from 'node:test';
 import { createApp } from '../src/app.mjs';
 import { loadConfig } from '../src/config.mjs';
 import { HttpError, describeError, errorCode, errorResponse, json } from '../src/http.mjs';
-import { accessClaims, apiEvent, awsError, createFakeAws, createTestConsole, fakeEnv, fixture } from './fake-aws.mjs';
+import {
+  accessClaims, apiEvent, awsError, createFakeAws, createTestConsole, fakeEnv, fixture, manualTimers,
+} from './fake-aws.mjs';
 
 const BOARD = 'cranium-00000000000000aa';
 const HEADERS = {
@@ -17,12 +19,24 @@ const HEADERS = {
   'x-content-type-options': 'nosniff',
 };
 
-function setup() {
-  const console_ = createTestConsole();
+function setup(options) {
+  const console_ = createTestConsole(options);
   console_.fake.addThing(BOARD);
   const manager = console_.addUser('manager', ['release-managers']);
   const viewer = console_.addUser('viewer', ['viewers']);
   return { ...console_, manager, viewer };
+}
+
+/** Let everything that can go on without a timer or an answer from outside go on. */
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+/** A promise and the function that fulfils it. */
+function deferred() {
+  let resolve;
+  const promise = new Promise((fulfil) => {
+    resolve = fulfil;
+  });
+  return { promise, resolve };
 }
 
 const uploadBody = () => ({
@@ -166,6 +180,194 @@ test('each request is logged once, without bodies, tokens or addresses', async (
   await context.call('GET', '/api/devices', { as: viewer });
   fake.listGroupThings = original;
   assert.equal(logs[0].duration, 137);
+});
+
+test('a write that runs out of time is answered and recorded, and goes no further', async () => {
+  const timers = manualTimers();
+  const context = setup({ timers });
+  const { fake, manager, logs, clock } = context;
+  assert.equal((await context.call('POST', '/api/firmware', { as: manager, body: uploadBody() })).status, 201);
+  // A request that finishes in time leaves no timer behind.
+  assert.deepEqual(timers.waiting(), []);
+
+  // AWS does not answer the call that creates the job.
+  const answer = deferred();
+  const createJob = fake.createJob;
+  fake.createJob = () => answer.promise;
+  fake.calls.length = 0;
+  logs.length = 0;
+  const pending = context.call('POST', '/api/deployments',
+    { as: manager, body: { version: '1.2.3+4', things: [BOARD] }, requestId: 'req-slow' });
+  await settle();
+  // The request has 16 of the function's 20 seconds.
+  assert.deepEqual(timers.waiting(), [16000]);
+  assert.equal(fake.auditLog().length, 1);
+
+  clock.ms += 16000;
+  timers.expire();
+  const response = await pending;
+  assert.equal(response.status, 500);
+  assert.deepEqual(response.body, {
+    error: {
+      code: 'timeout',
+      message: 'The server ran out of time. The change may have been made in part or in full: ' +
+        'check the result before you repeat it.',
+      requestId: 'req-slow',
+    },
+  });
+
+  // One entry, with what was known when the time ran out.
+  const entries = fake.auditLog();
+  assert.equal(entries.length, 2);
+  const entry = entries.at(-1);
+  assert.deepEqual([entry.action, entry.outcome, entry.target, entry.requestId],
+    ['deployment.create', 'error', '1.2.3+4', 'req-slow']);
+  assert.deepEqual(entry.detail, { version: '1.2.3+4', things: '1', code: 'timeout' });
+  assert.deepEqual(entry.actor, { sub: manager.sub, email: manager.email });
+  // And the two log lines: what happened, and the line every request gets.
+  assert.deepEqual(logs, [
+    { level: 'error', event: 'request_timed_out', requestId: 'req-slow', budget: 16000 },
+    { requestId: 'req-slow', sub: manager.sub, method: 'POST', route: 'POST /api/deployments', status: 500, duration: 16000 },
+  ]);
+
+  // AWS answers after all: the job exists. The request was given up, so nothing it
+  // would have done next reaches AWS, and nothing more is written to the log.
+  const sent = fake.calls.length;
+  fake.createJob = createJob;
+  answer.resolve({ ok: true });
+  await settle();
+  await settle();
+  assert.equal(fake.calls.length, sent);
+  assert.equal(fake.auditLog().length, 2);
+  assert.ok(logs.slice(2).every((line) => line.level === 'warn'));
+  assert.ok(logs.slice(2).every((line) => line.error.includes('the request had run out of time')));
+
+  // The next request is served as usual.
+  logs.length = 0;
+  const next = await context.call('GET', '/api/deployments', { as: manager });
+  assert.equal(next.status, 200);
+  assert.deepEqual(timers.waiting(), []);
+});
+
+test('a read that runs out of time is answered and logged', async () => {
+  const timers = manualTimers();
+  const context = setup({ timers });
+  const { fake, viewer, logs } = context;
+  const listGroupThings = fake.listGroupThings;
+  fake.listGroupThings = () => new Promise(() => {});
+  const pending = context.call('GET', '/api/devices', { as: viewer, requestId: 'req-read' });
+  await settle();
+  timers.expire();
+  const response = await pending;
+  fake.listGroupThings = listGroupThings;
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(response.headers, HEADERS);
+  assert.deepEqual(response.body, {
+    error: { code: 'timeout', message: 'The server ran out of time. Try again in a moment.', requestId: 'req-read' },
+  });
+  assert.deepEqual(logs.map((line) => [line.event ?? 'request', line.requestId, line.status ?? null]),
+    [['request_timed_out', 'req-read', null], ['request', 'req-read', 500]]);
+  assert.equal(fake.auditLog().length, 0);
+});
+
+test('the time a request has follows what Lambda has left', async () => {
+  const timers = manualTimers();
+  const context = setup({ timers });
+  const { fake, viewer, manager } = context;
+  const listGroupThings = fake.listGroupThings;
+  fake.listGroupThings = () => new Promise(() => {});
+  const budgetWith = async (invocation) => {
+    const pending = context.call('GET', '/api/devices', { as: viewer, invocation });
+    await settle();
+    const [budget] = timers.waiting();
+    timers.expire();
+    await pending;
+    return budget;
+  };
+  const left = (ms) => ({ getRemainingTimeInMillis: () => ms });
+  // Four seconds are kept for the record; never more than 16 for the work.
+  assert.equal(await budgetWith(left(20000)), 16000);
+  assert.equal(await budgetWith(left(19850)), 15850);
+  assert.equal(await budgetWith(left(9000)), 5000);
+  assert.equal(await budgetWith(left(900000)), 16000);
+  // Without usable word from Lambda: the fixed budget.
+  for (const invocation of [undefined, null, {}, { getRemainingTimeInMillis: 5 }, left('soon'), left(NaN)]) {
+    assert.equal(await budgetWith(invocation), 16000);
+  }
+  fake.listGroupThings = listGroupThings;
+
+  // With no time left for the work it is not begun, and a write is still on record.
+  fake.calls.length = 0;
+  const late = await context.call('POST', '/api/deployments',
+    { as: manager, body: { version: '1.2.3+4', things: [BOARD] }, invocation: left(3000) });
+  assert.equal(late.status, 500);
+  assert.equal(late.body.error.code, 'timeout');
+  assert.deepEqual(fake.methodsCalled(), ['putAudit']);
+  const entry = fake.auditLog().at(-1);
+  assert.deepEqual([entry.action, entry.outcome, entry.target, entry.detail, entry.actor],
+    ['deployment.create', 'error', '', { code: 'timeout' }, { sub: manager.sub, email: '' }]);
+  assert.deepEqual(timers.waiting(), []);
+});
+
+test('a request that has run out of time cannot change anything afterwards', async () => {
+  const timers = manualTimers();
+  const context = setup({ timers });
+  const { fake, manager } = context;
+  assert.equal((await context.call('POST', '/api/firmware', { as: manager, body: uploadBody() })).status, 201);
+  const created = await context.call('POST', '/api/deployments', { as: manager, body: { version: '1.2.3+4', things: [BOARD] } });
+  const jobId = created.body.deployment.id;
+
+  // Revoking: the mark is written, then the tag gets no answer.
+  const answer = deferred();
+  const tag = fake.tagFirmwareRevoked;
+  fake.tagFirmwareRevoked = () => answer.promise;
+  const pending = context.call('POST', '/api/firmware/1.2.3+4/revoke', { as: manager, body: { reason: 'bad build' } });
+  await settle();
+  timers.expire();
+  const response = await pending;
+  assert.equal(response.status, 500);
+  assert.equal(response.body.error.code, 'timeout');
+  const entry = fake.auditLog().at(-1);
+  assert.deepEqual([entry.action, entry.outcome, entry.target, entry.detail],
+    ['firmware.revoke', 'error', '1.2.3+4', { reason: 'bad build', code: 'timeout' }]);
+
+  // The answer to the tag arrives late. The cancellation that would have followed is
+  // not sent: the deployment is as it was, and the record says what is outstanding.
+  fake.tagFirmwareRevoked = tag;
+  answer.resolve({ ok: true });
+  await settle();
+  await settle();
+  assert.equal(fake.jobs.get(jobId).status, 'IN_PROGRESS');
+  assert.ok(!fake.methodsCalled().includes('cancelJob'));
+  assert.ok(!fake.methodsCalled().includes('markRevocationEnforced'));
+  const release = (await context.call('GET', '/api/firmware/1.2.3+4', { as: manager })).body.release;
+  assert.deepEqual([release.status, release.revoked.enforcedAt], ['revoked', null]);
+
+  // Revoking again completes it.
+  const again = await context.call('POST', '/api/firmware/1.2.3+4/revoke', { as: manager, body: { reason: 'finish it' } });
+  assert.equal(again.status, 200);
+  assert.deepEqual(again.body.cancelled, [jobId]);
+  assert.equal(fake.jobs.get(jobId).status, 'CANCELED');
+  assert.ok(again.body.release.revoked.enforcedAt !== null);
+
+  // Requests are told apart: one that ran out of time does not hold up another that
+  // is under way at the same moment.
+  const slow = deferred();
+  const listGroupThings = fake.listGroupThings;
+  let calls = 0;
+  fake.listGroupThings = () => {
+    calls += 1;
+    return calls === 1 ? slow.promise : listGroupThings();
+  };
+  const first = context.call('GET', '/api/devices', { as: manager });
+  await settle();
+  timers.expire();
+  assert.equal((await first).status, 500);
+  const second = await context.call('GET', '/api/devices', { as: manager });
+  fake.listGroupThings = listGroupThings;
+  assert.equal(second.status, 200);
+  assert.equal(second.body.devices.length, 1);
 });
 
 test('the request id comes from the gateway, or is made up if it is unusable', async () => {

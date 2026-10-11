@@ -514,17 +514,29 @@ test('stored records are read defensively', () => {
   for (const status of ['revoked', 'ACTIVE', '', null, undefined, true]) {
     const release = releaseFromItem({ ...item, status });
     assert.equal(release.status, 'revoked', String(status));
-    assert.deepEqual(release.revoked, { by: { sub: '', email: '' }, at: item.uploadedAt, reason: '' });
+    assert.deepEqual(release.revoked,
+      { by: { sub: '', email: '' }, at: item.uploadedAt, reason: '', enforcedAt: null });
   }
+  // A revocation is complete only if the record says when, in the form this API writes.
+  const revoked = { by: { sub: 's', email: 'e' }, at: '2026-10-11T08:00:00.000Z', reason: 'bad build' };
+  const mark = (enforcedAt) => releaseFromItem({ ...item, status: 'revoked', revoked: { ...revoked, enforcedAt } });
+  assert.deepEqual(mark('2026-10-11T08:00:01.250Z').revoked, { ...revoked, enforcedAt: '2026-10-11T08:00:01.250Z' });
+  for (const value of [undefined, null, '', 'yes', true, 1, '2026-10-11', '2026-10-11T08:00:01Z', ['2026-10-11T08:00:01.250Z'],
+    '2026-10-11T08:00:01.250Z\n']) {
+    assert.equal(mark(value).revoked.enforcedAt, null, String(value));
+  }
+  assert.equal(releaseFromItem({ ...item, revoked: { ...revoked, enforcedAt: '2026-10-11T08:00:01.250Z' } }).revoked, null);
   assert.equal(objectKey('ab'.repeat(32)), `firmware/${'ab'.repeat(32)}.bin`);
   for (const digest of ['../secret', 'AB'.repeat(32), 'ab'.repeat(31), null]) {
     assert.throws(() => objectKey(digest), TypeError);
   }
 });
 
-/** A console with one release of each fixture version and two boards. */
-async function withReleases() {
-  const context = setup();
+const RELEASE_KEY = '001.002.00003.0000000004';
+
+/** A console with release 1.2.3+4 and two boards. */
+async function withReleases(options) {
+  const context = setup(options);
   context.fake.addThing(THING);
   context.fake.addThing(OTHER_THING);
   assert.equal((await context.upload(fixture('valid-1.2.3+4.signed.bin'))).status, 201);
@@ -536,6 +548,9 @@ async function withReleases() {
   };
   context.revoke = (version, body = { reason: 'bad build' }) =>
     context.call('POST', `/api/firmware/${version}/revoke`, { as: context.manager, body });
+  /** The release as the API lists it. */
+  context.listed = async (version = '1.2.3+4') =>
+    (await context.call('GET', `/api/firmware/${version}`, { as: context.viewer })).body.release;
   return context;
 }
 
@@ -555,15 +570,15 @@ test('revoking marks the record, then blocks the image, then cancels deployments
     by: { sub: manager.sub, email: manager.email },
     at: new Date(clock.ms).toISOString(),
     reason: 'bricks the encoder',
+    enforcedAt: new Date(clock.ms).toISOString(),
   });
 
-  // The order of the three steps.
-  const order = fake.methodsCalled().filter((name) =>
-    ['markReleaseRevoked', 'tagFirmwareRevoked', 'listJobs', 'cancelJob', 'putAudit'].includes(name));
-  assert.deepEqual(order, ['markReleaseRevoked', 'tagFirmwareRevoked', 'listJobs', 'cancelJob', 'putAudit']);
+  // The order of the steps: the three that revoke, then the record that they are done.
+  const steps = ['markReleaseRevoked', 'tagFirmwareRevoked', 'listJobs', 'cancelJob', 'markRevocationEnforced', 'putAudit'];
+  assert.deepEqual(fake.methodsCalled().filter((name) => steps.includes(name)), steps);
 
   // 1. the record
-  assert.equal(fake.releases.get('001.002.00003.0000000004').status, 'revoked');
+  assert.equal(fake.releases.get(RELEASE_KEY).status, 'revoked');
   // 2. the object: tagged, so the bucket policy stops serving it
   assert.deepEqual(fake.objects.get(`firmware/${sha256(image)}.bin`).tags, { revoked: 'true' });
   // 3. the deployment: cancelled with force, so the board that had started stops too
@@ -580,8 +595,10 @@ test('revoking marks the record, then blocks the image, then cancels deployments
   assert.equal(deploy.body.error.code, 'release_revoked');
   assert.equal(fake.jobs.size, 1);
 
-  const listed = await context.call('GET', '/api/firmware/1.2.3+4', { as: manager });
-  assert.equal(listed.body.release.status, 'revoked');
+  // 4. the release as everybody sees it afterwards is the one the request answered with
+  assert.deepEqual(await context.listed(), response.body.release);
+  const all = await context.call('GET', '/api/firmware', { as: manager });
+  assert.deepEqual(all.body.releases, [response.body.release]);
 });
 
 test('revoking cancels only unfinished deployments of that version', async () => {
@@ -596,11 +613,14 @@ test('revoking cancels only unfinished deployments of that version', async () =>
   // Cancelled before any board started.
   const cancelled = await context.deploy('1.2.3+4', [THING]);
   await context.call('POST', `/api/deployments/${cancelled}/cancel`, { as: context.manager, body: { force: false } });
-  // Cancelled without force while a board was already downloading.
-  const halfCancelled = await context.deploy('1.2.3+4', [THING]);
-  fake.execution(halfCancelled, THING).update('IN_PROGRESS', { step: 'downloading' });
-  await context.call('POST', `/api/deployments/${halfCancelled}/cancel`, { as: context.manager, body: { force: false } });
-  assert.equal(fake.execution(halfCancelled, THING).get().status, 'IN_PROGRESS');
+  // Cancelled without force while a board was downloading, which then gave up.
+  const stopped = await context.deploy('1.2.3+4', [THING]);
+  fake.execution(stopped, THING).update('IN_PROGRESS', { step: 'downloading' });
+  await context.call('POST', `/api/deployments/${stopped}/cancel`, { as: context.manager, body: { force: false } });
+  fake.execution(stopped, THING).update('FAILED', { reason: 'download_failed' });
+  // A board at work.
+  const working = await context.deploy('1.2.3+4', [THING]);
+  fake.execution(working, THING).update('IN_PROGRESS', { step: 'downloading' });
   // Waiting on another board.
   const waiting = await context.deploy('1.2.3+4', [OTHER_THING]);
   // A deployment of another version, on a third board.
@@ -609,44 +629,254 @@ test('revoking cancels only unfinished deployments of that version', async () =>
   const otherVersion = await context.deploy('1.2.3+5', [third]);
   // A job some other tool created on the same account.
   await fake.createJob({
-    jobId: 'factory-test-7', things: [OTHER_THING], document: '{}', description: 'not ours',
+    jobId: 'factory-test-7', things: [third], document: '{}', description: 'not ours',
     urlExpiresInSec: 600, inProgressTimeoutMinutes: 30,
   });
   fake.calls.length = 0;
 
   const response = await context.revoke('1.2.3+4');
   assert.equal(response.status, 200);
-  assert.deepEqual(response.body.cancelled, [halfCancelled, waiting].sort());
-  assert.equal(fake.execution(halfCancelled, THING).get().status, 'CANCELED');
+  assert.deepEqual(response.body.cancelled, [working, waiting].sort());
+  assert.equal(fake.execution(working, THING).get().status, 'CANCELED');
   assert.equal(fake.execution(waiting, OTHER_THING).get().status, 'CANCELED');
   assert.equal(fake.execution(finished, THING).get().status, 'SUCCEEDED');
+  assert.equal(fake.execution(stopped, THING).get().status, 'FAILED');
   assert.equal(fake.jobs.get('factory-test-7').status, 'IN_PROGRESS');
   assert.equal(fake.jobs.get(otherVersion).status, 'IN_PROGRESS');
   assert.equal(fake.execution(otherVersion, third).get().status, 'QUEUED');
   assert.deepEqual(fake.calls.filter((entry) => entry.method === 'cancelJob').map((entry) => entry.args[0].jobId).sort(),
-    [halfCancelled, waiting].sort());
+    [working, waiting].sort());
   for (const call of fake.calls.filter((entry) => entry.method === 'cancelJob')) {
     assert.equal(call.args[0].force, true);
     assert.equal(call.args[0].reasonCode, 'RELEASE_REVOKED');
   }
+  // Whether a cancelled job still has a board is read from its executions, and only
+  // for the jobs of this version that were cancelled before.
+  assert.deepEqual(fake.calls.filter((entry) => entry.method === 'listJobExecutionsForJob').map((entry) => entry.args[0]).sort(),
+    [cancelled, stopped].sort());
+  assert.ok(!fake.methodsCalled().includes('describeJob'));
   const entry = fake.auditLog().at(-1);
   assert.equal(entry.action, 'firmware.revoke');
   assert.equal(entry.outcome, 'ok');
   assert.deepEqual(entry.detail, { reason: 'bad build', cancelled: '2' });
+  assert.ok((await context.listed()).revoked.enforcedAt !== null);
+});
+
+// A job that was cancelled without force keeps the board that had started. AWS does not
+// document what a second, forced cancellation does to such a job. Whatever it does, a
+// revocation is complete only when no board is left that could install the image.
+
+/** Release 1.2.3+4 with a deployment that was cancelled without force while a board was downloading. */
+async function withBoardAtWork(repeatedCancel) {
+  const context = await withReleases({ repeatedCancel });
+  const { fake } = context;
+  const jobId = await context.deploy('1.2.3+4', [THING, OTHER_THING]);
+  fake.execution(jobId, THING).update('IN_PROGRESS', { step: 'downloading' });
+  const plain = await context.call('POST', `/api/deployments/${jobId}/cancel`, { as: context.manager, body: { force: false } });
+  assert.equal(plain.status, 200);
+  assert.equal(fake.jobs.get(jobId).status, 'CANCELED');
+  assert.equal(fake.execution(jobId, THING).get().status, 'IN_PROGRESS');
+  context.advance(3000);
+  fake.calls.length = 0;
+  return { ...context, jobId };
+}
+
+for (const repeatedCancel of ['refused', 'ignored']) {
+  test(`a revocation is not complete while a board is at work that AWS did not stop (second cancellation ${repeatedCancel})`, async () => {
+    const context = await withBoardAtWork(repeatedCancel);
+    const { fake, jobId, logs } = context;
+    const image = fixture('valid-1.2.3+4.signed.bin');
+
+    const first = await context.revoke('1.2.3+4');
+    assert.equal(first.status, 500);
+    assert.equal(first.body.error.code, 'revoke_incomplete');
+    assert.ok(first.body.error.message.includes(jobId));
+    assert.match(first.body.error.message, /could not be confirmed as stopped/);
+    // The forced cancellation was tried, and then the executions were read again.
+    const order = fake.methodsCalled().filter((name) => ['cancelJob', 'listJobExecutionsForJob'].includes(name));
+    assert.deepEqual(order, ['listJobExecutionsForJob', 'cancelJob', 'listJobExecutionsForJob']);
+    assert.deepEqual(fake.calls.find((call) => call.method === 'cancelJob').args[0].force, true);
+    assert.ok(!fake.methodsCalled().includes('markRevocationEnforced'));
+
+    // What is true afterwards: revoked, the image blocked, the board still at work,
+    // and nothing on record that says the revocation is complete.
+    assert.equal(fake.execution(jobId, THING).get().status, 'IN_PROGRESS');
+    assert.deepEqual(fake.objects.get(`firmware/${sha256(image)}.bin`).tags, { revoked: 'true' });
+    const pending = await context.listed();
+    assert.equal(pending.status, 'revoked');
+    assert.equal(pending.revoked.enforcedAt, null);
+    const entry = fake.auditLog().at(-1);
+    assert.deepEqual([entry.action, entry.outcome, entry.detail],
+      ['firmware.revoke', 'error', { reason: 'bad build', cancelled: '0', incomplete: 'cancel', code: 'revoke_incomplete' }]);
+    const line = logs.find((item) => item.event === 'cancel_unconfirmed');
+    assert.deepEqual([line.level, line.deployment, line.accepted, line.open, line.atWork],
+      ['error', jobId, repeatedCancel === 'ignored', 1, 1]);
+
+    // Asking again while the board is at work changes nothing.
+    context.advance(5000);
+    const second = await context.revoke('1.2.3+4');
+    assert.equal(second.status, 500);
+    assert.equal(second.body.error.code, 'revoke_incomplete');
+    assert.equal((await context.listed()).revoked.enforcedAt, null);
+
+    // The board cannot fetch the blocked image and gives up. Now nothing is left, and
+    // asking again completes the revocation: 200, with the time it was completed.
+    fake.execution(jobId, THING).update('FAILED', { reason: 'download_failed' });
+    context.advance(5000);
+    fake.calls.length = 0;
+    const third = await context.revoke('1.2.3+4', { reason: 'once more' });
+    assert.equal(third.status, 200);
+    assert.deepEqual(third.body.cancelled, []);
+    assert.equal(third.body.release.revoked.enforcedAt, new Date(context.clock.ms).toISOString());
+    // The revocation itself is the first one: who, when and why do not change.
+    assert.equal(third.body.release.revoked.reason, 'bad build');
+    assert.equal(third.body.release.revoked.at, pending.revoked.at);
+    assert.equal(fake.calls.filter((call) => call.method === 'cancelJob').length, 0);
+    assert.deepEqual(await context.listed(), third.body.release);
+    const done = fake.auditLog().at(-1);
+    assert.deepEqual([done.outcome, done.detail], ['ok', { cancelled: '0', resumed: 'true' }]);
+  });
+}
+
+test('a board at work on a cancelled deployment is stopped if AWS accepts the second cancellation', async () => {
+  const context = await withBoardAtWork('accepted');
+  const { fake, jobId } = context;
+
+  const response = await context.revoke('1.2.3+4');
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.cancelled, [jobId]);
+  assert.equal(fake.execution(jobId, THING).get().status, 'CANCELED');
+  assert.equal(fake.execution(jobId, THING).update('IN_PROGRESS', { step: 'rebooting' }).accepted, false);
+  assert.ok(response.body.release.revoked.enforcedAt !== null);
+  // Accepted is not taken for done: the executions were read again after the call.
+  const order = fake.methodsCalled().filter((name) => ['cancelJob', 'listJobExecutionsForJob'].includes(name));
+  assert.deepEqual(order, ['listJobExecutionsForJob', 'cancelJob', 'listJobExecutionsForJob']);
+});
+
+test('a revocation counts the forced cancellation AWS accepted, though the board stops a few seconds later', async () => {
+  // As measured on AWS IoT: a forced cancellation reaches the executions 5 to 15 s
+  // after AWS accepted it.
+  const context = await withReleases({ cancelDelayMs: 10_000 });
+  const { fake } = context;
+  const jobId = await context.deploy('1.2.3+4', [THING]);
+  fake.execution(jobId, THING).update('IN_PROGRESS', { step: 'downloading' });
+
+  const response = await context.revoke('1.2.3+4');
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.cancelled, [jobId]);
+  assert.ok(response.body.release.revoked.enforcedAt !== null);
+  // The job is cancelled with force; the board follows when AWS gets to it.
+  assert.deepEqual([fake.jobs.get(jobId).status, fake.jobs.get(jobId).forceCanceled], ['CANCELED', true]);
+  assert.equal(fake.execution(jobId, THING).get().status, 'IN_PROGRESS');
+  context.advance(10_000);
+  assert.equal(fake.execution(jobId, THING).get().status, 'CANCELED');
+
+  // Asked again afterwards, nothing is outstanding.
+  const again = await context.revoke('1.2.3+4');
+  assert.equal(again.status, 409);
+  assert.equal(again.body.error.code, 'already_revoked');
+});
+
+test('revoking again while AWS is still stopping a board cannot confirm that, and says so', async () => {
+  const context = await withReleases({ cancelDelayMs: 10_000 });
+  const { fake } = context;
+  const jobId = await context.deploy('1.2.3+4', [THING]);
+  fake.execution(jobId, THING).update('IN_PROGRESS', { step: 'downloading' });
+  // Cancelled with force by hand, and revoked three seconds later.
+  assert.equal((await context.call('POST', `/api/deployments/${jobId}/cancel`, { as: context.manager, body: { force: true } })).status, 200);
+  context.advance(3000);
+
+  // The job is cancelled and a board is still listed as at work. Whether AWS is about
+  // to stop it cannot be read from that, so the revocation is not called complete.
+  const early = await context.revoke('1.2.3+4');
+  assert.equal(early.status, 500);
+  assert.equal(early.body.error.code, 'revoke_incomplete');
+  assert.equal((await context.listed()).revoked.enforcedAt, null);
+
+  // A few seconds later AWS has stopped the board, and asking again completes it.
+  context.advance(8000);
+  const later = await context.revoke('1.2.3+4');
+  assert.equal(later.status, 200);
+  assert.deepEqual(later.body.cancelled, []);
+  assert.ok(later.body.release.revoked.enforcedAt !== null);
+});
+
+test('a job that AWS refuses to cancel while it is still open counts as not stopped', async () => {
+  const context = await withReleases();
+  const { fake } = context;
+  const jobId = await context.deploy('1.2.3+4', [THING]);
+  const original = fake.cancelJob;
+  fake.cancelJob = async () => ({ ok: false, reason: 'refused', detail: 'not now' });
+
+  const refused = await context.revoke('1.2.3+4');
+  assert.equal(refused.status, 500);
+  assert.equal(refused.body.error.code, 'revoke_incomplete');
+  assert.equal((await context.listed()).revoked.enforcedAt, null);
+
+  // The same before AWS has created the board's execution: the job itself is open.
+  const listed = fake.listJobExecutionsForJob;
+  fake.listJobExecutionsForJob = async () => [];
+  assert.equal((await context.revoke('1.2.3+4')).status, 500);
+  fake.listJobExecutionsForJob = listed;
+
+  // A job that ended on its own between the list and the call is nothing to stop.
+  fake.cancelJob = async (input) => {
+    fake.execution(jobId, THING).update('REJECTED', { reason: 'declined' });
+    return original(input);
+  };
+  const ended = await context.revoke('1.2.3+4');
+  fake.cancelJob = original;
+  assert.equal(ended.status, 200);
+  assert.deepEqual(ended.body.cancelled, []);
+  assert.equal(fake.jobs.get(jobId).status, 'COMPLETED');
+  assert.ok(ended.body.release.revoked.enforcedAt !== null);
 });
 
 test('a release is revoked once', async () => {
   const context = await withReleases();
-  assert.equal((await context.revoke('1.2.3+4')).status, 200);
-  const first = context.fake.releases.get('001.002.00003.0000000004').revoked;
+  const { fake } = context;
+  const jobId = await context.deploy('1.2.3+4', [THING]);
+  const done = await context.revoke('1.2.3+4');
+  assert.equal(done.status, 200);
+  const first = fake.releases.get(RELEASE_KEY).revoked;
+  assert.deepEqual(Object.keys(first).sort(), ['at', 'by', 'enforcedAt', 'reason']);
 
   context.advance(60_000);
+  fake.calls.length = 0;
   const again = await context.revoke('1.2.3+4', { reason: 'another reason' });
   assert.equal(again.status, 409);
   assert.equal(again.body.error.code, 'already_revoked');
-  assert.deepEqual(context.fake.releases.get('001.002.00003.0000000004').revoked, first);
-  assert.equal(context.fake.auditLog().at(-1).outcome, 'rejected');
-  assert.equal(context.fake.auditLog().at(-1).detail.code, 'already_revoked');
+  // Who revoked it, when and why, and when that was completed, all stay as they were.
+  assert.deepEqual(fake.releases.get(RELEASE_KEY).revoked, first);
+  assert.deepEqual(await context.listed(), done.body.release);
+  assert.equal(fake.auditLog().at(-1).outcome, 'rejected');
+  assert.deepEqual(fake.auditLog().at(-1).detail, { cancelled: '0', code: 'already_revoked' });
+  // The steps were gone through again all the same, and found nothing to do.
+  assert.ok(fake.methodsCalled().includes('tagFirmwareRevoked'));
+  assert.equal(fake.calls.filter((call) => call.method === 'cancelJob').length, 0);
+  assert.equal(fake.jobs.get(jobId).status, 'CANCELED');
+});
+
+test('two revocations at the same moment end as one', async () => {
+  const context = await withReleases();
+  const { fake } = context;
+  await context.deploy('1.2.3+4', [THING]);
+  const [one, two] = await Promise.all([
+    context.revoke('1.2.3+4', { reason: 'first reason' }),
+    context.revoke('1.2.3+4', { reason: 'second reason' }),
+  ]);
+  // One of them made the mark. The other finds the release revoked; it answers 200 if
+  // it was the one to record the completion, 409 if that was on record already.
+  assert.ok([one.status, two.status].includes(200));
+  for (const response of [one, two]) assert.ok([200, 409].includes(response.status));
+  const stored = fake.releases.get(RELEASE_KEY).revoked;
+  assert.ok(['first reason', 'second reason'].includes(stored.reason));
+  for (const response of [one, two].filter((item) => item.status === 200)) {
+    assert.deepEqual(response.body.release.revoked, stored);
+  }
+  const marks = fake.auditLog().filter((entry) => entry.action === 'firmware.revoke' && entry.detail.reason !== undefined);
+  assert.equal(marks.length, 1);
+  assert.equal(marks[0].detail.reason, stored.reason);
 });
 
 test('revoking needs a known version and a reason', async () => {
@@ -666,7 +896,7 @@ test('revoking needs a known version and a reason', async () => {
     assert.equal(response.body.error.code, 'invalid_reason');
   }
   assert.equal((await context.revoke('1.2.3+4', '[]')).body.error.code, 'invalid_body');
-  assert.equal(context.fake.releases.get('001.002.00003.0000000004').status, 'active');
+  assert.equal(context.fake.releases.get(RELEASE_KEY).status, 'active');
   assert.ok(!context.fake.methodsCalled().includes('markReleaseRevoked'));
   assert.equal((await context.revoke('1.2.3+4', { reason: 'x'.repeat(200) })).status, 200);
 });
@@ -678,21 +908,66 @@ test('a revocation that was interrupted is completed by asking again', async () 
   const jobId = await context.deploy('1.2.3+4', [THING]);
 
   // The object cannot be tagged: the release is revoked and the job is still
-  // cancelled, but the caller is told that the revocation is not complete.
+  // cancelled, but the caller is told that the revocation is not complete, and the
+  // record does not say that it is.
   fake.failNext('tagFirmwareRevoked');
   const first = await context.revoke('1.2.3+4');
   assert.equal(first.status, 500);
   assert.equal(first.body.error.code, 'revoke_incomplete');
-  assert.equal(fake.releases.get('001.002.00003.0000000004').status, 'revoked');
+  assert.match(first.body.error.message, /its image could not be blocked/);
+  assert.equal(fake.releases.get(RELEASE_KEY).status, 'revoked');
   assert.equal(fake.execution(jobId, THING).get().status, 'CANCELED');
   assert.deepEqual(fake.objects.get(`firmware/${sha256(image)}.bin`).tags, {});
-  assert.equal(fake.auditLog().at(-1).outcome, 'error');
+  assert.ok(!fake.methodsCalled().includes('markRevocationEnforced'));
+  assert.deepEqual([fake.auditLog().at(-1).outcome, fake.auditLog().at(-1).detail],
+    ['error', { reason: 'bad build', cancelled: '1', incomplete: 'tag', code: 'revoke_incomplete' }]);
+  const pending = await context.listed();
+  assert.deepEqual([pending.status, pending.revoked.reason, pending.revoked.enforcedAt], ['revoked', 'bad build', null]);
+  // Every reader sees that work is outstanding, not only the one who got the answer.
+  const all = await context.call('GET', '/api/firmware', { as: context.viewer });
+  assert.equal(all.body.releases[0].revoked.enforcedAt, null);
 
-  // Asking again finishes the job and then says what is true: it was revoked already.
-  const second = await context.revoke('1.2.3+4');
-  assert.equal(second.status, 409);
-  assert.equal(second.body.error.code, 'already_revoked');
+  // Asking again finishes the work. The answer is 200 with the release, because this
+  // request is the one that completed the revocation.
+  context.advance(30_000);
+  const second = await context.revoke('1.2.3+4', { reason: 'finish it' });
+  assert.equal(second.status, 200);
+  assert.deepEqual(second.body.cancelled, []);
   assert.deepEqual(fake.objects.get(`firmware/${sha256(image)}.bin`).tags, { revoked: 'true' });
+  assert.deepEqual(second.body.release.revoked, { ...pending.revoked, enforcedAt: new Date(context.clock.ms).toISOString() });
+  assert.deepEqual(await context.listed(), second.body.release);
+  assert.deepEqual([fake.auditLog().at(-1).outcome, fake.auditLog().at(-1).detail],
+    ['ok', { cancelled: '0', resumed: 'true' }]);
+
+  // From then on it is what it was before these changes: revoked already.
+  const third = await context.revoke('1.2.3+4');
+  assert.equal(third.status, 409);
+  assert.equal(third.body.error.code, 'already_revoked');
+  assert.deepEqual(await context.listed(), second.body.release);
+});
+
+test('a revocation that was cut off after the mark shows as outstanding and can be completed', async () => {
+  const context = await withReleases();
+  const { fake, manager } = context;
+  const image = fixture('valid-1.2.3+4.signed.bin');
+  const jobId = await context.deploy('1.2.3+4', [THING]);
+  fake.execution(jobId, THING).update('IN_PROGRESS', { step: 'downloading' });
+
+  // The function stopped after the first step: only the mark was written.
+  const revoked = { by: { sub: manager.sub, email: manager.email }, at: new Date(context.clock.ms).toISOString(), reason: 'cut off' };
+  assert.equal((await fake.markReleaseRevoked({ sk: RELEASE_KEY, revoked })).ok, true);
+  assert.deepEqual(fake.objects.get(`firmware/${sha256(image)}.bin`).tags, {});
+  assert.equal(fake.jobs.get(jobId).status, 'IN_PROGRESS');
+  const pending = await context.listed();
+  assert.deepEqual(pending.revoked, { ...revoked, enforcedAt: null });
+
+  context.advance(60_000);
+  const response = await context.revoke('1.2.3+4', { reason: 'finish it' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.cancelled, [jobId]);
+  assert.deepEqual(response.body.release.revoked, { ...revoked, enforcedAt: new Date(context.clock.ms).toISOString() });
+  assert.deepEqual(fake.objects.get(`firmware/${sha256(image)}.bin`).tags, { revoked: 'true' });
+  assert.equal(fake.execution(jobId, THING).get().status, 'CANCELED');
 });
 
 test('a deployment that cannot be cancelled does not stop the others', async () => {
@@ -708,10 +983,44 @@ test('a deployment that cannot be cancelled does not stop the others', async () 
   const states = [first, second].map((id) => fake.jobs.get(id).status).sort();
   assert.deepEqual(states, ['CANCELED', 'IN_PROGRESS']);
   assert.deepEqual(fake.objects.get(`firmware/${sha256(fixture('valid-1.2.3+4.signed.bin'))}.bin`).tags, { revoked: 'true' });
+  assert.equal((await context.listed()).revoked.enforcedAt, null);
+  assert.ok(context.logs.some((line) => line.event === 'cancel_failed'));
 
   const again = await context.revoke('1.2.3+4');
-  assert.equal(again.status, 409);
+  assert.equal(again.status, 200);
+  assert.equal(again.body.cancelled.length, 1);
   assert.deepEqual([first, second].map((id) => fake.jobs.get(id).status), ['CANCELED', 'CANCELED']);
+  assert.ok(again.body.release.revoked.enforcedAt !== null);
+});
+
+test('a revocation that cannot be checked or recorded is not complete', async () => {
+  // The deployments cannot be listed.
+  let context = await withReleases();
+  context.fake.failNext('listJobs');
+  let response = await context.revoke('1.2.3+4');
+  assert.equal(response.status, 500);
+  assert.equal(response.body.error.code, 'revoke_incomplete');
+  assert.match(response.body.error.message, /its deployments could not be checked/);
+  assert.equal((await context.listed()).revoked.enforcedAt, null);
+  assert.equal((await context.revoke('1.2.3+4')).status, 200);
+
+  // Everything was done, but the record that it is done cannot be written.
+  context = await withReleases();
+  context.fake.failNext('markRevocationEnforced');
+  response = await context.revoke('1.2.3+4');
+  assert.equal(response.status, 500);
+  assert.equal(response.body.error.code, 'revoke_incomplete');
+  assert.match(response.body.error.message, /Only the record that this is done could not be written/);
+  assert.equal(context.fake.auditLog().at(-1).detail.incomplete, 'record');
+  assert.equal((await context.listed()).revoked.enforcedAt, null);
+  const again = await context.revoke('1.2.3+4');
+  assert.equal(again.status, 200);
+  assert.ok(again.body.release.revoked.enforcedAt !== null);
+
+  // Nothing in these answers says what went wrong inside.
+  for (const hidden of ['InternalFailure', 'listJobs', 'UpdateItem', 'AwsError']) {
+    assert.equal(JSON.stringify(response.body).includes(hidden), false, hidden);
+  }
 });
 
 test('nothing is revoked when the record cannot be written', async () => {
@@ -722,7 +1031,7 @@ test('nothing is revoked when the record cannot be written', async () => {
   const response = await context.revoke('1.2.3+4');
   assert.equal(response.status, 500);
   assert.equal(response.body.error.code, 'internal_error');
-  assert.equal(fake.releases.get('001.002.00003.0000000004').status, 'active');
+  assert.equal(fake.releases.get(RELEASE_KEY).status, 'active');
   assert.equal(fake.jobs.get(jobId).status, 'IN_PROGRESS');
   assert.ok(!fake.methodsCalled().includes('tagFirmwareRevoked'));
 });

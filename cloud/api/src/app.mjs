@@ -7,22 +7,28 @@
  *   1. identify the caller from the claims the gateway verified   (401)
  *   2. require membership of one of the console's groups         (403)
  *   3. find the route                                             (404)
- *   4. for a write: require the release-managers group in the token, then ask
- *      Cognito whether that is still true right now               (403)
+ *   4. for a write: ask Cognito whether the caller is a release manager
+ *      right now, whatever the token says                         (403)
  *   5. validate the path and the body, then act
  *
  * A request to a write route leaves exactly one entry in the activity log, whatever
- * its outcome, including the refusals in steps 1, 2 and 4.
+ * its outcome, including the refusals in steps 1, 2 and 4 and a request that runs out
+ * of time.
+ *
+ * Time: Lambda stops the function 20 s after a request arrived, and what it stops
+ * leaves no answer, no log line and no entry. A request is therefore given up earlier,
+ * while there is time left to record it. Its work is not waited for any longer, and
+ * from then on the adapter refuses the calls that work still makes, so that nothing
+ * changes after the request was answered and recorded as failed.
  *
  * Nothing here imports the AWS SDK. The adapter is passed in, so the same code runs
  * against AWS in Lambda and against test/fake-aws.mjs in tests and in the local preview.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomBytes } from 'node:crypto';
 
-import {
-  authenticate, claimedSub, createDirectory, requireMember, requireReleaseManager,
-} from './auth.mjs';
+import { authenticate, claimedSub, createDirectory, requireMember } from './auth.mjs';
 import { createAuditHandlers } from './handlers/audit.mjs';
 import { createDeploymentHandlers } from './handlers/deployments.mjs';
 import { createDeviceHandlers } from './handlers/devices.mjs';
@@ -35,6 +41,12 @@ import { REQUEST_ID } from './lib/audit.mjs';
 
 const METHODS = Object.freeze(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 const MAX_PATH = 512;
+
+// The function has 20 s for a request (Timeout of ApiFn in infra/template.yaml). A
+// request is given up after 16 s, and in any case 4 s before Lambda's own limit: the
+// time it takes to write the entry in the activity log and the log line.
+const REQUEST_BUDGET_MS = 16_000;
+const RESERVE_MS = 4_000;
 
 function route(method, path, run, write = null) {
   return Object.freeze({ method, name: `${method} ${path}`, segments: path.split('/').slice(1), run, write });
@@ -99,6 +111,44 @@ function outcomeOf(error) {
 }
 
 /**
+ * How long a request may take, in milliseconds. In Lambda the second argument of the
+ * handler says how much time is left; without it (tests, the local preview) the
+ * request gets the fixed budget.
+ */
+function budgetOf(invocation) {
+  const left = typeof invocation?.getRemainingTimeInMillis === 'function'
+    ? Number(invocation.getRemainingTimeInMillis())
+    : NaN;
+  return Number.isFinite(left) ? Math.min(REQUEST_BUDGET_MS, left - RESERVE_MS) : REQUEST_BUDGET_MS;
+}
+
+/** The failure a handler sees when it calls AWS for a request that was given up. */
+function abandoned(operation) {
+  const error = new Error(`${operation}: not sent, the request had run out of time`);
+  error.name = 'AwsError';
+  error.code = 'failed';
+  error.operation = operation;
+  return error;
+}
+
+/**
+ * The adapter as the work of a request gets it. Each method is looked up when it is
+ * called and passed on, unless the request that the call belongs to has run out of
+ * time: then the call fails without reaching AWS. `requests` knows which request, if
+ * any, the code that is running belongs to.
+ */
+function guarded(aws, requests) {
+  const adapter = {};
+  for (const name of Object.keys(aws)) {
+    if (typeof aws[name] !== 'function') continue;
+    adapter[name] = (...args) => (requests.getStore()?.expired === true
+      ? Promise.reject(abandoned(name))
+      : aws[name](...args));
+  }
+  return Object.freeze(adapter);
+}
+
+/**
  * @param {object} options
  * @param {object} options.aws      the AWS adapter (src/aws.mjs or test/fake-aws.mjs)
  * @param {object} options.config   the result of loadConfig (src/config.mjs)
@@ -106,7 +156,9 @@ function outcomeOf(error) {
  * @param {(count: number) => string} [options.randomHex]  at least `count` lowercase hex
  *                                  characters from a CSPRNG
  * @param {(line: object) => void} [options.log]       receives each log line as an object
- * @returns {(event: object) => Promise<object>} the Lambda handler
+ * @param {{set: Function, clear: Function}} [options.timers]  setTimeout and clearTimeout,
+ *                                  or stand-ins for them
+ * @returns {(event: object, invocation?: object) => Promise<object>} the Lambda handler
  */
 export function createApp({
   aws,
@@ -114,6 +166,7 @@ export function createApp({
   now = Date.now,
   randomHex = (count) => randomBytes(count).toString('hex'),
   log = (line) => console.log(JSON.stringify(line)),
+  timers = { set: setTimeout, clear: clearTimeout },
 }) {
   if (aws === undefined || aws === null) throw new TypeError('createApp needs an AWS adapter');
   if (config === undefined || config === null) throw new TypeError('createApp needs a configuration');
@@ -122,7 +175,9 @@ export function createApp({
     const value = now();
     return value instanceof Date ? value.getTime() : value;
   };
-  const context = { aws, config, now: clock, randomHex, log };
+  // Which request the running code is working for: { expired }.
+  const requests = new AsyncLocalStorage();
+  const context = { aws: guarded(aws, requests), config, now: clock, randomHex, log };
   context.directory = createDirectory(context);
 
   const audit = createAuditHandlers(context);
@@ -149,15 +204,40 @@ export function createApp({
     route('GET', '/api/audit', audit.list),
   ]);
 
-  async function read(found, event, seen) {
+  /**
+   * Do the work of a request, for no longer than `request.budget` milliseconds. When
+   * the time is up, `request.timedOut` is set and the caller gets a failure at once.
+   * The work is left behind: nothing waits for it, and the adapter refuses whatever it
+   * still tries to send to AWS.
+   */
+  function withinDeadline(request, work, message) {
+    const giveUp = () => {
+      request.timedOut = true;
+      log({ level: 'error', event: 'request_timed_out', requestId: request.id, budget: request.budget });
+      return new HttpError(500, 'timeout', message);
+    };
+    // No time at all: the work is not even begun.
+    if (!(request.budget > 0)) return Promise.reject(giveUp());
+    const state = { expired: false };
+    let timer = null;
+    const late = new Promise((resolve, reject) => {
+      timer = timers.set(() => {
+        state.expired = true;
+        reject(giveUp());
+      }, request.budget);
+    });
+    return Promise.race([requests.run(state, work), late]).finally(() => timers.clear(timer));
+  }
+
+  async function read(found, event, request) {
     const caller = authenticate(event, config.userPoolClientId);
-    seen.sub = caller.sub;
+    request.sub = caller.sub;
     requireMember(caller);
     if (found === null) throw notFound('not_found', 'There is nothing at this address.');
     return found.route.run({ caller, params: found.params, query: queryOf(event) });
   }
 
-  async function write(found, event, requestId, seen) {
+  async function write(found, event, request) {
     const { action, maxBody } = found.route.write;
     // The handler fills these in as it learns what the request is about.
     const entry = { target: '', detail: {} };
@@ -165,32 +245,44 @@ export function createApp({
     let result = null;
     let failure = null;
     try {
-      const caller = authenticate(event, config.userPoolClientId);
-      seen.sub = caller.sub;
-      requireMember(caller);
-      requireReleaseManager(caller);
-      actor.email = await context.directory.requireLiveWriter(caller.sub);
-      result = await found.route.run({
-        caller,
-        actor: { sub: caller.sub, email: actor.email },
-        params: found.params,
-        query: queryOf(event),
-        entry,
-        json: () => readJsonObject(event, maxBody),
-      });
+      result = await withinDeadline(request, async () => {
+        const caller = authenticate(event, config.userPoolClientId);
+        request.sub = caller.sub;
+        requireMember(caller);
+        actor.email = await context.directory.requireLiveWriter(caller);
+        return found.route.run({
+          caller,
+          actor: { sub: caller.sub, email: actor.email },
+          params: found.params,
+          query: queryOf(event),
+          entry,
+          json: () => readJsonObject(event, maxBody),
+        });
+      }, 'The server ran out of time. The change may have been made in part or in full: ' +
+        'check the result before you repeat it.');
     } catch (error) {
       failure = error;
     }
 
+    // What is known now is what goes on record. After a timeout the work that was left
+    // behind may still write to these.
+    const target = entry.target;
+    const detail = { ...entry.detail };
+    let email = actor.email;
     let outcome = 'ok';
     if (failure !== null) {
       outcome = outcomeOf(failure);
-      entry.detail.code = errorCode(failure);
+      detail.code = errorCode(failure);
       // A refusal before the live check has no address yet; look it up for the record.
-      if (actor.email === '' && seen.sub !== null) actor.email = await context.directory.emailOf(seen.sub);
+      // Not after a timeout: there is no time left to wait for Cognito.
+      if (email === '' && request.sub !== null) {
+        email = request.timedOut
+          ? context.directory.knownEmail(request.sub)
+          : await context.directory.emailOf(request.sub);
+      }
     }
     const recorded = await audit.record({
-      at: clock(), requestId, actor, action, target: entry.target, outcome, detail: entry.detail,
+      at: clock(), requestId: request.id, actor: { sub: actor.sub, email }, action, target, outcome, detail,
     });
     if (failure !== null) throw failure;
     if (!recorded) {
@@ -208,18 +300,20 @@ export function createApp({
     return /^[0-9a-f]{16}$/.test(drawn) ? drawn : randomBytes(8).toString('hex');
   }
 
-  return async function handler(event) {
+  return async function handler(event, invocation) {
     const started = clock();
     const requestId = requestIdOf(event);
     const method = methodOf(event);
     const found = findRoute(routes, method, pathSegments(event));
-    const seen = { sub: null };
+    // `sub` is filled in once the caller is identified.
+    const request = { id: requestId, sub: null, budget: budgetOf(invocation), timedOut: false };
 
     let response;
     try {
       const result = found !== null && found.route.write !== null
-        ? await write(found, event, requestId, seen)
-        : await read(found, event, seen);
+        ? await write(found, event, request)
+        : await withinDeadline(request, () => read(found, event, request),
+          'The server ran out of time. Try again in a moment.');
       response = json(result.status ?? 200, result.body);
     } catch (error) {
       const failed = errorResponse(error, requestId);
@@ -231,7 +325,7 @@ export function createApp({
 
     log({
       requestId,
-      sub: seen.sub,
+      sub: request.sub,
       method,
       route: found === null ? 'unmatched' : found.route.name,
       status: response.statusCode,

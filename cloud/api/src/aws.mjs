@@ -15,6 +15,8 @@
  * createAws(env) reads AWS_REGION, STATE_TABLE, AUDIT_TABLE, FIRMWARE_BUCKET,
  * THING_GROUP, PRESIGN_ROLE_ARN and USER_POOL_ID. Every method is async. Arguments are
  * expected to be validated already: thing names, job ids and keys go to AWS as given.
+ * A call that AWS does not answer within a few seconds is given up and reported as a
+ * failure like any other.
  *
  * Things and shadows
  *   listGroupThings()             -> string[]        names of all things in the group, any order
@@ -84,6 +86,11 @@
  *                                 -> { ok: true, release }  the item after the change
  *                                  | { ok: false, reason: "not_active" }  no such release, or it
  *                                    is not active
+ *   markRevocationEnforced({ sk, at })
+ *                                 -> { ok: true, release }  the item after the change
+ *                                  | { ok: false, reason: "not_pending" }  no such release, it is
+ *                                    not revoked, or the time is on record already
+ *                                    records revoked.enforcedAt = at (an ISO time), once
  *
  * Audit (audit table; an item carries sk = "<ISO time>#<request id>")
  *   putAudit(item)                -> { ok: true } | { ok: false, reason: "exists" }
@@ -118,6 +125,15 @@ const PAGE_SIZE = 250;
 const GROUP_PAGE_SIZE = 60;
 // A list longer than this is not this project's: stop instead of reading for ever.
 const MAX_PAGES = 40;
+
+// How long one attempt of a call may take, in milliseconds: to connect, without a
+// byte arriving, and in all. AWS answers these calls in well under a second. Both
+// attempts of a call that gets no answer are over after 10 s, which leaves the
+// request time to say so before its own deadline (app.mjs).
+const CONNECT_TIMEOUT_MS = 1000;
+const IDLE_TIMEOUT_MS = 3000;
+const CALL_TIMEOUT_MS = 4000;
+const MAX_ATTEMPTS = 2;
 
 const RELEASE_PK = 'REL';
 const POINTER_KEY = Object.freeze({ pk: { S: 'META' }, sk: { S: 'HIGHEST' } });
@@ -270,11 +286,24 @@ export function createAws(env) {
   if (!role) throw new Error('Environment variable PRESIGN_ROLE_ARN is not a role ARN');
   const thingArn = (thing) => `arn:${role[1]}:iot:${region}:${role[2]}:thing/${thing}`;
 
-  const iot = new IoTClient({ region });
-  const iotData = new IoTDataPlaneClient({ region });
-  const s3 = new S3Client({ region });
-  const dynamo = new DynamoDBClient({ region });
-  const cognito = new CognitoIdentityProviderClient({ region });
+  // No call may hang: left alone, a call that gets no answer lasts until Lambda stops
+  // the function. A call is tried twice at most; the SDK's own default is three times.
+  const settings = () => ({
+    region,
+    maxAttempts: MAX_ATTEMPTS,
+    requestHandler: {
+      connectionTimeout: CONNECT_TIMEOUT_MS,
+      socketTimeout: IDLE_TIMEOUT_MS,
+      requestTimeout: CALL_TIMEOUT_MS,
+      // Without this the SDK only writes a warning when a call takes too long.
+      throwOnRequestTimeout: true,
+    },
+  });
+  const iot = new IoTClient(settings());
+  const iotData = new IoTDataPlaneClient(settings());
+  const s3 = new S3Client(settings());
+  const dynamo = new DynamoDBClient(settings());
+  const cognito = new CognitoIdentityProviderClient(settings());
 
   /** Query one partition, highest sort key first, up to `limit` items. */
   async function queryDescending(table, pk, { before = null, limit = Infinity } = {}) {
@@ -648,6 +677,26 @@ export function createAws(env) {
         return { ok: true, release: out.Attributes ? fromItem(out.Attributes) : null };
       } catch (cause) {
         if (nameOf(cause) === 'ConditionalCheckFailedException') return { ok: false, reason: 'not_active' };
+        throw failure('UpdateItem', cause);
+      }
+    },
+
+    async markRevocationEnforced({ sk, at }) {
+      try {
+        const out = await dynamo.send(new UpdateItemCommand({
+          TableName: stateTable,
+          Key: { pk: { S: RELEASE_PK }, sk: { S: sk } },
+          UpdateExpression: 'SET #revoked.#enforcedAt = :at',
+          // Only a revoked release, and only once: the first time stays on record.
+          // False for an item that does not exist, too.
+          ConditionExpression: '#status = :revoked AND attribute_not_exists(#revoked.#enforcedAt)',
+          ExpressionAttributeNames: { '#status': 'status', '#revoked': 'revoked', '#enforcedAt': 'enforcedAt' },
+          ExpressionAttributeValues: { ':revoked': { S: 'revoked' }, ':at': { S: at } },
+          ReturnValues: 'ALL_NEW',
+        }));
+        return { ok: true, release: out.Attributes ? fromItem(out.Attributes) : null };
+      } catch (cause) {
+        if (nameOf(cause) === 'ConditionalCheckFailedException') return { ok: false, reason: 'not_pending' };
         throw failure('UpdateItem', cause);
       }
     },

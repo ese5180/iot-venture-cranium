@@ -208,14 +208,14 @@ test('cancelling reaches queued boards, and boards at work only with force', asy
   assert.equal(fake.execution(JOB, THING).get().status, 'CANCELED');
   assert.equal(fake.execution(JOB, OTHER).get().status, 'IN_PROGRESS');
 
-  // Nothing more to do without force; with force the board at work is stopped.
+  // Nothing more to do without force. With force, a job that is cancelled already is
+  // where AWS documents nothing: unless told otherwise, the stand-in refuses.
   assert.deepEqual(await cancel(false), { ok: false, reason: 'refused', detail: 'job is CANCELED' });
-  assert.deepEqual(await cancel(true), { ok: true });
-  described = await fake.describeJob(JOB);
-  assert.deepEqual([described.status, described.forceCanceled, described.counts.canceled], ['CANCELED', true, 2]);
-  assert.equal((await fake.describeJobExecution(JOB, OTHER)).forceCanceled, true);
   assert.deepEqual(await cancel(true), { ok: false, reason: 'refused', detail: 'job is CANCELED' });
-  // A cancelled job stays cancelled.
+  assert.equal(fake.execution(JOB, OTHER).get().status, 'IN_PROGRESS');
+  assert.equal((await fake.describeJob(JOB)).forceCanceled, false);
+  // The board that had started may carry on, and a cancelled job stays cancelled.
+  assert.deepEqual(fake.execution(JOB, OTHER).update('IN_PROGRESS', { step: 'rebooting' }), { accepted: true });
   assert.equal((await fake.describeJob(JOB)).status, 'CANCELED');
 
   assert.deepEqual(await fake.cancelJob({ jobId: 'unknown', force: true, reasonCode: 'X', comment: 'who' }),
@@ -224,6 +224,82 @@ test('cancelling reaches queued boards, and boards at work only with force', asy
   fake.execution('finished', THING).update('SUCCEEDED');
   assert.deepEqual(await fake.cancelJob({ jobId: 'finished', force: true, reasonCode: 'X', comment: 'who' }),
     { ok: false, reason: 'refused', detail: 'job is COMPLETED' });
+
+  // A job in progress is cancelled with force in one call, as AWS documents it.
+  await fake.createJob(job({ jobId: 'forced' }));
+  fake.execution('forced', OTHER).update('IN_PROGRESS', { step: 'downloading' });
+  assert.deepEqual(await fake.cancelJob({ jobId: 'forced', force: true, reasonCode: 'X', comment: 'who' }), { ok: true });
+  described = await fake.describeJob('forced');
+  assert.deepEqual([described.status, described.forceCanceled, described.counts.canceled], ['CANCELED', true, 2]);
+  assert.equal((await fake.describeJobExecution('forced', OTHER)).forceCanceled, true);
+  assert.deepEqual(fake.execution('forced', OTHER).update('IN_PROGRESS', { step: 'rebooting' }),
+    { accepted: false, code: 'InvalidStateTransition' });
+});
+
+test('a forced cancellation of a job that is cancelled already can go three ways', async () => {
+  const cancelledWithoutForce = async (repeatedCancel) => {
+    const { fake, job } = setup({ repeatedCancel });
+    await fake.createJob(job());
+    fake.execution(JOB, OTHER).update('IN_PROGRESS', { step: 'downloading' });
+    const cancel = (force) => fake.cancelJob({ jobId: JOB, force, reasonCode: 'CONSOLE_CANCEL', comment: 'who' });
+    assert.deepEqual(await cancel(false), { ok: true });
+    return { fake, cancel };
+  };
+
+  // Refused: nothing changes.
+  let { fake, cancel } = await cancelledWithoutForce('refused');
+  assert.deepEqual(await cancel(true), { ok: false, reason: 'refused', detail: 'job is CANCELED' });
+  assert.equal(fake.execution(JOB, OTHER).get().status, 'IN_PROGRESS');
+
+  // Accepted: the board at work is stopped.
+  ({ fake, cancel } = await cancelledWithoutForce('accepted'));
+  assert.deepEqual(await cancel(true), { ok: true });
+  const described = await fake.describeJob(JOB);
+  assert.deepEqual([described.status, described.forceCanceled, described.counts.canceled], ['CANCELED', true, 2]);
+  assert.equal((await fake.describeJobExecution(JOB, OTHER)).forceCanceled, true);
+  // Once no board is at work there is nothing left to accept.
+  assert.deepEqual(await cancel(true), { ok: false, reason: 'refused', detail: 'job is CANCELED' });
+
+  // Ignored: the call succeeds, and the board carries on.
+  ({ fake, cancel } = await cancelledWithoutForce('ignored'));
+  assert.deepEqual(await cancel(true), { ok: true });
+  assert.equal(fake.execution(JOB, OTHER).get().status, 'IN_PROGRESS');
+  assert.equal((await fake.describeJob(JOB)).forceCanceled, false);
+  assert.deepEqual(fake.execution(JOB, OTHER).update('SUCCEEDED', { running: '1.2.3+4' }), { accepted: true });
+
+  assert.throws(() => setup({ repeatedCancel: 'sometimes' }), TypeError);
+});
+
+test('executions follow a cancellation after the cancel delay', async () => {
+  const { fake, clock, job } = setup({ cancelDelayMs: 8000 });
+  await fake.createJob(job());
+  fake.execution(JOB, OTHER).update('IN_PROGRESS', { step: 'downloading' });
+  clock.ms += 1000;
+  assert.deepEqual(await fake.cancelJob({ jobId: JOB, force: true, reasonCode: 'X', comment: 'who' }), { ok: true });
+
+  // The job is cancelled at once; its executions are not.
+  let described = await fake.describeJob(JOB);
+  assert.deepEqual([described.status, described.forceCanceled, described.lastUpdatedAt], ['CANCELED', true, T0 + 1000]);
+  assert.deepEqual([described.counts.queued, described.counts.inProgress, described.counts.canceled], [1, 1, 0]);
+  // Until they are, a board's update passes.
+  assert.deepEqual(fake.execution(JOB, OTHER).update('IN_PROGRESS', { step: 'rebooting' }), { accepted: true });
+  clock.ms += 7999;
+  assert.equal(fake.execution(JOB, OTHER).get().status, 'IN_PROGRESS');
+  clock.ms += 1;
+  described = await fake.describeJob(JOB);
+  assert.deepEqual([described.counts.queued, described.counts.inProgress, described.counts.canceled], [0, 0, 2]);
+  const stopped = await fake.describeJobExecution(JOB, OTHER);
+  assert.deepEqual([stopped.status, stopped.forceCanceled, stopped.lastUpdatedAt], ['CANCELED', true, T0 + 9000]);
+  assert.deepEqual(fake.execution(JOB, OTHER).update('SUCCEEDED'), { accepted: false, code: 'InvalidStateTransition' });
+
+  // Without force, a board that starts before the cancellation reaches it is left alone.
+  await fake.createJob(job({ jobId: 'plain' }));
+  assert.deepEqual(await fake.cancelJob({ jobId: 'plain', force: false, reasonCode: 'X', comment: 'who' }), { ok: true });
+  assert.deepEqual(fake.execution('plain', THING).update('IN_PROGRESS', { step: 'downloading' }), { accepted: true });
+  clock.ms += 8000;
+  assert.equal(fake.execution('plain', THING).get().status, 'IN_PROGRESS');
+  assert.equal(fake.execution('plain', OTHER).get().status, 'CANCELED');
+  assert.equal((await fake.describeJob('plain')).forceCanceled, false);
 });
 
 test('executions appear only after the rollout delay', async () => {

@@ -217,14 +217,18 @@ function failure(promise) {
 test('the command line: defaults, both spellings of an option, nothing unknown', () => {
   assert.deepEqual(parseArguments([]), {
     scenario: 'empty', viewer: false, live: false, verbose: false, help: false, host: '127.0.0.1', port: 8787,
+    repeatedCancel: 'refused',
   });
   assert.equal(parseArguments(['--scenario', 'revoked']).scenario, 'revoked');
   const options = parseArguments(['--scenario=downloading', '--viewer', '--live', '--port=9000']);
   assert.deepEqual(pick(options, 'scenario', 'viewer', 'live', 'port'),
     { scenario: 'downloading', viewer: true, live: true, port: 9000 });
   assert.equal(parseArguments(['-h']).help, true);
+  assert.equal(parseArguments(['--repeated-cancel', 'accepted']).repeatedCancel, 'accepted');
+  assert.equal(parseArguments(['--repeated-cancel=ignored']).repeatedCancel, 'ignored');
 
-  for (const argv of [['--bind', '0.0.0.0'], ['--port'], ['--port', 'http'], ['--scenario'], ['revoked']]) {
+  for (const argv of [['--bind', '0.0.0.0'], ['--port'], ['--port', 'http'], ['--scenario'], ['revoked'],
+    ['--repeated-cancel']]) {
     assert.throws(() => parseArguments(argv), UsageError, argv.join(' '));
   }
 });
@@ -508,26 +512,50 @@ test('the console\'s client makes every change the way the API expects it', asyn
   assert.deepEqual(pick(busy, 'status', 'code'), { status: 409, code: 'device_busy' });
   assert.deepEqual(core.busyBoards(busy), [{ thing, deployment: deployment.id }]);
 
-  // The board starts. A plain cancellation leaves it alone; a forced one stops it.
+  // The board starts. A cancellation without force leaves it alone, and asking for the
+  // same again is told what is left.
   board.lookForJob();
   board.pressButton1();
+  board.download(20);
   const withdrawn = await api.cancel(deployment.id, false);
   assert.deepEqual(withdrawn, sent.at(-1).deployment);
   assert.equal(withdrawn.status, 'CANCELED');
   assert.deepEqual(pick(withdrawn.executions[0], 'status', 'phase'),
     { status: 'IN_PROGRESS', phase: 'downloading' });
-  const stopped = await api.cancel(deployment.id, true);
-  assert.deepEqual(stopped, sent.at(-1).deployment);
-  assert.deepEqual(pick(stopped.executions[0], 'status', 'phase'), { status: 'CANCELED', phase: 'cancelled' });
-  const finished = await failure(api.cancel(deployment.id, true));
-  assert.deepEqual(pick(finished, 'status', 'code'), { status: 409, code: 'already_finished' });
+  const repeated = await failure(api.cancel(deployment.id, false));
+  assert.deepEqual(pick(repeated, 'status', 'code'), { status: 409, code: 'already_cancelled' });
+  assert.match(repeated.message, /1 board is still at work/);
 
-  // A revocation, which closes the release for good.
-  const revocation = await api.revoke('2.0.0+0', core.singleLine('Pads stop responding. '));
+  // What a forced cancellation does to a deployment that is cancelled already, AWS
+  // does not document. The stand-in refuses it, and the client hands the refusal on.
+  const unstopped = await failure(api.cancel(deployment.id, true));
+  assert.deepEqual(pick(unstopped, 'status', 'code'), { status: 409, code: 'cancel_refused' });
+  assert.match(unstopped.message, /AWS did not accept the cancellation/);
+
+  // Revoking the release while that board is at work marks the release and blocks its
+  // image, but it is not complete, and the record says so to everyone who reads it.
+  const incomplete = await failure(api.revoke('2.0.0+0', core.singleLine('Pads stop responding. ')));
+  assert.deepEqual(pick(incomplete, 'status', 'code'), { status: 500, code: 'revoke_incomplete' });
+  assert.equal(incomplete.message.includes(deployment.id), true);
+  const marked = (await api.firmware()).releases[0];
+  assert.deepEqual(marked, sent.at(-1).releases[0]);
+  assert.deepEqual(pick(marked, 'version', 'status'), { version: '2.0.0+0', status: 'revoked' });
+  assert.deepEqual(pick(marked.revoked, 'reason', 'enforcedAt'), { reason: 'Pads stop responding.', enforcedAt: null });
+
+  // The bucket refuses the image now, so the board's download fails. With no board
+  // left at work, revoking again completes the revocation and records when.
+  board.download(60);
+  const ended = await api.deployment(deployment.id);
+  assert.deepEqual(pick(ended.executions[0], 'status', 'phase', 'reason'),
+    { status: 'FAILED', phase: 'failed', reason: 'download_failed' });
+  const revocation = await api.revoke('2.0.0+0', 'Finish it.');
   assert.deepEqual(revocation, sent.at(-1));
   assert.equal(revocation.release.status, 'revoked');
   assert.equal(revocation.release.revoked.reason, 'Pads stop responding.');
+  assert.equal(revocation.release.revoked.at, marked.revoked.at);
+  assert.equal(typeof revocation.release.revoked.enforcedAt, 'string');
   assert.deepEqual(revocation.cancelled, []);
+  assert.deepEqual((await api.firmware()).releases[0], revocation.release);
   const again = await failure(api.revoke('2.0.0+0', 'Once more.'));
   assert.deepEqual(pick(again, 'status', 'code'), { status: 409, code: 'already_revoked' });
   const closed = await failure(api.deploy({ version: '2.0.0+0', things: [thing], note: '' }));
@@ -535,18 +563,56 @@ test('the console\'s client makes every change the way the API expects it', asyn
   const unknown = await failure(api.deploy({ version: '9.9.9+9', things: [thing], note: '' }));
   assert.deepEqual(pick(unknown, 'status', 'code'), { status: 404, code: 'unknown_version' });
 
+  // A deployment that is in progress is stopped with force in one step: that is what
+  // AWS documents.
+  const second = await api.deploy({ version: '1.2.3+5', things: [thing], note: '' });
+  board.lookForJob();
+  board.pressButton1();
+  const stopped = await api.cancel(second.id, true);
+  assert.deepEqual(stopped, sent.at(-1).deployment);
+  assert.deepEqual(pick(stopped.executions[0], 'status', 'phase'), { status: 'CANCELED', phase: 'cancelled' });
+  const finished = await failure(api.cancel(second.id, true));
+  assert.deepEqual(pick(finished, 'status', 'code'), { status: 409, code: 'already_finished' });
+
   // Each of these left its entry, newest first, a page at a time.
-  const audit = await api.audit({ limit: 6 });
+  const audit = await api.audit({ limit: 8 });
   assert.deepEqual(outcomes(audit.entries), [
+    'deployment.cancel rejected', 'deployment.cancel ok', 'deployment.create ok',
     'deployment.create rejected', 'deployment.create rejected', 'firmware.revoke rejected',
-    'firmware.revoke ok', 'deployment.cancel rejected', 'deployment.cancel ok',
+    'firmware.revoke ok', 'firmware.revoke error',
   ]);
   const older = await api.audit({ limit: 50, before: audit.next });
   assert.deepEqual(outcomes(older.entries), [
-    'deployment.cancel ok', 'deployment.create rejected', 'deployment.create ok',
+    'deployment.cancel rejected', 'deployment.cancel rejected', 'deployment.cancel ok',
+    'deployment.create rejected', 'deployment.create ok',
     'firmware.upload rejected', 'firmware.upload ok', 'firmware.upload ok', 'firmware.upload ok',
   ]);
   assert.equal(older.next, null);
+});
+
+test('the stand-in can be told what a second, forced cancellation does', async (t) => {
+  /** One board at work on a deployment that was cancelled without force. */
+  async function atWork(repeatedCancel) {
+    const { preview, origin } = await start(t, { scenario: 'one-board-idle', repeatedCancel });
+    const token = await accessToken(origin);
+    const [board] = preview.boards;
+    const created = await call(origin, token, 'POST', '/api/deployments', { version: '1.2.3+5', things: [board.thing] });
+    const { id } = created.body.deployment;
+    board.lookForJob();
+    board.pressButton1();
+    assert.equal((await call(origin, token, 'POST', `/api/deployments/${id}/cancel`, { force: false })).status, 200);
+    const forced = await call(origin, token, 'POST', `/api/deployments/${id}/cancel`, { force: true });
+    return { forced, status: preview.fake.execution(id, board.thing).get().status };
+  }
+
+  let { forced, status } = await atWork('refused');
+  assert.deepEqual([forced.status, forced.body.error.code, status], [409, 'cancel_refused', 'IN_PROGRESS']);
+  ({ forced, status } = await atWork('accepted'));
+  assert.deepEqual([forced.status, forced.body.deployment.executions[0].status, status], [200, 'CANCELED', 'CANCELED']);
+  ({ forced, status } = await atWork('ignored'));
+  assert.deepEqual([forced.status, forced.body.deployment.executions[0].status, status], [200, 'IN_PROGRESS', 'IN_PROGRESS']);
+
+  await assert.rejects(createPreview({ port: 0, repeatedCancel: 'sometimes' }), UsageError);
 });
 
 test('each scenario is in the state its name promises', async (t) => {

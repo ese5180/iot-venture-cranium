@@ -8,12 +8,18 @@
  * only while it names this deployment (ota.job), and only for display.
  *
  *   QUEUED       waiting_for_device, or waiting_for_button once the board is online
- *                and says it holds this deployment and waits for the button
+ *                and says that it holds this deployment
  *   IN_PROGRESS  downloading -> verifying -> rebooting -> testing
  *   SUCCEEDED    succeeded
  *   FAILED       rolled_back when the board says the bootloader went back, else failed
  *   REJECTED     declined when someone said no on the board, else refused
  *   CANCELED     cancelled        TIMED_OUT  timed_out        REMOVED  removed
+ *
+ * A board says "downloading" from the moment its button is pressed, which is a moment
+ * before AWS has accepted that the update starts. Until AWS has, the execution is
+ * queued and the phase stays waiting_for_button: the execution, not the shadow, says
+ * whether an update has started, and a phase never goes back to waiting_for_device
+ * once the board holds the offer.
  */
 
 const STEPS = Object.freeze(['downloading', 'verifying', 'rebooting', 'testing']);
@@ -33,8 +39,9 @@ export function deriveTimeline({ status, reason = null, step = null, jobId, devi
 
   switch (status) {
     case 'QUEUED': {
-      const waiting = device?.online === true && tracking && ota.state === 'awaiting_user';
-      return { phase: waiting ? 'waiting_for_button' : 'waiting_for_device', progress: null };
+      // Any state but idle: the board has picked the offer up.
+      const holding = device?.online === true && tracking && ota.state !== 'idle';
+      return { phase: holding ? 'waiting_for_button' : 'waiting_for_device', progress: null };
     }
     case 'IN_PROGRESS': {
       // The execution names the step the board announced to AWS; the shadow may be a

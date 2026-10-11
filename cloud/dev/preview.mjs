@@ -8,6 +8,7 @@
  * at the console and trying its flows.
  *
  *   node cloud/dev/preview.mjs [--scenario <name>] [--viewer] [--live] [--port <number>]
+ *                              [--repeated-cancel <refused|accepted|ignored>]
  *
  * What stands in for the parts that are AWS in production:
  *
@@ -21,11 +22,16 @@
  *                  has one user, a local release manager (--viewer: a local viewer),
  *                  and "authorize" signs that user in at once. The console's own
  *                  sign-in code runs unchanged: state, PKCE, token request, revocation.
- *   AWS IoT, S3,   api/test/fake-aws.mjs, which starts empty.
- *   DynamoDB
+ *   AWS IoT, S3,   api/test/fake-aws.mjs, which starts empty. AWS does not document
+ *   DynamoDB       what a forced cancellation does to a deployment that was cancelled
+ *                  before, without force, and still has a board at work. The stand-in
+ *                  refuses it; --repeated-cancel makes it accept the call and stop
+ *                  the board ("accepted"), or accept it and change nothing
+ *                  ("ignored"), so that the console can be seen in all three cases.
  *   The boards     A model of what the firmware does (firmware/app/src/ota.c): it
  *                  writes its shadow and answers its job through the device helpers
- *                  of the stand-in.
+ *                  of the stand-in. Its download fails once the image is revoked, as
+ *                  it does when the bucket refuses a revoked image.
  *
  * The preview starts empty, or in the state a scenario built (--scenario <name>). A
  * scenario gets there the way a team would: boards are registered as the provisioning
@@ -91,6 +97,10 @@ const HEARTBEAT_MS = 30_000;
 const LIVE_TICK_MS = 1000;
 const LIVE_SECONDS_PER_STEP = 2;
 const LIVE_RESTART_SECONDS = 12;
+
+// What the stand-in can do with a forced cancellation of a deployment that is
+// cancelled already (api/test/fake-aws.mjs). The first is what it does by default.
+const REPEATED_CANCEL = Object.freeze(['refused', 'accepted', 'ignored']);
 
 // A reserved domain that can never receive mail. The addresses exist only here.
 const MAIL_DOMAIN = 'preview.invalid';
@@ -434,6 +444,13 @@ function createBoard(fake, thing, version, say) {
     last: 'none', error: '', rssi: -52,
   };
   let secondsInState = 0;
+  // The object the offered image is stored under, from the job document.
+  let imageKey = null;
+
+  /** True if the bucket would refuse the image now: its release was revoked. */
+  function imageRefused() {
+    return fake.objects.get(imageKey)?.tags.revoked === 'true';
+  }
 
   /** The whole reported document, as the firmware sends it every time. */
   function report(extra) {
@@ -495,10 +512,19 @@ function createBoard(fake, thing, version, say) {
     } else {
       // Nothing is sent to the job: the execution stays queued while the board waits.
       board.target = offered;
+      imageKey = `firmware/${next.document.fw.sha256}.bin`;
       enter('awaiting_user');
       report();
       say(`${thing}: offered ${offered}, waiting for Button 1`);
     }
+  }
+
+  /** The update cannot go on: tell AWS IoT why, and go back to idle. */
+  function fail(reason) {
+    // If the job was cancelled meanwhile nobody takes this answer.
+    update('FAILED', { reason, running: board.version });
+    say(`${thing}: the update to ${board.target} failed (${reason})`);
+    settle('failed', reason);
   }
 
   /** The download is complete: ask AWS IoT whether to go on, then restart. */
@@ -562,9 +588,16 @@ function createBoard(fake, thing, version, say) {
       return true;
     },
 
-    /** Go on downloading up to `percent`, reporting every ten percent. */
+    /**
+     * Go on downloading up to `percent`, reporting every ten percent. The bucket
+     * refuses an image whose release was revoked, also in the middle of a download.
+     */
     download(percent) {
       while (board.state === 'downloading' && board.progress < Math.min(percent, 100)) {
+        if (imageRefused()) {
+          fail('download_failed');
+          return;
+        }
         board.progress += 10;
         report();
       }
@@ -859,6 +892,9 @@ export const SCENARIOS = Object.freeze({
  * @param {string} [options.scenario]   a name from SCENARIOS
  * @param {boolean} [options.viewer]    sign in as the local viewer, not the release manager
  * @param {boolean} [options.live]      let the boards act by themselves
+ * @param {string} [options.repeatedCancel]  what the stand-in does with a forced
+ *                                      cancellation of a deployment that is cancelled
+ *                                      already: "refused", "accepted" or "ignored"
  * @param {string} [options.host]       a loopback address
  * @param {number} [options.port]       the console's port; sign-in is served on the next
  *                                      one. 0 takes two free ports
@@ -867,8 +903,8 @@ export const SCENARIOS = Object.freeze({
  * @param {() => number} [options.now]  the clock, epoch milliseconds
  */
 export async function createPreview({
-  scenario = 'empty', viewer = false, live = false, host = DEFAULT_HOST, port = DEFAULT_PORT,
-  log = () => {}, say = () => {}, now = Date.now,
+  scenario = 'empty', viewer = false, live = false, repeatedCancel = 'refused', host = DEFAULT_HOST,
+  port = DEFAULT_PORT, log = () => {}, say = () => {}, now = Date.now,
 } = {}) {
   requireLoopback(host);
   if (!Object.hasOwn(SCENARIOS, scenario)) {
@@ -878,10 +914,13 @@ export async function createPreview({
   if (!Number.isInteger(port) || port < 0 || port > 65534) {
     throw new UsageError('The port must be a number from 0 to 65534.');
   }
+  if (!REPEATED_CANCEL.includes(repeatedCancel)) {
+    throw new UsageError(`--repeated-cancel takes one of: ${REPEATED_CANCEL.join(', ')}.`);
+  }
 
   const user = viewer ? USERS.viewer : USERS.manager;
   const clock = createClock(now);
-  const fake = createFakeAws({ now: clock.now });
+  const fake = createFakeAws({ now: clock.now, repeatedCancel });
   const config = loadConfig(fakeEnv());
   const app = createApp({
     aws: fake, config, now: clock.now, log: (line) => log({ function: 'api', ...line }),
@@ -1067,6 +1106,11 @@ const USAGE = `Usage: node cloud/dev/preview.mjs [options]
   --live              let the boards act by themselves; type 1 or 2 to press a button
   --port <number>     port of the console (default ${DEFAULT_PORT}); sign-in uses the next one
   --host <address>    a loopback address (default ${DEFAULT_HOST}); any other is refused
+  --repeated-cancel <how>
+                      what the stand-in for AWS does when a deployment that was cancelled
+                      without force is cancelled again with force while a board is at
+                      work, which AWS does not document: refused (default), accepted
+                      (the board is stopped) or ignored (accepted, and nothing changes)
   --verbose           print the log lines of the two functions
   --help              show this text
 
@@ -1078,11 +1122,11 @@ ${Object.entries(SCENARIOS).map(([name, { summary }]) => `  ${name.padEnd(20)}${
 export function parseArguments(argv) {
   const options = {
     scenario: 'empty', viewer: false, live: false, verbose: false, help: false,
-    host: DEFAULT_HOST, port: DEFAULT_PORT,
+    host: DEFAULT_HOST, port: DEFAULT_PORT, repeatedCancel: REPEATED_CANCEL[0],
   };
   // "--port=8000" is "--port 8000".
   const words = argv.flatMap((word) => {
-    const mark = /^--[a-z]+=/.test(word) ? word.indexOf('=') : -1;
+    const mark = /^--[a-z][a-z-]*=/.test(word) ? word.indexOf('=') : -1;
     return mark === -1 ? [word] : [word.slice(0, mark), word.slice(mark + 1)];
   });
   for (let index = 0; index < words.length; index += 1) {
@@ -1096,6 +1140,8 @@ export function parseArguments(argv) {
       options.scenario = value();
     } else if (word === '--host') {
       options.host = value();
+    } else if (word === '--repeated-cancel') {
+      options.repeatedCancel = value();
     } else if (word === '--port') {
       const text = value();
       if (!/^\d{1,5}$/.test(text)) throw new UsageError('The port must be a number.');
