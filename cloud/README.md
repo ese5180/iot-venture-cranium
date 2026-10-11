@@ -107,6 +107,18 @@ It leaves two things alone: the budget stack (`infra/budget.yaml`, a monthly cos
 that is deployed on its own) and the log group `AWSIotLogsV2`, which AWS IoT creates
 itself.
 
+## Try it without AWS
+
+```sh
+node cloud/dev/preview.mjs --scenario waiting-for-button    # --help lists the scenarios
+```
+
+A local preview on `127.0.0.1`: the real console and the real API, with an in-memory
+stand-in for AWS, an emulated sign-in without a password, and simulated boards. It talks
+to nothing outside this computer, shows no real data, and is never deployed. Add `--live`
+to let the boards act and press their buttons from the terminal, or `--viewer` to see the
+console as a viewer does.
+
 ## Layout
 
 ```
@@ -116,8 +128,9 @@ infra/template.yaml    the console: API, sign-in, storage, AWS IoT
 infra/budget.yaml      cost alert, separate stack
 api/                   the API function (src/) and its tests (test/)
 web/                   the function that serves the console (src/) and its tests (test/)
-dev/                   local preview, never deployed
+dev/                   local preview and its tests, never deployed
 ```
 
-The tests need neither AWS nor any package: `node --test` in `cloud/api` and in
-`cloud/web`.
+The tests need neither AWS nor any package: `node --test` in `cloud/api`, in `cloud/web`
+and in `cloud/dev`. Those in `cloud/dev` run the console's own client against the real
+API handler, so they notice when the two stop agreeing.

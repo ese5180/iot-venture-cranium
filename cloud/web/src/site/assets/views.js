@@ -735,7 +735,10 @@ function updatesCard(ctx, devices) {
           'Last deployment: ',
           linkTo(deploymentHref(lastDone.id), { class: 'mono' }, lastDone.version ?? lastDone.id),
           `, ${describeDeployment(lastDone).label.toLowerCase()}, `,
-          when(lastDone.completedAt ?? lastDone.createdAt, now))
+          // A cancelled deployment has no end on record: say that the time is its start.
+          lastDone.completedAt
+            ? when(lastDone.completedAt, now)
+            : when(lastDone.createdAt, now, 'started '))
         : h('p', { class: 'card-note' }, 'Deployments appear here while boards are being updated.'));
   } else {
     body = h('ul', { class: 'run-list' }, active.map((deployment) => {

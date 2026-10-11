@@ -830,6 +830,8 @@ strong {
   font-size: 0.8125rem;
   overflow-wrap: anywhere;
   word-break: break-all;
+  /* A digest that does not fit on one line breaks into lines of equal length. */
+  text-wrap: balance;
 }
 
 .digest-row {

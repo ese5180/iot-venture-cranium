@@ -237,9 +237,17 @@ function toBase64Url(bytes) {
   return toBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-/** Free text as the API takes it: on one line, without control characters. */
+/**
+ * Free text as the API takes it: on one line, without control characters. A line break
+ * or another control character becomes a space. Characters that cannot be seen, such
+ * as the zero-width ones that come along with pasted text, are left out: the API
+ * refuses a text that holds one.
+ */
 export function singleLine(text) {
-  return String(text ?? '').replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
+  return String(text ?? '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+    .replace(/\p{C}/gu, '')
+    .trim();
 }
 
 /** The name recorded for an upload: the file's name in the characters the API accepts. */

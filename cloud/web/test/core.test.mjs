@@ -180,6 +180,15 @@ test('free text is reduced to one line without control characters', () => {
   assert.equal(core.singleLine('plain text, with accents: é'), 'plain text, with accents: é');
   assert.equal(core.singleLine('\x00\x1f\x7f\x85'), '');
   assert.equal(core.singleLine(null), '');
+
+  // What the API refuses as a control character is wider than what a keyboard types:
+  // the separators and the invisible characters of pasted text go as well.
+  assert.equal(core.singleLine('line\u2028separator\u2029here'), 'line separator here');
+  assert.equal(core.singleLine('zero\u200bwidth, soft\u00adhyphen, mark\u200f'), 'zerowidth, softhyphen, mark');
+  assert.equal(core.singleLine('\ufeffwith a byte order mark'), 'with a byte order mark');
+  assert.equal(core.singleLine('half a pair \ud83d and private \ue000'), 'half a pair  and private');
+  assert.equal(core.singleLine('rocket \u{1F680}, tick \u2714\ufe0f'), 'rocket \u{1F680}, tick \u2714\ufe0f');
+  assert.equal(core.singleLine('joined \u{1F468}\u200d\u{1F469}'), 'joined \u{1F468}\u{1F469}');
 });
 
 // Firmware images.
