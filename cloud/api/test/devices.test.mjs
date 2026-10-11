@@ -172,6 +172,14 @@ test('only things of the group with a board\'s name are listed', async () => {
   assert.deepEqual(body.devices.map((device) => device.thing), [BOARD_A]);
   // Nothing is asked about things that are not boards.
   assert.deepEqual(fake.calls.filter((call) => call.method === 'getShadow').map((call) => call.args[0]), [BOARD_A]);
+
+  // A name that a listing repeats is one board.
+  const original = fake.listGroupThings;
+  fake.listGroupThings = async () => [BOARD_B, BOARD_A, BOARD_B, BOARD_A];
+  context.advance(6000);
+  const repeated = await context.list();
+  fake.listGroupThings = original;
+  assert.deepEqual(repeated.devices.map((device) => device.thing), [BOARD_A, BOARD_B]);
 });
 
 test('one board is shown with its certificates and update history', async () => {

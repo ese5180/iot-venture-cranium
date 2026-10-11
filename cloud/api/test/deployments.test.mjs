@@ -556,6 +556,26 @@ test('a detail is cached for two seconds and finished executions are described o
   assert.equal(count(fake, 'describeJob'), 3);
 });
 
+test('an execution that changes after it had ended is read again', async () => {
+  const context = await setup();
+  const { fake } = context;
+  const id = await context.deploy([BOARD_A]);
+  fake.execution(id, BOARD_A).update('IN_PROGRESS', { step: 'downloading' });
+  fake.execution(id, BOARD_A).update('FAILED', { reason: 'download_failed' });
+  assert.equal((await context.detail(id)).executions[0].phase, 'failed');
+
+  // AWS IoT can queue a failed execution again when a job has a retry configuration.
+  // The console creates none, but it must not show a remembered result if that happens.
+  const job = fake.jobs.get(id);
+  Object.assign(job.executions.get(BOARD_A), {
+    status: 'QUEUED', startedAt: null, lastUpdatedAt: context.clock.ms + 1000, statusDetails: {},
+  });
+  job.status = 'IN_PROGRESS';
+  job.completedAt = null;
+  const again = (await context.detail(id)).executions[0];
+  assert.deepEqual([again.status, again.phase, again.reason], ['QUEUED', 'waiting_for_device', null]);
+});
+
 test('a shadow or an execution that cannot be read does not fail the view', async () => {
   const context = await setup();
   const { fake } = context;

@@ -1,9 +1,10 @@
 # Test fixtures
 
 Small firmware images made with MCUboot's `imgtool` from a 600-byte payload, used by
-`../mcuboot.test.mjs`. They are not real firmware and no device trusts the keys that
-signed them: those keys were generated for the tests and discarded, and only their
-public halves (`test_signing_pub.pem`, `other_signing_pub.pem`) are kept here.
+`../mcuboot.test.mjs` and by the API tests next to it. They are not real firmware and no
+device trusts the keys that signed them: those keys were generated for the tests and
+discarded, and only their public halves (`test_signing_pub.pem`,
+`other_signing_pub.pem`) are kept here.
 
 Every image was made with
 `imgtool sign --header-size 0x200 --pad-header --align 4 --slot-size 0x10000` plus:

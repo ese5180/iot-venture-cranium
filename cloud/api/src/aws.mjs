@@ -13,7 +13,8 @@
  * memory; keep the two in step.
  *
  * createAws(env) reads AWS_REGION, STATE_TABLE, AUDIT_TABLE, FIRMWARE_BUCKET,
- * THING_GROUP, PRESIGN_ROLE_ARN and USER_POOL_ID.
+ * THING_GROUP, PRESIGN_ROLE_ARN and USER_POOL_ID. Every method is async. Arguments are
+ * expected to be validated already: thing names, job ids and keys go to AWS as given.
  *
  * Things and shadows
  *   listGroupThings()             -> string[]        names of all things in the group, any order
@@ -48,22 +49,25 @@
  *                                 -> { ok: true }
  *                                  | { ok: false, reason: "exists" }            the id is taken
  *                                  | { ok: false, reason: "target_not_found" }  a thing is gone
- *                                    a snapshot job on exactly these things; AWS IoT presigns
- *                                    the download URL in the document with the presign role
+ *                                    a snapshot job on exactly these things (names); document
+ *                                    and description are text; AWS IoT presigns the download
+ *                                    URL in the document with the presign role
  *   cancelJob({ jobId, force, reasonCode, comment })
  *                                 -> { ok: true }
  *                                  | { ok: false, reason: "not_found" }
  *                                  | { ok: false, reason: "refused", detail }   AWS will not
  *                                    cancel the job in the state it is in
+ *                                    force: also cancel executions that are in progress
  *
- * Firmware objects
+ * Firmware objects (key is the S3 key, body a Buffer, sha256Base64 its SHA-256 in base64)
  *   putFirmwareObject({ key, body, sha256Base64 })
  *                                 -> { stored: true }
  *                                  | { stored: false, reason: "exists" }        the key is taken;
  *                                    nothing was written
  *   tagFirmwareRevoked(key)       -> { ok: true } | { ok: false, reason: "not_found" }
  *
- * Releases (state table; an item is the release plus pk and sk)
+ * Releases (state table; an item is the release plus pk and sk). Items hold plain data
+ * only: text, finite numbers, booleans, null, lists and maps. Anything else is a TypeError.
  *   getRelease(sk)                -> object | null   consistent read
  *   listReleases()                -> object[]        highest sk first
  *   registerRelease({ sk, release })
@@ -346,8 +350,9 @@ export function createAws(env) {
       try {
         // The payload is the document as bytes.
         return JSON.parse(Buffer.from(payload ?? []).toString('utf8'));
-      } catch (cause) {
-        throw failure('GetThingShadow', cause, 'failed');
+      } catch {
+        // The parser's own message would quote the document into the log.
+        throw failure('GetThingShadow', new Error('the shadow is not valid JSON'), 'failed');
       }
     },
 
@@ -510,6 +515,7 @@ export function createAws(env) {
             Body: body,
             ContentType: 'application/octet-stream',
             // S3 checks the bytes it received against this digest before it stores them.
+            ChecksumAlgorithm: 'SHA256',
             ChecksumSHA256: sha256Base64,
             // Write once: refuse if the key exists. The bucket policy demands this header.
             IfNoneMatch: '*',

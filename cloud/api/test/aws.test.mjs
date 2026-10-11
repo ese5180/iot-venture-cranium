@@ -306,12 +306,19 @@ const THING_ARN = `arn:aws:iot:eu-west-1:000000000000:thing/${THING}`;
 const JOB = 'cranium-1-2-3-b4-20261010T221500Z-9f3a';
 const T0 = Date.UTC(2026, 9, 10, 22, 15, 0);
 
-// The adapter logs the SDK version when it is loaded.
+// The adapter logs the SDK version when it is loaded. It reads the version from the
+// SDK's package.json; Node 22 before 22.12 announces that kind of import as
+// experimental, which says nothing about the code under test.
 const startup = [];
 const realLog = console.log;
+const realWarning = process.emitWarning;
 console.log = (line) => startup.push(line);
+process.emitWarning = (warning, ...rest) => {
+  if (!String(warning).includes('Importing JSON modules')) realWarning.call(process, warning, ...rest);
+};
 const { createAws } = await import('../src/aws.mjs');
 console.log = realLog;
+process.emitWarning = realWarning;
 
 function adapter(env = ENV) {
   sdk.reset();
@@ -764,6 +771,7 @@ test('putFirmwareObject writes once, with the SHA-256 for S3 to check', async ()
     Key: key,
     Body: body,
     ContentType: 'application/octet-stream',
+    ChecksumAlgorithm: 'SHA256',
     ChecksumSHA256: sha256Base64,
     IfNoneMatch: '*',
   }]);

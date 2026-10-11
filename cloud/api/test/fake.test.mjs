@@ -107,6 +107,26 @@ test('a job starts in progress with every board queued', async () => {
   assert.equal(await fake.describeJobExecution(JOB, 'cranium-00000000000000ff'), null);
 });
 
+test('a board is handed the job in progress first, then the one queued longest', async () => {
+  const { fake, clock, job } = setup();
+  assert.equal(fake.device(THING).nextJob(), null);
+  await fake.createJob(job({ jobId: 'first', document: '{"n":1}' }));
+  clock.ms += 1000;
+  await fake.createJob(job({ jobId: 'second', document: '{"n":2}' }));
+  assert.deepEqual(fake.device(THING).nextJob(), { jobId: 'first', status: 'QUEUED', document: { n: 1 } });
+
+  fake.execution('second', THING).update('IN_PROGRESS', { step: 'downloading' });
+  assert.deepEqual(fake.device(THING).nextJob(), { jobId: 'second', status: 'IN_PROGRESS', document: { n: 2 } });
+  fake.execution('second', THING).update('SUCCEEDED');
+  assert.equal(fake.device(THING).nextJob().jobId, 'first');
+  // The other board has its own executions of the same jobs.
+  assert.equal(fake.device(OTHER).nextJob().jobId, 'first');
+
+  await fake.cancelJob({ jobId: 'first', force: false, reasonCode: 'X', comment: 'who' });
+  assert.equal(fake.device(THING).nextJob(), null);
+  assert.equal(fake.device(OTHER).nextJob().jobId, 'second');
+});
+
 test('a board moves its execution forward and never back', async () => {
   const { fake, clock, job } = setup();
   await fake.createJob(job());

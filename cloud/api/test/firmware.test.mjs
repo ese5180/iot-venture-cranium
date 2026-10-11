@@ -21,11 +21,15 @@ const LOAD_ADDRESS = 0x30000;
 const throwaway = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const throwawayDer = throwaway.publicKey.export({ type: 'spki', format: 'der' });
 
+// What surrounds the payload in a built image: the header, the TLV info, the hash and
+// key hash entries, and the signature entry with the longest DER signature (72 bytes).
+const IMAGE_OVERHEAD = 0x200 + 4 + 36 + 36 + 4 + 72;
+
 /** A minimal MCUboot image of the given version, signed with the throwaway key. */
-function builtImage(version, { fill = 0xa5 } = {}) {
+function builtImage(version, { fill = 0xa5, payloadSize = 96 } = {}) {
   const { major, minor, revision, build } = parseVersion(version);
   const header = Buffer.alloc(0x200);
-  const payload = Buffer.alloc(96, fill);
+  const payload = Buffer.alloc(payloadSize, fill);
   header.writeUInt32LE(0x96f3b83d, 0);
   header.writeUInt32LE(LOAD_ADDRESS, 4);
   header.writeUInt16LE(header.length, 8);
@@ -192,6 +196,26 @@ test('an image larger than the slot is refused', async () => {
   const response = await full.upload(Buffer.alloc(SLOT_SIZE, 0x11));
   assert.equal(response.status, 422);
   assert.equal(response.body.error.code, 'bad_magic');
+});
+
+test('an image that fills the slot fits in one request', async () => {
+  const { fake, upload } = setupWithBuiltImages();
+  // As large as an image can be: at most two bytes short of the slot, depending on
+  // the length of its signature.
+  const largest = builtImage('3.0.0+1', { payloadSize: SLOT_SIZE - IMAGE_OVERHEAD });
+  assert.ok(largest.length <= SLOT_SIZE && largest.length >= SLOT_SIZE - 2, String(largest.length));
+  const body = JSON.stringify(bodyFor(largest, { notes: 'n'.repeat(500) }));
+  assert.ok(body.length < 1_400_000, String(body.length));
+
+  const response = await upload(largest, { notes: 'n'.repeat(500) });
+  assert.equal(response.status, 201);
+  assert.equal(response.body.release.size, largest.length);
+  assert.ok(fake.objects.get(`firmware/${sha256(largest)}.bin`).body.equals(largest));
+
+  // Three bytes more no longer fit the slot, whatever the signature length.
+  const tooLarge = await upload(builtImage('3.0.0+2', { payloadSize: SLOT_SIZE - IMAGE_OVERHEAD + 3 }));
+  assert.equal(tooLarge.status, 422);
+  assert.equal(tooLarge.body.error.code, 'too_large');
 });
 
 test('the request is checked before the image is looked at', async () => {

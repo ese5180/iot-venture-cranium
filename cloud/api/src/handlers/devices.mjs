@@ -80,9 +80,9 @@ export function createDeviceHandlers({ aws, now, log }) {
     });
   }
 
-  /** The names of the project's boards, sorted. */
+  /** The names of the project's boards, each once, sorted. */
   async function groupThings() {
-    return (await aws.listGroupThings()).filter(isThing).sort();
+    return [...new Set((await aws.listGroupThings()).filter(isThing))].sort();
   }
 
   return {

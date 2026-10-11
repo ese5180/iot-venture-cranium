@@ -15,6 +15,7 @@
 //   fake.addThing('cranium-0123456789abcdef', { certificates: ['<64 hex>'] });
 //   fake.addUser({ sub, email, groups: ['release-managers'] });
 //   fake.device(thing).report({ fw: { version: '1.0.0+3', confirmed: true }, uptime: 60, ... });
+//   fake.device(thing).nextJob();                    // { jobId, status, document } or null
 //   fake.execution(jobId, thing).update('IN_PROGRESS', { step: 'downloading' });   // { accepted: true }
 //
 // A board that follows the device contract goes: report ota.state "awaiting_user" with
@@ -483,6 +484,24 @@ export function createFakeAws({ now = Date.now, rolloutDelayMs = 0 } = {}) {
         },
         get() {
           return copy(shadows.get(thing) ?? null);
+        },
+        /**
+         * What the board gets when it asks AWS IoT for its next job: the execution in
+         * progress, or else the one queued longest, as { jobId, status, document }; null
+         * if there is none. AWS would put a download URL where the document names one.
+         */
+        nextJob() {
+          const pending = [];
+          for (const job of jobs.values()) {
+            const execution = settle(job).executions.get(thing);
+            if (execution !== undefined && !TERMINAL.has(execution.status)) pending.push({ job, execution });
+          }
+          pending.sort((a, b) =>
+            (a.execution.status === 'IN_PROGRESS' ? 0 : 1) - (b.execution.status === 'IN_PROGRESS' ? 0 : 1) ||
+            a.execution.queuedAt - b.execution.queuedAt);
+          if (pending.length === 0) return null;
+          const [{ job, execution }] = pending;
+          return { jobId: job.jobId, status: execution.status, document: JSON.parse(job.document) };
         },
       };
     },
