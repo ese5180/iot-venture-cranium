@@ -298,11 +298,15 @@ main() {
 
   step "5/9 State of $STACK"
   local status
+  # Parameters that only a first deployment sets.
+  local creation=()
   prepare_stack "$STACK"
   status="$(stack_status "$STACK")"
   case "$status" in
     NONE|REVIEW_IN_PROGRESS)
       echo "Not deployed yet; it will be created"
+      # Fixed for the life of the user pool, so it is chosen here and never again.
+      creation=(SignInNamesCaseSensitive=false)
       if [ "$requested_protection" = ACTIVE ]; then
         die "UserPoolDeletionProtection=ACTIVE cannot be given for the first deployment:" \
           "a protected pool could not be removed if the creation failed. Leave it out;" \
@@ -320,7 +324,7 @@ main() {
     --template-file "$CLOUD_DIR/infra/template.yaml" \
     --s3-bucket "$artifacts_bucket" --s3-prefix "$STACK" \
     --output-template-file "$DEPLOY_DIR/packaged.yaml" > /dev/null
-  local overrides=("SigningPublicKey=$signing_key" ${extra[@]+"${extra[@]}"})
+  local overrides=("SigningPublicKey=$signing_key" ${creation[@]+"${creation[@]}"} ${extra[@]+"${extra[@]}"})
   deploy_stack "$STACK" "$DEPLOY_DIR/packaged.yaml" \
     --s3-bucket "$artifacts_bucket" --s3-prefix "$STACK" \
     --capabilities CAPABILITY_IAM --parameter-overrides "${overrides[@]}"

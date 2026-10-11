@@ -36,6 +36,17 @@ Parameters:
     Default: INFO
     AllowedValues: [ERROR, WARN, INFO, DEBUG, DISABLED]
     Description: Default level of AWS IoT logging for the whole account in this Region.
+  SignInNamesCaseSensitive:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Whether sign-in names (e-mail addresses) are compared exactly. This is fixed when
+      the user pool is created. deploy.sh sets it to false when it creates the stack; the
+      default leaves a pool that was created before this parameter existed as it is.
+
+Conditions:
+  CaseInsensitiveSignIn: !Equals [!Ref SignInNamesCaseSensitive, 'false']
 
 Resources:
 
@@ -185,9 +196,12 @@ Resources:
       UsernameAttributes:
         - email
       # Without this, sign-in names are case sensitive: an address typed with a capital
-      # letter is a different user. It cannot be changed once the pool exists.
-      UsernameConfiguration:
-        CaseSensitive: false
+      # letter is a different user. It cannot be changed once the pool exists, so it
+      # follows a parameter that only a first deployment sets.
+      UsernameConfiguration: !If
+        - CaseInsensitiveSignIn
+        - CaseSensitive: false
+        - !Ref AWS::NoValue
       AutoVerifiedAttributes:
         - email
       AdminCreateUserConfig:
