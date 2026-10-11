@@ -1,0 +1,40 @@
+#
+# Sysbuild configuration: which images are built next to the application.
+#
+
+# MCUboot is always part of the build: nothing runs unless it verified the signature.
+choice BOOTLOADER
+	default BOOTLOADER_MCUBOOT
+endchoice
+
+# Without this sysbuild forces the nRF70 Wi-Fi driver off in the application image.
+config WIFI_NRF70
+	default y
+
+# Flash and RAM layout come from the devicetree overlays in boards/.
+config PARTITION_MANAGER
+	default n
+
+# The nRF5340 network core runs this project's own image instead of a radio stack.
+config SUPPORT_NETCORE_BLINKY
+	bool
+	default y if SOC_SERIES_NRF53
+
+choice NETCORE
+
+config NETCORE_BLINKY
+	bool "Cranium base-function image (LED heartbeat)"
+	depends on SUPPORT_NETCORE_BLINKY
+	help
+	  Build firmware/netcore as the network-core image. It has no radio stack,
+	  no keys and no console; it only toggles an LED.
+
+endchoice
+
+config NETCORE_IMAGE_NAME
+	default "netcore_blinky" if NETCORE_BLINKY
+
+config NETCORE_IMAGE_PATH
+	default "$(APP_DIR)/../netcore" if NETCORE_BLINKY
+
+source "share/sysbuild/Kconfig"

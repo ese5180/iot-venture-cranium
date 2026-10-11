@@ -1,0 +1,10 @@
+/*
+ * Based on nRF Connect SDK v3.4.0 samples/net/aws_iot/sysbuild/mcuboot/app.overlay
+ * (Copyright (c) 2024 Nordic Semiconductor ASA, LicenseRef-Nordic-5-Clause).
+ */
+
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};

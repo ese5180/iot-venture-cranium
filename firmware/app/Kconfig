@@ -1,0 +1,87 @@
+#
+# Cranium application settings.
+#
+
+menu "Cranium application"
+
+config APP_THING_NAME_PREFIX
+	string "Prefix of the AWS IoT thing name"
+	default "cranium-"
+	help
+	  The thing name, which is also the MQTT client ID, is this prefix followed by
+	  the SoC's factory-programmed device identifier.
+
+config APP_DOWNLOAD_SEC_TAG
+	int "TLS security tag for firmware downloads"
+	default 202
+	help
+	  Holds only the root CA used to verify the download server. The device
+	  certificate and private key are under CONFIG_MQTT_HELPER_SEC_TAG and are not
+	  loaded for downloads.
+
+config APP_SHADOW_INTERVAL_SECONDS
+	int "Seconds between periodic device shadow reports"
+	default 60
+	range 10 3600
+
+config APP_CLOUD_RETRY_SECONDS
+	int "Seconds to wait before the first retry of a failed cloud connection"
+	default 30
+	range 5 600
+	help
+	  The wait doubles after every failure, up to five minutes.
+
+config APP_WATCHDOG_TIMEOUT_SECONDS
+	int "Hardware watchdog timeout"
+	default 120
+	range 30 600
+	help
+	  The main event loop feeds the watchdog. If the loop stops, the device resets,
+	  and an update that has not been confirmed yet is reverted by the bootloader.
+
+config APP_OTA_REQUIRE_USER_CONSENT
+	bool "Wait for a button press before installing an update"
+	default y
+	help
+	  An update that passed every check is only offered. It is downloaded and
+	  installed after Button 1 is pressed, and refused if Button 2 is pressed.
+
+config APP_OTA_SELF_TEST_TIMEOUT_SECONDS
+	int "Seconds a new image has to prove itself"
+	default 300
+	range 60 3600
+	help
+	  A newly installed image runs on trial. If it has not reconnected to the cloud
+	  within this time, the device resets and the bootloader restores the previous
+	  image.
+
+config APP_OTA_DOWNLOAD_ATTEMPTS
+	int "Download attempts per update before it is reported as failed"
+	default 3
+	range 1 10
+
+config APP_PROVISIONING_SHELL
+	bool "Provisioning commands on the serial console"
+	depends on SHELL
+	default y
+	select BASE64
+	help
+	  Commands that store the Wi-Fi network, the cloud settings and the device
+	  credentials. For development and provisioning builds only; a release build
+	  has no shell.
+
+config APP_VERSION_FROM_BUILD
+	bool
+	default y
+	help
+	  Take the firmware version from the VERSION file. Off only in host-side tests.
+
+module = APP
+module-str = Cranium application
+source "subsys/logging/Kconfig.template.log_config"
+
+endmenu
+
+menu "Zephyr Kernel"
+source "Kconfig.zephyr"
+endmenu

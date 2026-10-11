@@ -1,0 +1,50 @@
+/*
+ * MCUboot's view of the flash layout. It must match the application overlay
+ * (boards/nrf7002dk_nrf5340_cpuapp_ns.overlay in the application directory).
+ *
+ * Based on nRF Connect SDK v3.4.0
+ * samples/net/aws_iot/sysbuild/mcuboot/boards/nrf7002dk_nrf5340_cpuapp.overlay
+ * (Copyright (c) 2023 Nordic Semiconductor ASA, LicenseRef-Nordic-5-Clause).
+ */
+
+/ {
+	chosen {
+		nordic,pm-ext-flash = &mx25r64;
+		zephyr,code-partition = &boot_partition;
+	};
+};
+
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+
+&flash0 {
+	partitions {
+		boot_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "mcuboot";
+			reg = <0x0 0x10000>;
+		};
+
+		slot0_partition: partition@10000 {
+			compatible = "zephyr,mapped-partition";
+			label = "image-0";
+			reg = <0x10000 0xe4000>;
+		};
+	};
+};
+
+&mx25r64 {
+	status = "okay";
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		slot1_partition: partition@0 {
+			label = "image-1";
+			reg = <0x0 0xe4000>;
+		};
+	};
+};

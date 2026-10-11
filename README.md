@@ -71,3 +71,43 @@ We are developing a mounted attachment to beginner DJ controllers in order to re
 | SRS 03 | MCU/PI Handshake          | The MCU shall exchange a heartbeat with the PI over UART and report battery life.                                                                                                                                                          |
 | SRS 04 | Library Support           | The system shall support libraries prepared directly from a USB drive, keeping the user's playlists and saved track markers.                                                                                                               |
 | SRS 05 | Data Integrity            | The MCU shall trigger a graceful shutdown, with no filesystem corruption, when the battery drops below 5%.                                                                                                                                 |
+
+## Secure Firmware Updates
+
+Firmware for the nRF7002 DK is in [`firmware/`](firmware/README.md).
+
+- **Draw and describe your bootloading process**
+  ![Boot process](<./pics/Boot Process.png>)
+
+  On every reset MCUboot checks the SHA-256 and the ECDSA P-256 signature of the image in
+  the primary slot and starts it only if they are valid. The image holds TF-M, which runs
+  first and keeps keys, crypto and encrypted storage in the secure world, and the
+  application, which runs in the non-secure world. The application then starts the second
+  core of the nRF5340, which runs a blinky as the base function and is not updated over
+  the air.
+
+  An update is offered as an AWS IoT job. Nothing is downloaded until Button 1 on the
+  board is pressed (SEC 04). The application downloads the image into the secondary slot,
+  checks it, and resets. MCUboot verifies the signature, swaps the slots and starts the
+  new image on trial. The new image has to reconnect to AWS IoT before it marks itself as
+  good; if it does not, the next reset swaps the previous image back.
+
+| Question | Answer |
+| --- | --- |
+| How large is your bootloader? | MCUboot is 39,988 bytes in a 64 KB partition. |
+| How large is your existing application code? | The application is 637,660 bytes and TF-M is 130,008 bytes. Together they are one signed image of about 768,900 bytes in a 912 KB slot (the signature's length varies by a byte or two from build to build). |
+| Does the bootloader or application code handle the firmware image download? | The application. MCUboot has no network stack; it only verifies and swaps images. |
+| What wireless communication is used to download the images? | Wi-Fi (nRF7002). The job arrives over MQTT with mutual TLS from AWS IoT, and the image is downloaded over HTTPS from a short-lived, signed S3 link. |
+| Why this method? | The image is about 770 KB. Wi-Fi reaches the server directly and has the bandwidth for it; Bluetooth would need a phone as a relay and stays free for audio and the controller link. |
+| Where are the downloaded firmware images stored? | In the secondary slot on the external SPI flash of the DK (MX25R64). The running image stays in internal flash until the swap. |
+
+**Features that handle update failures**
+
+| Failure | What happens |
+| --- | --- |
+| Invalid signature, or signed with another key | MCUboot verifies every image with this project's public key before swapping and on every boot. An image that fails is never started; the board keeps running the current firmware and reports the update as failed. The server also refuses to accept such a file. |
+| Older firmware (rollback) | The application refuses a job that is not newer than what it runs, and MCUboot refuses to swap in a lower version. |
+| Corrupted or incomplete download | The application compares the SHA-256 of what is in the secondary slot with the digest in the job and checks that the signed header carries the announced version. On a mismatch the image is erased and nothing is installed. A failed download is retried with a fresh link, three times at most. |
+| Faulty code with a valid signature | The new image runs on trial. It must join Wi-Fi and reach AWS IoT within 5 minutes to confirm itself; a watchdog covers a hang. Without the confirmation the next reset makes MCUboot swap the previous image back, and the board reports the rollback. |
+| Power loss during the swap | MCUboot's swap-using-move continues the swap on the next boot. |
+| Update cancelled after it was offered | The board asks AWS IoT before the download and again before installing; a cancelled job is dropped and the downloaded image erased. |

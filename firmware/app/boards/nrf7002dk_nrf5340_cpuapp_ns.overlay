@@ -1,0 +1,145 @@
+/*
+ * nRF7002 DK application core: flash and RAM layout, external flash, and the pins
+ * handed to the network core.
+ *
+ * Based on nRF Connect SDK v3.4.0
+ * samples/net/aws_iot/boards/nrf7002dk_nrf5340_cpuapp_ns.overlay
+ * (Copyright (c) 2023 Nordic Semiconductor ASA, LicenseRef-Nordic-5-Clause).
+ */
+
+/ {
+	chosen {
+		/*
+		 * Tells the build that the secondary image slot is on external flash.
+		 * Needed even though Partition Manager is not used.
+		 */
+		nordic,pm-ext-flash = &mx25r64;
+	};
+};
+
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+/delete-node/ &tfm_its_partition;
+/delete-node/ &tfm_otp_partition;
+/delete-node/ &tfm_ps_partition;
+/delete-node/ &storage_partition;
+
+/*
+ * Internal flash (1 MiB):
+ *
+ *   0x00000  64 KiB   MCUboot (write-protected once it has started the application)
+ *   0x10000 912 KiB   primary image slot
+ *             128 KiB   TF-M, secure
+ *             784 KiB   application, non-secure
+ *   0xf4000  48 KiB   TF-M storage: internal trusted storage, NV counters, protected storage
+ */
+&flash0 {
+	partitions {
+		boot_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "mcuboot";
+			reg = <0x0 0x10000>;
+		};
+
+		slot0_partition: partition@10000 {
+			compatible = "zephyr,mapped-partition";
+			label = "image-0";
+			reg = <0x10000 0xe4000>;
+			ranges = <0x0 0x10000 0xe4000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			slot0_s_partition: partition@0 {
+				compatible = "zephyr,mapped-partition";
+				label = "image-0-secure";
+				reg = <0x0 0x20000>;
+			};
+
+			slot0_ns_partition: partition@20000 {
+				compatible = "zephyr,mapped-partition";
+				label = "image-0-nonsecure";
+				reg = <0x20000 0xc4000>;
+			};
+		};
+
+		tfm_storage_partition: partition@f4000 {
+			compatible = "zephyr,mapped-partition";
+			label = "tfm-storage";
+			reg = <0xf4000 DT_SIZE_K(48)>;
+			ranges = <0x0 0xf4000 DT_SIZE_K(48)>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			tfm_its_partition: partition@0 {
+				compatible = "zephyr,mapped-partition";
+				label = "tfm-its";
+				reg = <0x0 DT_SIZE_K(8)>;
+			};
+
+			tfm_otp_partition: partition@4000 {
+				compatible = "zephyr,mapped-partition";
+				label = "tfm-otp";
+				reg = <0x4000 DT_SIZE_K(8)>;
+			};
+
+			tfm_ps_partition: partition@8000 {
+				compatible = "zephyr,mapped-partition";
+				label = "tfm-ps";
+				reg = <0x8000 DT_SIZE_K(16)>;
+			};
+		};
+	};
+};
+
+/* External flash: the secondary image slot, the same size as the primary slot. */
+&mx25r64 {
+	status = "okay";
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		slot1_partition: partition@0 {
+			label = "image-1";
+			reg = <0x0 0xe4000>;
+		};
+	};
+};
+
+/*
+ * RAM split between the secure and the non-secure domain. TF-M gets 48 KiB at the base
+ * of the application-core SRAM; the non-secure window is 0x74000 bytes, of which the
+ * top 64 KiB is the memory the two cores can share.
+ */
+&sram0_s {
+	reg = <0x0 0xc000>;
+};
+
+&sram0_ns {
+	reg = <0xc000 0x74000>;
+	ranges = <0x0 0xc000 0x74000>;
+};
+
+&sram0_ns_app {
+	reg = <0x0 0x64000>;
+};
+
+/*
+ * Pins owned by the network core. By default the board forwards the network core's
+ * UART pins; this image has no console, so only LED2 (P1.07) is handed over. LED1 and
+ * both buttons stay with the application core.
+ */
+&gpio_fwd {
+	/delete-node/ uart;
+
+	netcore-led {
+		gpios = <&gpio1 7 0>;
+	};
+};
+
+/* LED1 (P1.06) is driven as a plain GPIO, so release it from the PWM peripheral. */
+&pwm0 {
+	status = "disabled";
+};

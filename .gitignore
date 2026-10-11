@@ -1,1 +1,29 @@
+# Editor
 .vscode
+.DS_Store
+
+# Build output
+build/
+build_*/
+build-*/
+__pycache__/
+*.pyc
+node_modules/
+
+# Local secrets: nothing in secrets/ is tracked except documentation and templates
+/secrets/*
+!/secrets/README.md
+!/secrets/*.example
+
+# Private key material anywhere in the tree
+*.key
+*.p12
+*.pfx
+*private*.pem
+*signing*key*.pem
+
+# Account-specific deployment output and local environment files
+/cloud/.deploy/
+.env
+.env.*
+*.local.json
