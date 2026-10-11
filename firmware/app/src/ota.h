@@ -5,9 +5,10 @@
  * than what it runs and waits for a button press; until then the job stays queued in
  * the cloud and can simply be withdrawn. After the press it tells the cloud that it
  * starts, downloads the image over HTTPS into the secondary slot in external flash,
- * checks its SHA-256, tells the cloud that it is about to install, and asks the
- * bootloader for a trial swap. Both announcements have to be accepted before the
- * device goes on, so a job that was cancelled in the meantime is never installed.
+ * checks its SHA-256 and tells the cloud that it is about to install. Both
+ * announcements have to be accepted before the device goes on. It then waits a
+ * little, looks at the job once more, and only then asks the bootloader for a trial
+ * swap and restarts, so that a job cancelled in the meantime is not installed.
  * The bootloader verifies the signature. The new image must reach the cloud again
  * before it is confirmed; otherwise the previous image comes back. The job is only
  * reported as succeeded after that confirmation.
@@ -36,7 +37,9 @@ enum ota_state {
 	OTA_VERIFYING,
 	/* The image is good. Told the cloud that it gets installed; waiting for it to agree. */
 	OTA_COMMITTING,
-	/* Trial swap requested; the device restarts in a moment. */
+	/* The installation was accepted. After one more look at the job the image is
+	 * handed to the bootloader and the device restarts.
+	 */
 	OTA_REBOOTING,
 	/* A new image is running and has not been confirmed yet. */
 	OTA_TESTING,

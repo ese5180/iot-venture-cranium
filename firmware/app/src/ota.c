@@ -26,7 +26,13 @@ LOG_MODULE_REGISTER(ota, CONFIG_APP_LOG_LEVEL);
 
 #define REFRESH_TIMEOUT_SECONDS 20
 #define ACK_TIMEOUT_SECONDS     20
-#define REBOOT_DELAY_SECONDS    3
+/*
+ * AWS IoT applies a forced cancellation a few seconds after it is requested (5 to 15
+ * were measured), and until then it still accepts this device's announcements. So
+ * the device does not restart as soon as the installation is accepted: it waits this
+ * long, asks once more, and restarts only if the job is still listed as in progress.
+ */
+#define SETTLE_SECONDS          20
 #define REPORT_RETRY_SECONDS    30
 #define PROGRESS_STEP_PERCENT   10
 #define HASH_CHUNK_SIZE         1024
@@ -68,6 +74,8 @@ static struct {
 	struct ota_job job;
 	/* The cloud has accepted that this device is working on the job. */
 	bool started;
+	/* Waiting for the answer to the last look at the job before restarting. */
+	bool last_look;
 	/* A job this device has just closed. Replies that were already on their way
 	 * may still list it; they must not bring it back.
 	 */
@@ -456,7 +464,19 @@ static void check_download(void)
 	announce_commit();
 }
 
-/* The cloud agreed: hand the image to the bootloader and restart. */
+/* The cloud agreed to the installation: wait before acting on it (see SETTLE_SECONDS). */
+static void begin_settling(void)
+{
+	LOG_INF("Installation accepted. Looking at the job once more in %d s", SETTLE_SECONDS);
+	ota.last_look = false;
+	enter(OTA_REBOOTING);
+}
+
+/*
+ * The job is still wanted after the settle time: hand the image to the bootloader and
+ * restart. Nothing was requested from the bootloader before this point, so a reset
+ * during the wait installs nothing.
+ */
 static void install_download(void)
 {
 	int err;
@@ -486,7 +506,9 @@ static void install_download(void)
 	}
 
 	LOG_INF("Restarting into the bootloader to install the image");
-	enter(OTA_REBOOTING);
+	cloud_disconnect();
+	LOG_PANIC();
+	sys_reboot(SYS_REBOOT_COLD);
 }
 
 /*
@@ -528,10 +550,12 @@ static void on_job_withdrawn(void)
 		abandon_job(false);
 		break;
 	case OTA_COMMITTING:
+	case OTA_REBOOTING:
+		/* Downloaded and checked, but not handed to the bootloader yet. */
 		abandon_job(true);
 		break;
 	default:
-		/* Idle, or already handed to the bootloader. */
+		/* Idle, or running a new image on trial. */
 		break;
 	}
 }
@@ -576,6 +600,23 @@ static void on_job(const struct ota_job *incoming)
 	if ((ota.have_record && strcmp(incoming->id, ota.record.job_id) == 0) ||
 	    strcmp(incoming->id, ota.closed_job_id) == 0) {
 		return;
+	}
+
+	if (ota.state == OTA_REBOOTING && same_job) {
+		/* The last look: still in progress after the settle time means go. */
+		if (ota.last_look && incoming->in_progress) {
+			install_download();
+		}
+		return;
+	}
+
+	/*
+	 * AWS IoT lists a job that is in progress before any other. If it names a
+	 * different one while this device is working on a job, that job is gone.
+	 */
+	if (!same_job && (ota.state == OTA_STARTING || ota.state == OTA_DOWNLOADING ||
+			  ota.state == OTA_COMMITTING || ota.state == OTA_REBOOTING)) {
+		on_job_withdrawn();
 	}
 
 	switch (ota.state) {
@@ -807,7 +848,7 @@ void ota_on_job_ack(char kind, uint16_t sequence, bool accepted, bool permanent)
 			break;
 		}
 		if (accepted) {
-			install_download();
+			begin_settling();
 		} else if (permanent) {
 			abandon_job(true);
 		}
@@ -912,10 +953,19 @@ void ota_on_tick(void)
 		}
 		break;
 	case OTA_REBOOTING:
-		if (ota.seconds_in_state >= REBOOT_DELAY_SECONDS) {
-			cloud_disconnect();
-			LOG_PANIC();
-			sys_reboot(SYS_REBOOT_COLD);
+		/* After the settle time, look at the job once more. The reply decides: see
+		 * on_job() and on_job_withdrawn(). Without a connection there is no reply,
+		 * and so no restart, until the cloud is reachable again.
+		 */
+		if (!ota.last_look && ota.seconds_in_state >= SETTLE_SECONDS) {
+			if (cloud_jobs_request_next() == 0) {
+				ota.last_look = true;
+				ota.seconds_in_state = 0;
+			}
+		} else if (ota.last_look && ota.seconds_in_state >= REFRESH_TIMEOUT_SECONDS) {
+			/* No answer: ask again. */
+			ota.last_look = false;
+			ota.seconds_in_state = SETTLE_SECONDS;
 		}
 		break;
 	default:
