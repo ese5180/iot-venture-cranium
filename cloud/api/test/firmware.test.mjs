@@ -122,7 +122,8 @@ test('a correctly signed image becomes a release', async () => {
 
   // Checked first, stored second, registered third, logged last.
   assert.deepEqual(fake.methodsCalled(),
-    ['getUser', 'listUserGroups', 'putFirmwareObject', 'registerRelease', 'putAudit']);
+    ['getUser', 'listUserGroups', 'getRelease', 'highestReleaseKey', 'putFirmwareObject', 'registerRelease',
+      'putAudit']);
 });
 
 test('the other well-formed fixtures are accepted too', async () => {
@@ -328,6 +329,8 @@ test('versions are ordered as numbers: 1.9.0 is older than 1.10.0', async () => 
     const response = await upload(builtImage(version, { fill: 0x3c }));
     assert.notEqual(response.status, 201, version);
   }
+  // A version that cannot be registered leaves no image behind: only the two releases are stored.
+  assert.equal(fake.objects.size, 2);
   for (const version of ['1.10.0+1', '1.10.1+0', '1.11.0+0', '2.0.0+0', '10.0.0+0', '255.255.65535+4294967295']) {
     assert.equal((await upload(builtImage(version))).status, 201, version);
   }
@@ -374,6 +377,7 @@ test('a version is registered once and never replaced', async () => {
   response = await upload(fixture('with-security-counter.signed.bin'), { notes: 'second try' });
   assert.equal(response.status, 409);
   assert.equal(response.body.error.code, 'version_exists');
+  assert.equal(fake.objects.size, 1);
 
   const [item] = [...fake.releases.values()];
   assert.equal(item.sha256, sha256(first));
@@ -425,6 +429,27 @@ test('two uploads at the same moment cannot both win', async () => {
   fake.registerRelease = original;
   assert.equal(response.status, 409);
   assert.equal(response.body.error.code, 'upload_conflict');
+  assert.equal(fake.releases.size, 0);
+});
+
+test('the transaction decides when another upload gets in after the first check', async () => {
+  const { fake, upload } = setup();
+  const original = fake.registerRelease;
+
+  // The same version was registered in the meantime.
+  fake.registerRelease = async () => ({ ok: false, reason: 'exists' });
+  let response = await upload(fixture('valid-1.2.3+4.signed.bin'));
+  assert.equal(response.status, 409);
+  assert.equal(response.body.error.code, 'version_exists');
+
+  // A higher version was registered in the meantime.
+  fake.registerRelease = async () => ({ ok: false, reason: 'not_newer', highest: '002.000.00000.0000000000' });
+  response = await upload(fixture('valid-1.2.3+4.signed.bin'));
+  assert.equal(response.status, 422);
+  assert.equal(response.body.error.code, 'version_not_newer');
+  assert.match(response.body.error.message, /2\.0\.0\+0/);
+
+  fake.registerRelease = original;
   assert.equal(fake.releases.size, 0);
 });
 

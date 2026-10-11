@@ -369,7 +369,7 @@ test('the adapter and the in-memory fake have the same methods', () => {
   const methods = Object.keys(real).sort();
   assert.deepEqual(methods, [
     'cancelJob', 'createJob', 'describeJob', 'describeJobExecution', 'getRelease', 'getShadow', 'getUser',
-    'listGroupThings', 'listJobExecutionsForJob', 'listJobExecutionsForThing', 'listJobs', 'listReleases',
+    'highestReleaseKey', 'listGroupThings', 'listJobExecutionsForJob', 'listJobExecutionsForThing', 'listJobs', 'listReleases',
     'listThingPrincipals', 'listUserGroups', 'markReleaseRevoked', 'putAudit', 'putFirmwareObject',
     'queryAudit', 'registerRelease', 'tagFirmwareRevoked',
   ]);
@@ -876,6 +876,21 @@ test('getRelease reads one item consistently and turns it into plain data', asyn
     text: 'x', number: -12.5, yes: true, no: false, nothing: null, list: ['a', 2, { deep: true }],
     map: { inner: { n: 0 } }, set: null, bytes: null,
   });
+});
+
+test('highestReleaseKey reads the pointer item consistently', async () => {
+  const aws = adapter();
+  sdk.reply('GetItemCommand', { Item: { pk: { S: 'META' }, sk: { S: 'HIGHEST' }, highest: { S: SK } } });
+  assert.equal(await aws.highestReleaseKey(), SK);
+  assert.deepEqual(sdk.inputs('GetItemCommand'), [{
+    TableName: 'state-table', Key: { pk: { S: 'META' }, sk: { S: 'HIGHEST' } }, ConsistentRead: true,
+  }]);
+
+  // Before the first release there is no pointer.
+  sdk.reply('GetItemCommand', {});
+  assert.equal(await aws.highestReleaseKey(), null);
+  sdk.reply('GetItemCommand', fails('ProvisionedThroughputExceededException'));
+  await rejectsWith(aws.highestReleaseKey(), { code: 'throttled', operation: 'GetItem' });
 });
 
 test('listReleases queries the release partition, highest version first, every page', async () => {

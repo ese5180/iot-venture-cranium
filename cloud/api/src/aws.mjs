@@ -70,6 +70,8 @@
  * only: text, finite numbers, booleans, null, lists and maps. Anything else is a TypeError.
  *   getRelease(sk)                -> object | null   consistent read
  *   listReleases()                -> object[]        highest sk first
+ *   highestReleaseKey()           -> string | null   the highest sk ever registered,
+ *                                                    revoked releases included
  *   registerRelease({ sk, release })
  *                                 -> { ok: true }
  *                                  | { ok: false, reason: "exists" }            this sk is registered
@@ -564,6 +566,14 @@ export function createAws(env) {
         return await queryDescending(stateTable, RELEASE_PK);
       } catch (cause) {
         throw failure('Query', cause);
+      }
+    },
+
+    async highestReleaseKey() {
+      try {
+        return await highestRegistered();
+      } catch (cause) {
+        throw failure('GetItem', cause);
       }
     },
 

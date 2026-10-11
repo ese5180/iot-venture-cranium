@@ -355,6 +355,10 @@ export function createFakeAws({ now = Date.now, rolloutDelayMs = 0 } = {}) {
       return [...releases.keys()].sort().reverse().map((sk) => copy(releases.get(sk)));
     },
 
+    async highestReleaseKey() {
+      return highest ?? null;
+    },
+
     async registerRelease({ sk, release }) {
       if (typeof sk !== 'string' || sk === '') throw new TypeError('sk is required');
       assertStorable(release, 'release');

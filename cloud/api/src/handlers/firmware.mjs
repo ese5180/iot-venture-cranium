@@ -104,6 +104,19 @@ export function releaseFromItem(item) {
   };
 }
 
+function versionExists(version) {
+  return conflict('version_exists',
+    `Release ${version} already exists. A version is registered once and never replaced.`);
+}
+
+function versionNotNewer(version, highestKey) {
+  const highest = versionOfKey(highestKey);
+  return unprocessable('version_not_newer', highest === null
+    ? `Version ${version} is not newer than the releases that already exist.`
+    : `Version ${version} is not newer than ${highest}, the highest version ever ` +
+      'registered. Versions only go up, revoked releases included.');
+}
+
 export function createFirmwareHandlers({ aws, config, now, log }, { deployments }) {
   async function findRelease(version) {
     return releaseFromItem(await aws.getRelease(releaseKey(version.parts)));
@@ -156,6 +169,14 @@ export function createFirmwareHandlers({ aws, config, now, log }, { deployments 
           'The image has version 0.0.0+0. Set a version when you build the firmware.');
       }
 
+      // A version that cannot be registered is refused before the image is stored, so
+      // that a refused upload leaves nothing behind. The transaction further down
+      // still decides; two uploads at the same moment are settled there.
+      const sk = releaseKey(info.versionParts);
+      const [taken, highest] = await Promise.all([aws.getRelease(sk), aws.highestReleaseKey()]);
+      if (taken !== null) throw versionExists(info.version);
+      if (typeof highest === 'string' && !(highest < sk)) throw versionNotNewer(info.version, highest);
+
       // Stored under its own digest and never replaced. If the key is taken, the same
       // bytes are already there.
       await aws.putFirmwareObject({
@@ -180,19 +201,10 @@ export function createFirmwareHandlers({ aws, config, now, log }, { deployments 
         status: 'active',
         revoked: null,
       };
-      const registered = await aws.registerRelease({ sk: releaseKey(info.versionParts), release });
+      const registered = await aws.registerRelease({ sk, release });
       if (!registered.ok) {
-        if (registered.reason === 'exists') {
-          throw conflict('version_exists',
-            `Release ${info.version} already exists. A version is registered once and never replaced.`);
-        }
-        if (registered.reason === 'not_newer') {
-          const highest = versionOfKey(registered.highest);
-          throw unprocessable('version_not_newer', highest === null
-            ? `Version ${info.version} is not newer than the releases that already exist.`
-            : `Version ${info.version} is not newer than ${highest}, the highest version ever ` +
-              'registered. Versions only go up, revoked releases included.');
-        }
+        if (registered.reason === 'exists') throw versionExists(info.version);
+        if (registered.reason === 'not_newer') throw versionNotNewer(info.version, registered.highest);
         throw conflict('upload_conflict',
           'Another upload was being registered at the same moment. Try again.');
       }
