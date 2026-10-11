@@ -950,3 +950,26 @@ test('revoking again: a release that is revoked already is finished, not asked f
   assert.equal(textOf(notice), `It is not certain whether this went through. ${failed.message}`);
   assert.equal(one(revoking(open, { sending: true }).dialog, 'button', 'Finishing…').disabled, true);
 });
+
+test('a dialog says that a request failed next to its buttons, outside the part that scrolls', () => {
+  const failed = error(500, 'timeout', 'The server ran out of time. Try again in a moment.');
+  const mark = { by: MANAGER, at: ago(1980), reason: REASON, enforcedAt: null };
+  const dialogs = {
+    deploying: (changes) => wizard({ devices: [board(WAITING)], ...changes }).dialog,
+    cancelling: (changes) => cancelling(WORLD.deployments[1], changes).dialog,
+    revoking: (changes) => revoking(clientRelease('1.2.3+5'), { reason: REASON, ...changes }).dialog,
+    'revoking again': (changes) =>
+      revoking({ ...clientRelease('2.0.0+0'), status: 'revoked', revoked: mark }, changes).dialog,
+  };
+  const parts = (dialog) => one(dialog, 'form').children.map((part) => part.getAttribute('class'));
+  for (const [name, open] of Object.entries(dialogs)) {
+    assert.deepEqual(parts(open()), ['dialog-head', 'dialog-body', 'dialog-foot'], name);
+    // The body of a dialog scrolls. A message at its end would lie below what a small
+    // window shows, and the button that was used would seem to have done nothing.
+    const dialog = open({ error: failed });
+    assert.deepEqual(parts(dialog), ['dialog-head', 'dialog-body', 'dialog-error', 'dialog-foot'], name);
+    assert.equal(all(one(dialog, 'div.dialog-body'), 'div.notice').length, 0, name);
+    assert.equal(textOf(one(one(dialog, 'div.dialog-error'), 'span.notice-said')),
+      `It is not certain whether this went through. ${failed.message}`, name);
+  }
+});

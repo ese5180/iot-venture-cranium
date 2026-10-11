@@ -2262,6 +2262,23 @@ textarea.input {
   overflow-y: auto;
 }
 
+/*
+ * What the server said to a request that failed. It stands between the part that
+ * scrolls and the buttons, so that it is in view however small the window is. A
+ * message longer than the window can spare scrolls by itself. The space above it is
+ * its own, so that what scrolls past never touches it.
+ */
+.dialog-error {
+  flex: none;
+  max-height: 45vh;
+  padding: 10px 24px 20px;
+  overflow-y: auto;
+}
+
+.dialog-body:has(+ .dialog-error) {
+  padding-bottom: 6px;
+}
+
 .dialog-foot {
   display: flex;
   flex-wrap: wrap;
@@ -2710,6 +2727,10 @@ textarea.input {
 
   .dialog-body {
     padding: 10px 18px 20px;
+  }
+
+  .dialog-error {
+    padding: 10px 18px 16px;
   }
 
   .dialog-foot {

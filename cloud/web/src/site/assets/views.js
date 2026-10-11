@@ -1586,7 +1586,7 @@ export function activityView(ctx) {
 // Dialogs. Each is a form inside a <dialog>. It acts when one of its buttons is used,
 // never because Enter was pressed in a field, and every button says what it does.
 
-function dialogFrame({ title, body, foot, onSubmit, onClose, busy }) {
+function dialogFrame({ title, body, error, foot, onSubmit, onClose, busy }) {
   return h('form', {
     class: 'dialog-form',
     method: 'dialog',
@@ -1606,6 +1606,10 @@ function dialogFrame({ title, body, foot, onSubmit, onClose, busy }) {
       onClick: onClose,
     }, icon('x'))),
   h('div', { class: 'dialog-body' }, body),
+  // What the server said to a request that failed stands outside the part that
+  // scrolls, above the button that was used: in a small window it would otherwise
+  // lie below what can be seen, and the dialog would seem to have done nothing.
+  error ? h('div', { class: 'dialog-error', key: 'error' }, error) : null,
   h('footer', { class: 'dialog-foot' }, foot));
 }
 
@@ -1815,11 +1819,11 @@ export function deployDialog(model, ctx) {
           el.parentElement.scrollTop = 0;
         },
       }, body),
-      model.error
-        ? h('div', { key: 'error' }, failure('The deployment was not started.', model.error,
-          refusedBoards.length > 0 ? heldBy(refusedBoards) : null))
-        : null,
     ],
+    error: model.error
+      ? failure('The deployment was not started.', model.error,
+        refusedBoards.length > 0 ? heldBy(refusedBoards) : null)
+      : null,
     foot: [
       dialogButton({ key: 'cancel', disabled: model.sending, onClick: model.close }, 'Cancel'),
       SPACER(),
@@ -1905,8 +1909,8 @@ export function cancelDialog(model) {
         : h('p', { class: 'quiet', key: 'eventually' },
           'A cancellation takes a few seconds to reach every board’s record. It cannot be undone; ',
           'to try again, start a new deployment.'),
-      model.error ? h('div', { key: 'error' }, failure('Not cancelled.', model.error)) : null,
     ],
+    error: model.error ? failure('Not cancelled.', model.error) : null,
     foot: [
       dialogButton({ key: 'keep', autofocus: true, disabled: model.sending, onClick: model.close },
         over ? 'Close' : 'Keep the deployment'),
@@ -1962,10 +1966,8 @@ function revokeAgainDialog(model, ctx) {
         : null,
       h('p', { class: 'quiet', key: 'same' },
         'That record stays as it is: who revoked the release, when and why.'),
-      model.error
-        ? h('div', { key: 'error' }, failure(open ? 'Not finished.' : 'Not applied.', model.error))
-        : null,
     ],
+    error: model.error ? failure(open ? 'Not finished.' : 'Not applied.', model.error) : null,
     foot: [
       dialogButton({ key: 'keep', disabled: model.sending, onClick: model.close }, 'Close'),
       SPACER(),
@@ -2017,8 +2019,8 @@ export function revokeDialog(model, ctx) {
             ? [' ', h('span', { class: `field-count ${length >= REASON_LIMIT ? 'is-full' : ''}`.trim() },
               `${length} / ${REASON_LIMIT}`)]
             : null)),
-      model.error ? h('div', { key: 'error' }, failure('Not revoked.', model.error)) : null,
     ],
+    error: model.error ? failure('Not revoked.', model.error) : null,
     foot: [
       dialogButton({
         key: 'keep', autofocus: !model.focusReason, disabled: model.sending, onClick: model.close,

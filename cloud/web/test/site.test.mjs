@@ -293,6 +293,16 @@ test('lettering on a filled button or a tinted panel is readable in both themes'
   }
 });
 
+test('what a dialog says about a failed request does not scroll away with its body', () => {
+  // The body takes the room that is left and scrolls. The message keeps its own height
+  // between the body and the buttons, up to a share of the window.
+  assert.equal(declared('.dialog-body').get('overflow-y'), 'auto');
+  assert.equal(declared('.dialog-body').get('min-height'), '0');
+  assert.equal(declared('.dialog-error').get('flex'), 'none');
+  assert.match(declared('.dialog-error').get('max-height') ?? '', /^\d+vh$/);
+  assert.equal(declared('.dialog-error').get('overflow-y'), 'auto');
+});
+
 test('a state that asks for somebody has a look of its own, and motion is never needed to read one', () => {
   assert.equal(rules.some((rule) => rule.selectors.includes('.execution.is-act .execution-state')), true);
   assert.equal(declared('.execution.is-act .execution-state').get('background'), 'var(--accent-wash)');
