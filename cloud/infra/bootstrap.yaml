@@ -1,0 +1,41 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Cranium firmware console - the bucket that "aws cloudformation package" uploads the
+  Lambda code to. Deployed before the main stack; holds nothing else.
+
+Resources:
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # No BucketName: a generated name cannot be guessed, so nobody can create the
+      # bucket first in another account and receive the uploads.
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyRequestsWithoutTls
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt ArtifactsBucket.Arn
+              - !Sub '${ArtifactsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+Outputs:
+  ArtifactsBucketName:
+    Description: Pass this to "aws cloudformation package --s3-bucket".
+    Value: !Ref ArtifactsBucket

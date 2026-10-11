@@ -1,0 +1,770 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Cranium firmware console - web console, API, sign-in, firmware storage and the AWS IoT
+  resources that boards and deployments use. Deployed by cloud/deploy.sh.
+
+Parameters:
+  SigningPublicKey:
+    Type: String
+    Description: >-
+      Firmware signing PUBLIC key: base64 of the DER SubjectPublicKeyInfo, on one line.
+      The console only verifies signatures with it and can never produce one.
+    # The fixed part is the DER header of an uncompressed ECDSA P-256 public key, so a
+    # PEM file, a private key or a key of another type is refused before anything changes.
+    AllowedPattern: '^MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE[A-Za-z0-9+/]{86}==$'
+    ConstraintDescription: >-
+      must be the base64 DER SubjectPublicKeyInfo of an ECDSA P-256 public key, on one line
+  SlotSize:
+    Type: Number
+    Default: 933888
+    MinValue: 1
+    Description: Size of the device's image slot in bytes. Larger uploads are refused.
+  LoadAddress:
+    Type: Number
+    Default: 196608
+    MinValue: 0
+    Description: Address the image must be built for (196608 = 0x30000).
+  UserPoolDeletionProtection:
+    Type: String
+    Default: INACTIVE
+    AllowedValues: [ACTIVE, INACTIVE]
+    Description: >-
+      INACTIVE while the stack is first created, so that a failed creation can roll back.
+      deploy.sh switches it to ACTIVE once the stack exists.
+  IotLogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [ERROR, WARN, INFO, DEBUG, DISABLED]
+    Description: Default level of AWS IoT logging for the whole account in this Region.
+  SignInNamesCaseSensitive:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Whether sign-in names (e-mail addresses) are compared exactly. This is fixed when
+      the user pool is created. deploy.sh sets it to false when it creates the stack; the
+      default leaves a pool that was created before this parameter existed as it is.
+
+Conditions:
+  CaseInsensitiveSignIn: !Equals [!Ref SignInNamesCaseSensitive, 'false']
+
+Resources:
+
+  # ---------------------------------------------------------------------------------
+  # HTTP API: one origin for the console and its API. Every piece is its own resource;
+  # the Api itself refers to nothing, so the app client can use its endpoint as the
+  # callback URL without a dependency cycle.
+  # ---------------------------------------------------------------------------------
+
+  Api:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Ref AWS::StackName
+      ProtocolType: HTTP
+
+  WebIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt WebFn.Arn
+      PayloadFormatVersion: '2.0'
+
+  ApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiFn.Arn
+      PayloadFormatVersion: '2.0'
+
+  Authorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref Api
+      Name: cognito-access-token
+      AuthorizerType: JWT
+      IdentitySource:
+        - $request.header.Authorization
+      JwtConfiguration:
+        Issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}'
+        # An access token has no "aud"; API Gateway then checks "client_id" against this.
+        Audience:
+          - !Ref UserPoolClient
+
+  RootRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: 'GET /'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${WebIntegration}'
+
+  AssetsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: 'GET /assets/{proxy+}'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${WebIntegration}'
+
+  ApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: 'ANY /api/{proxy+}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref Authorizer
+      AuthorizationScopes:
+        - cranium/console
+      Target: !Sub 'integrations/${ApiIntegration}'
+
+  AccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/vendedlogs/apigateway/${AWS::StackName}-access'
+      RetentionInDays: 365
+
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    # RouteSettings names route keys, which API Gateway rejects until the routes exist.
+    DependsOn:
+      - RootRoute
+      - AssetsRoute
+      - ApiRoute
+    Properties:
+      ApiId: !Ref Api
+      StageName: '$default'
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+      # A page load is several requests at once. Both numbers are always given: a
+      # missing one counts as zero and would throttle every request.
+      RouteSettings:
+        'GET /':
+          ThrottlingBurstLimit: 60
+          ThrottlingRateLimit: 20
+        'GET /assets/{proxy+}':
+          ThrottlingBurstLimit: 60
+          ThrottlingRateLimit: 20
+      AccessLogSettings:
+        DestinationArn: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${AccessLogGroup}'
+        # The route key, never the path: a query string can carry an authorization
+        # code. No headers either.
+        #
+        # An HTTP API has no way to escape a value in this format, and the two error
+        # messages are API Gateway's own text, which can contain double quotes (the
+        # message for a token signed with an unknown key does). A line with such a
+        # message is not valid JSON. The two messages therefore come last: everything
+        # before "integrationError" is made of values that cannot contain a quote, so
+        # that part of a line can always be trusted and cut off. At most one of the
+        # two is ever set, because a request that the authorizer refuses never reaches
+        # the integration. Search this log with text patterns, not JSON patterns.
+        Format: >-
+          {"requestId":"$context.requestId",
+          "requestTime":"$context.requestTime",
+          "routeKey":"$context.routeKey",
+          "status":"$context.status",
+          "protocol":"$context.protocol",
+          "sourceIp":"$context.identity.sourceIp",
+          "sub":"$context.authorizer.claims.sub",
+          "integrationLatency":"$context.integrationLatency",
+          "responseLength":"$context.responseLength",
+          "integrationError":"$context.integrationErrorMessage",
+          "authorizerError":"$context.authorizer.error"}
+
+  WebFnPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WebFn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*'
+
+  ApiFnPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ApiFn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*'
+
+  # ---------------------------------------------------------------------------------
+  # Sign-in: Cognito user pool with managed login. Users are created by an
+  # administrator (cloud/users.sh), sign in with e-mail and password, and must use an
+  # authenticator app.
+  # ---------------------------------------------------------------------------------
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolTier: ESSENTIALS
+      UsernameAttributes:
+        - email
+      # Without this, sign-in names are case sensitive: an address typed with a capital
+      # letter is a different user. It cannot be changed once the pool exists, so it
+      # follows a parameter that only a first deployment sets.
+      UsernameConfiguration: !If
+        - CaseInsensitiveSignIn
+        - CaseSensitive: false
+        - !Ref AWS::NoValue
+      AutoVerifiedAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 3
+      # Quoted: a bare ON is a YAML boolean.
+      MfaConfiguration: 'ON'
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: admin_only
+            Priority: 1
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - email
+      DeletionProtection: !Ref UserPoolDeletionProtection
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      # The prefix becomes a public host name that must be unique in the Region, so it
+      # ends in the first block of this stack's id.
+      Domain: !Join
+        - ''
+        - - cranium-
+          - !Select [0, !Split ['-', !Select [2, !Split ['/', !Ref 'AWS::StackId']]]]
+      # Without this the domain serves the classic hosted UI.
+      ManagedLoginVersion: 2
+
+  ResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      UserPoolId: !Ref UserPool
+      Identifier: cranium
+      Name: cranium
+      Scopes:
+        - ScopeName: console
+          ScopeDescription: Use the Cranium firmware console
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    # The scope cranium/console is refused until the resource server exists.
+    DependsOn: ResourceServer
+    Properties:
+      UserPoolId: !Ref UserPool
+      # A browser cannot keep a secret; the client uses PKCE instead.
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - cranium/console
+      SupportedIdentityProviders:
+        - COGNITO
+      # The console always sends the form with the trailing slash. Both are registered
+      # because Cognito compares the redirect URI character by character.
+      CallbackURLs:
+        - !Sub '${Api.ApiEndpoint}/'
+        - !GetAtt Api.ApiEndpoint
+      LogoutURLs:
+        - !Sub '${Api.ApiEndpoint}/'
+        - !GetAtt Api.ApiEndpoint
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+      # Minutes a user has for each step of signing in. The default of 3 is short for a
+      # first sign-in, where an authenticator app may have to be installed first.
+      AuthSessionValidity: 15
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 60
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: minutes
+
+  # Managed login serves no page for an app client that has no branding style, so
+  # without this resource nobody can sign in.
+  ManagedLoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    DependsOn: UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref UserPoolClient
+      UseCognitoProvidedValues: true
+
+  ReleaseManagersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: release-managers
+      Description: May upload and revoke firmware and create and cancel deployments.
+
+  ViewersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: viewers
+      Description: Read only.
+
+  # ---------------------------------------------------------------------------------
+  # Firmware storage. Objects are firmware/<sha256 of the file>.bin, written once.
+  # ---------------------------------------------------------------------------------
+
+  FirmwareBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+
+  FirmwareBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FirmwareBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyRequestsWithoutTls
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt FirmwareBucket.Arn
+              - !Sub '${FirmwareBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          # Write-once, enforced by the bucket: an upload that does not say "only if
+          # the key is new" is refused whoever sends it.
+          - Sid: DenyOverwritingFirmware
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${FirmwareBucket.Arn}/firmware/*'
+            Condition:
+              'Null':
+                s3:if-none-match: 'true'
+          # A revoked image stops downloading at once, also through presigned URLs
+          # that were issued before the revocation.
+          - Sid: DenyDownloadingRevokedFirmware
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub '${FirmwareBucket.Arn}/firmware/*'
+            Condition:
+              StringEquals:
+                s3:ExistingObjectTag/revoked: 'true'
+
+  # ---------------------------------------------------------------------------------
+  # State. Deployments are not stored here: AWS IoT Jobs is their only store.
+  # ---------------------------------------------------------------------------------
+
+  StateTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # Append-only: the API role may put and query items, nothing else.
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ---------------------------------------------------------------------------------
+  # AWS IoT. The group and policy names are part of the provisioning contract
+  # (tools/provision_device.py), so they are fixed.
+  # ---------------------------------------------------------------------------------
+
+  DeviceGroup:
+    Type: AWS::IoT::ThingGroup
+    Properties:
+      ThingGroupName: cranium-devices
+      ThingGroupProperties:
+        ThingGroupDescription: Boards managed by the Cranium firmware console
+
+  # What one board may do with its own certificate. Every resource contains the thing
+  # name of the connection, so a board can only act as itself. "${!" keeps the IoT
+  # policy variable out of Fn::Sub; "$aws" and "$next" are literal topic parts.
+  DevicePolicy:
+    Type: AWS::IoT::Policy
+    Properties:
+      PolicyName: cranium-device
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: iot:Connect
+            Resource: !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:client/${!iot:Connection.Thing.ThingName}'
+            Condition:
+              Bool:
+                iot:Connection.Thing.IsAttached: 'true'
+          - Effect: Allow
+            Action: iot:Publish
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/$aws/things/${!iot:Connection.Thing.ThingName}/shadow/update'
+              - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/$aws/things/${!iot:Connection.Thing.ThingName}/jobs/$next/get'
+              - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/$aws/things/${!iot:Connection.Thing.ThingName}/jobs/*/update'
+          - Effect: Allow
+            Action: iot:Subscribe
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/$aws/things/${!iot:Connection.Thing.ThingName}/jobs/notify-next'
+              - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/$aws/things/${!iot:Connection.Thing.ThingName}/jobs/$next/get/*'
+              - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/$aws/things/${!iot:Connection.Thing.ThingName}/jobs/*/update/*'
+          - Effect: Allow
+            Action: iot:Receive
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/$aws/things/${!iot:Connection.Thing.ThingName}/jobs/notify-next'
+              - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/$aws/things/${!iot:Connection.Thing.ThingName}/jobs/$next/get/*'
+              - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:topic/$aws/things/${!iot:Connection.Thing.ThingName}/jobs/*/update/*'
+
+  # AWS IoT Jobs assumes this role to sign the short-lived download URL it puts into
+  # a job document. It can read firmware and nothing else, and only AWS IoT acting for
+  # one of this account's cranium-* jobs can assume it.
+  PresignRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: iot.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:job/cranium-*'
+      Policies:
+        - PolicyName: read-firmware
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${FirmwareBucket.Arn}/firmware/*'
+
+  # AWS IoT writes its own log (connections, refused publishes, job events) to the log
+  # group AWSIotLogsV2. That name is AWS IoT's, one per account and Region, and AWS IoT
+  # creates the group on first use without a retention period. It may exist already, so
+  # it cannot be a resource of this stack: deploy.sh creates it if it is missing and
+  # gives it a retention period if it has none.
+  IotLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: iot.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: write-iot-log
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:AWSIotLogsV2'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:AWSIotLogsV2:*'
+
+  # Account-level setting: there is one per account and Region, and it must not be
+  # enabled already when this stack is created (deploy.sh checks).
+  IotLogging:
+    Type: AWS::IoT::Logging
+    Properties:
+      AccountId: !Ref AWS::AccountId
+      RoleArn: !GetAtt IotLoggingRole.Arn
+      DefaultLogLevel: !Ref IotLogLevel
+      # A connection that fails authentication (a certificate AWS IoT does not know, or
+      # an inactive one) is only logged if this event type is switched on by name.
+      # Such a connection needs no credential, so anyone who knows the endpoint can add
+      # entries to the log: the retention period that deploy.sh sets on the log group
+      # is what keeps them from piling up for ever.
+      EventConfigurations:
+        - EventType: Connection.AuthNError
+          LogLevel: INFO
+
+  # ---------------------------------------------------------------------------------
+  # Lambda functions. Each has its own role and its own log group. The log group is
+  # created first and the role may only write to it, so the function never creates a
+  # log group of its own. Each function is told which group to log to (LoggingConfig),
+  # so its own name can be left to CloudFormation: a function with a fixed name could
+  # not be replaced by a stack update.
+  # ---------------------------------------------------------------------------------
+
+  WebLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-web'
+      RetentionInDays: 90
+
+  WebRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: write-own-log
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt WebLogGroup.Arn
+
+  # Serves the static console. It holds no secret and may call no AWS API.
+  WebFn:
+    Type: AWS::Lambda::Function
+    DependsOn: WebLogGroup
+    Properties:
+      LoggingConfig:
+        LogGroup: !Ref WebLogGroup
+      Description: Cranium firmware console - static web console
+      Runtime: nodejs22.x
+      Architectures:
+        - arm64
+      Handler: server.handler
+      MemorySize: 256
+      Timeout: 5
+      Role: !GetAtt WebRole.Arn
+      # Local path: "aws cloudformation package" zips it and puts the S3 location here.
+      Code: ../web/src
+      Environment:
+        Variables:
+          USER_POOL_CLIENT_ID: !Ref UserPoolClient
+          LOGIN_DOMAIN: !Sub '${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com'
+          OAUTH_SCOPE: openid cranium/console
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-api'
+      RetentionInDays: 90
+
+  ApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: console-api
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteOwnLog
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt ApiLogGroup.Arn
+              # Store an image and tag it as revoked. No read and no delete.
+              - Sid: StoreFirmware
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectTagging
+                Resource: !Sub '${FirmwareBucket.Arn}/firmware/*'
+              # TransactWriteItems is authorized through PutItem and UpdateItem; IAM
+              # has no action of its own for it. No Scan and no DeleteItem.
+              - Sid: ReadAndWriteReleases
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt StateTable.Arn
+              - Sid: AppendAndReadAudit
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                Resource: !GetAtt AuditTable.Arn
+              - Sid: CreateDeployments
+                Effect: Allow
+                Action: iot:CreateJob
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:job/cranium-*'
+                  - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:thing/cranium-*'
+              - Sid: CancelAndReadDeployments
+                Effect: Allow
+                Action:
+                  - iot:CancelJob
+                  - iot:DescribeJob
+                  - iot:ListJobExecutionsForJob
+                Resource: !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:job/cranium-*'
+              - Sid: ReadOneExecution
+                Effect: Allow
+                Action: iot:DescribeJobExecution
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:job/cranium-*'
+                  - !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:thing/cranium-*'
+              - Sid: ReadBoards
+                Effect: Allow
+                Action:
+                  - iot:ListJobExecutionsForThing
+                  - iot:GetThingShadow
+                  - iot:ListThingPrincipals
+                Resource: !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:thing/cranium-*'
+              - Sid: ListBoards
+                Effect: Allow
+                Action: iot:ListThingsInThingGroup
+                Resource: !GetAtt DeviceGroup.Arn
+              # ListJobs cannot be limited to a resource.
+              - Sid: ListDeployments
+                Effect: Allow
+                Action: iot:ListJobs
+                Resource: '*'
+              # Hand the presign role to AWS IoT when creating a job, and to nothing else.
+              - Sid: PassPresignRoleToIot
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt PresignRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: iot.amazonaws.com
+              # Look up the caller's e-mail and check, live, that they may still write.
+              - Sid: ReadUsers
+                Effect: Allow
+                Action:
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminListGroupsForUser
+                Resource: !GetAtt UserPool.Arn
+
+  ApiFn:
+    Type: AWS::Lambda::Function
+    DependsOn: ApiLogGroup
+    Properties:
+      LoggingConfig:
+        LogGroup: !Ref ApiLogGroup
+      Description: Cranium firmware console - API
+      Runtime: nodejs22.x
+      Architectures:
+        - arm64
+      Handler: index.handler
+      MemorySize: 512
+      Timeout: 20
+      Role: !GetAtt ApiRole.Arn
+      # Local path: "aws cloudformation package" zips it and puts the S3 location here.
+      Code: ../api/src
+      Environment:
+        Variables:
+          STATE_TABLE: !Ref StateTable
+          AUDIT_TABLE: !Ref AuditTable
+          FIRMWARE_BUCKET: !Ref FirmwareBucket
+          THING_GROUP: !Ref DeviceGroup
+          PRESIGN_ROLE_ARN: !GetAtt PresignRole.Arn
+          USER_POOL_ID: !Ref UserPool
+          USER_POOL_CLIENT_ID: !Ref UserPoolClient
+          SIGNING_PUBLIC_KEY_B64: !Ref SigningPublicKey
+          SLOT_SIZE: !Ref SlotSize
+          LOAD_ADDRESS: !Ref LoadAddress
+
+Outputs:
+  ConsoleUrl:
+    Description: Address of the console. Also the redirect URI the console signs in with.
+    Value: !Sub '${Api.ApiEndpoint}/'
+  Region:
+    Value: !Ref AWS::Region
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  LoginDomain:
+    Description: Host name of the managed login pages.
+    Value: !Sub '${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com'
+  FirmwareBucketName:
+    Value: !Ref FirmwareBucket
+  FirmwareDownloadPrefix:
+    Description: A board only downloads firmware from URLs that start with this.
+    Value: !Sub 'https://${FirmwareBucket}.s3.${AWS::Region}.amazonaws.com/firmware/'
+  DeviceGroupName:
+    Value: !Ref DeviceGroup
+  DevicePolicyName:
+    Value: !Ref DevicePolicy
+  StateTableName:
+    Value: !Ref StateTable
+  AuditTableName:
+    Value: !Ref AuditTable
+  ApiFunctionName:
+    Value: !Ref ApiFn
+  WebFunctionName:
+    Value: !Ref WebFn

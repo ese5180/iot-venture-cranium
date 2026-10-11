@@ -48,12 +48,15 @@ class Console:
     def __exit__(self, *exc):
         self.close()
 
-    def run(self, command: str, wait: float = 3.0, quiet: bool = False) -> list[str]:
+    def run(self, command: str, wait: float = 3.0, quiet: bool = False,
+            expect_ok: bool = True) -> list[str]:
         """Send one command and return the lines printed in reply.
 
-        Succeeds when a line starting with "OK" appears, or, for commands that print
-        no such line, when the reply has been quiet for a moment. Raises BoardError if
-        the shell reports an error.
+        Every provisioning command except `prov status` ends with a line that starts
+        with "OK", or prints an error instead. With expect_ok the reply is complete
+        when that line arrives, however long the command takes (creating a key pair
+        prints nothing for a while), and a reply without it raises BoardError. Without
+        expect_ok the reply is complete once the board has been quiet for a moment.
         """
         self.serial.write(b"\r")
         time.sleep(0.15)
@@ -63,6 +66,7 @@ class Console:
         deadline = time.time() + wait
         raw = b""
         last_data = time.time()
+        completed = False
         while time.time() < deadline:
             chunk = self.serial.read(4096)
             if chunk:
@@ -73,10 +77,27 @@ class Console:
                     # The command reported completion; collect what is left.
                     time.sleep(0.15)
                     raw += self.serial.read(4096)
+                    completed = True
                     break
             elif raw and time.time() - last_data > 0.8:
-                break
+                # Quiet. Done, unless only the echo of the command has arrived so far
+                # and an OK line is still to come.
+                if not expect_ok or self._reply_lines(raw, command):
+                    break
 
+        lines = self._reply_lines(raw, command)
+
+        if not quiet:
+            for line in lines:
+                if "not found" in line or line.lower().startswith("error"):
+                    raise BoardError(f"`{command.split()[0]} ...` failed: {line}")
+            if expect_ok and not completed:
+                reply = "; ".join(lines) if lines else "no reply"
+                raise BoardError(f"`{' '.join(command.split()[:2])}` failed: {reply}")
+        return lines
+
+    @staticmethod
+    def _reply_lines(raw: bytes, command: str) -> list[str]:
         text = ANSI.sub("", raw.decode("utf-8", "replace"))
         lines = []
         for line in text.splitlines():
@@ -87,17 +108,12 @@ class Console:
             if re.match(r"^\[\d\d:\d\d:\d\d\.\d{3},\d{3}\] <", line):
                 continue
             lines.append(line)
-
-        if not quiet:
-            for line in lines:
-                if "not found" in line or line.lower().startswith("error"):
-                    raise BoardError(f"`{command.split()[0]} ...` failed: {line}")
         return lines
 
     def status(self) -> dict[str, str]:
         """Parse `prov status` into a dictionary."""
         result = {}
-        for line in self.run("prov status"):
+        for line in self.run("prov status", expect_ok=False):
             match = re.match(r"^([A-Za-z][A-Za-z ]+?)\s{2,}(.*)$", line)
             if match:
                 result[match.group(1).strip()] = match.group(2).strip()

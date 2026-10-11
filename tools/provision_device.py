@@ -3,6 +3,7 @@
 
     python tools/provision_device.py              do whatever is still missing
     python tools/provision_device.py --wifi       send the Wi-Fi network again
+    python tools/provision_device.py --no-wifi    register the board now, add the network later
     python tools/provision_device.py --status     show what the board has
     python tools/provision_device.py --reset      factory reset the board
 
@@ -186,6 +187,8 @@ def main() -> None:
     parser.add_argument("--port", help="serial port of the board's console (default: auto)")
     parser.add_argument("--profile", default="cranium", help="AWS CLI profile (default: cranium)")
     parser.add_argument("--wifi", action="store_true", help="only (re)send the Wi-Fi network")
+    parser.add_argument("--no-wifi", action="store_true",
+                        help="skip the Wi-Fi network: identity and cloud settings only")
     parser.add_argument("--status", action="store_true", help="only show the board's state")
     parser.add_argument("--reset", action="store_true", help="factory reset the board")
     parser.add_argument("--new-identity", action="store_true",
@@ -208,8 +211,10 @@ def main() -> None:
                       "registered; provisioning again replaces it.")
                 return
 
-            if args.wifi or status.get("wifi network", "").startswith("missing"):
+            has_network = not status.get("wifi network", "").startswith("missing")
+            if args.wifi or (not has_network and not args.no_wifi):
                 provision_wifi(console)
+                has_network = True
                 if args.wifi:
                     return
 
@@ -235,6 +240,12 @@ def main() -> None:
                                 "iot:Data-ATS")["endpointAddress"]
             console.run(f"prov cloud {endpoint} {outputs['FirmwareDownloadPrefix']}", wait=5)
             print("Cloud settings stored on the board")
+
+            if not has_network:
+                print("The board is registered and has its certificate. It connects once it "
+                      "has a network:\n  python tools/secrets.py wifi\n"
+                      "  python tools/provision_device.py --wifi")
+                return
 
             print("Waiting for the board to connect ...")
             deadline = time.time() + 90

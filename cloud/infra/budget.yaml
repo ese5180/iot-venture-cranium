@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Cranium firmware console - monthly cost budget with email alerts. A spending guard
+  for the account that hosts the project: it does not stop anything, it tells you early.
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Address that receives the budget alerts.
+    AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+  MonthlyLimitUsd:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    Description: Monthly budget in US dollars.
+
+Resources:
+  MonthlyCostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: cranium-monthly-cost
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyLimitUsd
+          Unit: USD
+        CostTypes:
+          # Count usage before promotional credits are applied; otherwise the budget
+          # would read zero for as long as credits last and never warn.
+          IncludeCredit: false
+          IncludeRefund: false
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 50
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+
+Outputs:
+  BudgetName:
+    Value: cranium-monthly-cost
