@@ -32,13 +32,14 @@ test('a cold load is at most five requests: the page, one stylesheet, three scri
   assert.equal(visible(new URL('assets/', SITE)).every((entry) => entry.isFile()), true);
   assert.equal(styles.length, 1);
   assert.equal(scripts.length >= 1 && scripts.length <= 3, true, `${scripts.length} scripts`);
-  assert.equal(assets.length, styles.length + scripts.length, `only stylesheets and scripts: ${assets.join(', ')}`);
+  assert.equal(assets.length, styles.length + scripts.length,
+    `only stylesheets and scripts: ${assets.join(', ')}`);
   assert.equal(1 + assets.length <= 5, true);
 });
 
 test('the page refers to its files under the build id and to nothing else', () => {
   const references = [...page.matchAll(/\s(?:href|src)="([^"]*)"/g)].map((match) => match[1]);
-  const fetched = references.filter((reference) => !reference.startsWith('#') && !reference.startsWith('data:'));
+  const fetched = references.filter((reference) => !/^(#|data:)/.test(reference));
   assert.deepEqual([...new Set(fetched)].sort(), assets.map((name) => `/assets/%BUILD%/${name}`).sort());
 
   // The icon is inline, so the browser does not ask for /favicon.ico.
@@ -112,7 +113,8 @@ test('scripts set no inline styles: custom properties through setProperty only',
 test('the access token is kept for the tab only, and randomness comes from the CSPRNG', () => {
   for (const [name, source] of sources) {
     const text = code(source);
-    assert.doesNotMatch(text, /localStorage|indexedDB|document\.cookie/, `${name} keeps something beyond the tab`);
+    assert.doesNotMatch(text, /localStorage|indexedDB|document\.cookie/,
+      `${name} keeps something beyond the tab`);
     assert.doesNotMatch(text, /Math\.random/, `${name} uses Math.random`);
   }
 });

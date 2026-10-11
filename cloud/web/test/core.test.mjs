@@ -17,6 +17,8 @@ const core = await import(`data:text/javascript;base64,${source.toString('base64
 
 const THING = 'cranium-fe5b26c0c5b1dcd7';
 const DEPLOYMENT = 'cranium-1-1-0-b7-20261010T221500Z-9f3a';
+const LARGEST_DEPLOYMENT = 'cranium-255-255-65535-b4294967295-20261010T221500Z-ffff';
+const NOON = '2026-10-10T12:00:00Z';
 const CONFIG = {
   clientId: 'client-1',
   loginOrigin: 'https://login.example',
@@ -27,11 +29,18 @@ const CONFIG = {
 // Grammar.
 
 test('versions are major.minor.revision+build within u8.u8.u16+u32', () => {
-  assert.deepEqual(core.parseVersion('1.10.300+4000000000'), { major: 1, minor: 10, revision: 300, build: 4000000000 });
+  assert.deepEqual(core.parseVersion('1.10.300+4000000000'),
+    { major: 1, minor: 10, revision: 300, build: 4000000000 });
   assert.deepEqual(core.parseVersion('0.0.0+0'), { major: 0, minor: 0, revision: 0, build: 0 });
-  assert.deepEqual(core.parseVersion('255.255.65535+4294967295'), { major: 255, minor: 255, revision: 65535, build: 4294967295 });
-  for (const text of ['1.0.0', '1.0+1', '256.0.0+0', '0.256.0+0', '0.0.65536+0', '0.0.0+4294967296', '01.0.0+0',
-    '1.0.0+01', ' 1.0.0+1', '1.0.0+1 ', '1.0.0+1\n', 'v1.0.0+1', '1.0.0-rc+1', '1.0.0+', '', null, undefined, 100, {}]) {
+  assert.deepEqual(core.parseVersion('255.255.65535+4294967295'),
+    { major: 255, minor: 255, revision: 65535, build: 4294967295 });
+
+  const others = [
+    '1.0.0', '1.0+1', '256.0.0+0', '0.256.0+0', '0.0.65536+0', '0.0.0+4294967296', '01.0.0+0',
+    '1.0.0+01', ' 1.0.0+1', '1.0.0+1 ', '1.0.0+1\n', 'v1.0.0+1', '1.0.0-rc+1', '1.0.0+', '',
+    null, undefined, 100, {},
+  ];
+  for (const text of others) {
     assert.equal(core.parseVersion(text), null, String(text));
     assert.equal(core.isVersion(text), false);
   }
@@ -49,18 +58,24 @@ test('versions compare by number, not by text', () => {
 
 test('board names and deployment ids follow their patterns exactly', () => {
   assert.equal(core.isThing(THING), true);
-  for (const name of ['cranium-FE5B26C0C5B1DCD7', 'cranium-fe5b26c0c5b1dcd', 'cranium-fe5b26c0c5b1dcd77', 'cranium-fe5b26c0c5b1dcdg',
-    `${THING}/`, `x${THING}`, 'cranium-*', '', null, undefined]) {
+  const notThings = [
+    'cranium-FE5B26C0C5B1DCD7', 'cranium-fe5b26c0c5b1dcd', 'cranium-fe5b26c0c5b1dcd77',
+    'cranium-fe5b26c0c5b1dcdg', `${THING}/`, `x${THING}`, 'cranium-*', '', null, undefined,
+  ];
+  for (const name of notThings) {
     assert.equal(core.isThing(name), false, String(name));
     assert.equal(core.deviceHref(name), null);
   }
   assert.equal(core.deviceHref(THING), `#/devices/${THING}`);
 
   assert.equal(core.isDeploymentId(DEPLOYMENT), true);
-  assert.equal(core.isDeploymentId('cranium-255-255-65535-b4294967295-20261010T221500Z-ffff'), true);
-  for (const id of ['cranium-1-1-0-7-20261010T221500Z-9f3a', 'cranium-1-1-0-b7-20261010T221500-9f3a',
-    'cranium-1-1-0-b7-20261010T221500Z-9F3A', 'cranium-1-1-0-b7-20261010T221500Z-9f3', `${DEPLOYMENT}/cancel`,
-    `../${DEPLOYMENT}`, '', null]) {
+  assert.equal(core.isDeploymentId(LARGEST_DEPLOYMENT), true);
+  const notDeployments = [
+    'cranium-1-1-0-7-20261010T221500Z-9f3a', 'cranium-1-1-0-b7-20261010T221500-9f3a',
+    'cranium-1-1-0-b7-20261010T221500Z-9F3A', 'cranium-1-1-0-b7-20261010T221500Z-9f3',
+    `${DEPLOYMENT}/cancel`, `../${DEPLOYMENT}`, '', null,
+  ];
+  for (const id of notDeployments) {
     assert.equal(core.isDeploymentId(id), false, String(id));
     assert.equal(core.deploymentHref(id), null);
   }
@@ -69,7 +84,7 @@ test('board names and deployment ids follow their patterns exactly', () => {
 
 test('the version is recovered from a deployment id', () => {
   assert.equal(core.versionOfDeployment(DEPLOYMENT), '1.1.0+7');
-  assert.equal(core.versionOfDeployment('cranium-255-255-65535-b4294967295-20261010T221500Z-ffff'), '255.255.65535+4294967295');
+  assert.equal(core.versionOfDeployment(LARGEST_DEPLOYMENT), '255.255.65535+4294967295');
   assert.equal(core.versionOfDeployment('cranium-999-0-0-b1-20261010T221500Z-ffff'), null);
   assert.equal(core.versionOfDeployment('something else'), null);
   assert.equal(core.versionOfDeployment(null), null);
@@ -77,21 +92,33 @@ test('the version is recovered from a deployment id', () => {
 
 // Routes.
 
+const ROUTES = [
+  '#/overview', '#/devices', `#/devices/${THING}`, '#/firmware', '#/deployments',
+  `#/deployments/${DEPLOYMENT}`, '#/activity',
+];
+
 test('the console has exactly seven kinds of route', () => {
-  assert.deepEqual(core.parseRoute('#/overview'), { view: 'overview' });
-  assert.deepEqual(core.parseRoute('#/devices'), { view: 'devices' });
-  assert.deepEqual(core.parseRoute(`#/devices/${THING}`), { view: 'device', thing: THING });
-  assert.deepEqual(core.parseRoute('#/firmware'), { view: 'firmware' });
-  assert.deepEqual(core.parseRoute('#/deployments'), { view: 'deployments' });
-  assert.deepEqual(core.parseRoute(`#/deployments/${DEPLOYMENT}`), { view: 'deployment', id: DEPLOYMENT });
-  assert.deepEqual(core.parseRoute('#/activity'), { view: 'activity' });
+  assert.deepEqual(ROUTES.map(core.parseRoute), [
+    { view: 'overview' },
+    { view: 'devices' },
+    { view: 'device', thing: THING },
+    { view: 'firmware' },
+    { view: 'deployments' },
+    { view: 'deployment', id: DEPLOYMENT },
+    { view: 'activity' },
+  ]);
+  for (const hash of ROUTES) assert.equal(core.routeHash(core.parseRoute(hash)), hash);
 });
 
 test('anything else is not a route, and never becomes one', () => {
-  const others = ['', '#', '#/', '#overview', '/overview', '#/Overview', '#/overview/', '#/overview/x', '#/device',
-    '#/devices/', '#/devices/cranium-xyz', `#/devices/${THING}/x`, `#/deployments/${THING}`, `#/devices/${DEPLOYMENT}`,
-    '#/firmware/1.1.0+7', '#/settings', '#//evil.example', '#/https://evil.example', 'https://evil.example/#/overview',
-    'javascript:alert(1)', '#/overview?next=https://evil.example', '#/devices/../firmware', null, undefined, 3, {}];
+  const others = [
+    '', '#', '#/', '#overview', '/overview', '#/Overview', '#/overview/', '#/overview/x',
+    '#/device', '#/devices/', '#/devices/cranium-xyz', `#/devices/${THING}/x`,
+    `#/deployments/${THING}`, `#/devices/${DEPLOYMENT}`, '#/firmware/1.1.0+7', '#/settings',
+    '#//evil.example', '#/https://evil.example', 'https://evil.example/#/overview',
+    'javascript:alert(1)', '#/overview?next=https://evil.example', '#/devices/../firmware',
+    null, undefined, 3, {},
+  ];
   for (const hash of others) {
     assert.equal(core.parseRoute(hash), null, String(hash));
     assert.equal(core.routeHash(core.parseRoute(hash)), '#/overview');
@@ -99,15 +126,12 @@ test('anything else is not a route, and never becomes one', () => {
   assert.equal(core.routeHash({ view: 'device', thing: '../../evil' }), '#/overview');
   assert.equal(core.routeHash({ view: 'deployment', id: 'x' }), '#/overview');
   assert.equal(core.routeHash({ view: 'nowhere' }), '#/overview');
-  for (const hash of ['#/overview', '#/devices', `#/devices/${THING}`, '#/firmware', '#/deployments', `#/deployments/${DEPLOYMENT}`, '#/activity']) {
-    assert.equal(core.routeHash(core.parseRoute(hash)), hash);
-  }
 });
 
 // Numbers and times.
 
 test('times are told relative to now', () => {
-  const now = Date.parse('2026-10-10T12:00:00Z');
+  const now = Date.parse(NOON);
   const ago = (ms) => core.timeAgo(new Date(now - ms).toISOString(), now);
   assert.equal(ago(0), 'just now');
   assert.equal(ago(4999), 'just now');
@@ -122,7 +146,7 @@ test('times are told relative to now', () => {
   assert.equal(core.timeAgo(null, now), '');
   assert.equal(core.timeAgo('not a time', now), '');
   assert.equal(core.exactTime('not a time'), '');
-  assert.notEqual(core.exactTime('2026-10-10T12:00:00Z'), '');
+  assert.notEqual(core.exactTime(NOON), '');
 });
 
 test('durations, sizes and signal strength read naturally', () => {
@@ -152,16 +176,17 @@ test('durations, sizes and signal strength read naturally', () => {
 });
 
 test('free text is reduced to one line without control characters', () => {
-  assert.equal(core.singleLine('  two\nlines\tand a bell\u0007  '), 'two lines and a bell');
+  assert.equal(core.singleLine('  two\nlines\tand a bell\x07  '), 'two lines and a bell');
   assert.equal(core.singleLine('plain text, with accents: é'), 'plain text, with accents: é');
-  assert.equal(core.singleLine('\u0000\u001f\u007f\u0085'), '');
+  assert.equal(core.singleLine('\x00\x1f\x7f\x85'), '');
   assert.equal(core.singleLine(null), '');
 });
 
 // Firmware images.
 
-function imageHeader({ magic = 0x96f3b83d, headerSize = 512, payloadSize = 814000, version = [1, 2, 300, 70000], length = 64 } = {}) {
-  const bytes = new Uint8Array(length);
+function imageHeader(fields = {}) {
+  const { magic = 0x96f3b83d, headerSize = 512, payloadSize = 814000, version = [1, 2, 300, 70000] } = fields;
+  const bytes = new Uint8Array(fields.length ?? 64);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, magic, true);
   view.setUint32(4, 0x30000, true);
@@ -175,8 +200,11 @@ function imageHeader({ magic = 0x96f3b83d, headerSize = 512, payloadSize = 81400
 }
 
 test('the image header is read at the offsets MCUboot uses', () => {
-  assert.deepEqual(core.readImageHeader(imageHeader()), { ok: true, headerSize: 512, payloadSize: 814000, version: '1.2.300+70000' });
-  assert.deepEqual(core.readImageHeader(imageHeader({ version: [255, 255, 65535, 4294967295] })).version, '255.255.65535+4294967295');
+  assert.deepEqual(core.readImageHeader(imageHeader()),
+    { ok: true, headerSize: 512, payloadSize: 814000, version: '1.2.300+70000' });
+  const largest = imageHeader({ version: [255, 255, 65535, 4294967295] });
+  assert.equal(core.readImageHeader(largest).version, '255.255.65535+4294967295');
+
   // A view into the middle of a larger buffer, and a bare ArrayBuffer.
   const padded = new Uint8Array(100);
   padded.set(imageHeader(), 36);
@@ -186,12 +214,13 @@ test('the image header is read at the offsets MCUboot uses', () => {
 
 test('a file that is not an image is said to be one', () => {
   assert.equal(core.readImageHeader(new Uint8Array(0)).ok, false);
-  assert.equal(core.readImageHeader(imageHeader({ length: 32 }).subarray(0, 31)).ok, false);
+  assert.equal(core.readImageHeader(imageHeader().subarray(0, 31)).ok, false);
   const wrong = core.readImageHeader(imageHeader({ magic: 0x96f3b83c }));
   assert.equal(wrong.ok, false);
   assert.match(wrong.message, /not an MCUboot image/);
-  // Big-endian magic is not the magic.
-  assert.equal(core.readImageHeader(Uint8Array.from([0x96, 0xf3, 0xb8, 0x3d, ...new Array(60).fill(0)])).ok, false);
+  // The magic number read big endian is not the magic number.
+  const bigEndian = Uint8Array.from([0x96, 0xf3, 0xb8, 0x3d, ...new Array(60).fill(0)]);
+  assert.equal(core.readImageHeader(bigEndian).ok, false);
 });
 
 test('the preview agrees with a real signed image', async (t) => {
@@ -201,7 +230,8 @@ test('the preview agrees with a real signed image', async (t) => {
     return;
   }
   const bytes = new Uint8Array(readFileSync(fixture));
-  assert.deepEqual(core.readImageHeader(bytes), { ok: true, headerSize: 512, payloadSize: 600, version: '1.2.3+4' });
+  assert.deepEqual(core.readImageHeader(bytes),
+    { ok: true, headerSize: 512, payloadSize: 600, version: '1.2.3+4' });
   assert.equal(await core.sha256Hex(bytes), createHash('sha256').update(bytes).digest('hex'));
   assert.equal(core.toBase64(bytes), Buffer.from(bytes).toString('base64'));
 });
@@ -224,8 +254,9 @@ test('the recorded file name uses only what the API accepts', () => {
   assert.equal(core.recordedFilename('valid-1.2.3+4.signed.bin'), 'valid-1.2.3_4.signed.bin');
   assert.equal(core.recordedFilename('my build (2).signed.bin'), 'my_build__2_.signed.bin');
   assert.equal(core.recordedFilename('../../etc/passwd'), '.._.._etc_passwd');
-  assert.equal(core.recordedFilename(`${'a'.repeat(100)}.signed.bin`).length, 64);
-  assert.equal(core.recordedFilename(`${'a'.repeat(100)}.signed.bin`).endsWith('.signed.bin'), true);
+  const long = core.recordedFilename(`${'a'.repeat(100)}.signed.bin`);
+  assert.equal(long.length, 64);
+  assert.equal(long.endsWith('.signed.bin'), true);
   assert.equal(core.recordedFilename(''), 'image.signed.bin');
   for (const name of ['zephyr.signed.bin', 'x y.bin', '<script>.bin', 'é.bin', '']) {
     assert.match(core.recordedFilename(name), /^[A-Za-z0-9._-]{1,64}$/);
@@ -236,30 +267,33 @@ test('a chosen file is reviewed against the slot and the releases', () => {
   const header = { ok: true, headerSize: 512, payloadSize: 1000, version: '1.2.0+1' };
   const firmware = {
     slotSize: 933888,
-    releases: [{ version: '1.1.0+7', sha256: 'aa' }, { version: '1.3.0+0', sha256: 'bb' }, { version: '1.0.0+0', sha256: 'cc' }],
+    releases: [
+      { version: '1.1.0+7', sha256: 'aa' },
+      { version: '1.3.0+0', sha256: 'bb' },
+      { version: '1.0.0+0', sha256: 'cc' },
+    ],
   };
-  const tones = (review) => review.notes.map((note) => note.tone);
+  const review = (changes = {}, known = firmware) =>
+    core.reviewImage({ header, size: 1000, digest: 'dd', ...changes }, known);
+  const tones = (result) => result.notes.map((note) => note.tone);
 
-  assert.deepEqual(core.reviewImage({ header: { ok: false, message: 'Not an image.' }, size: 10, digest: '' }, firmware),
-    { blocked: true, notes: [{ tone: 'bad', text: 'Not an image.' }] });
+  const notAnImage = review({ header: { ok: false, message: 'Not an image.' } });
+  assert.deepEqual(notAnImage, { blocked: true, notes: [{ tone: 'bad', text: 'Not an image.' }] });
 
-  const tooLarge = core.reviewImage({ header, size: 933889, digest: 'dd' }, firmware);
-  assert.equal(tooLarge.blocked, true);
+  assert.equal(review({ size: 933889 }).blocked, true);
 
-  const notNewer = core.reviewImage({ header, size: 933888, digest: 'dd' }, firmware);
+  const notNewer = review({ size: 933888 });
   assert.equal(notNewer.blocked, false);
   assert.deepEqual(tones(notNewer), ['good', 'warn']);
   assert.match(notNewer.notes[1].text, /Not newer than 1\.3\.0\+0/);
 
-  const newer = core.reviewImage({ header: { ...header, version: '1.10.0+0' }, size: 1000, digest: 'dd' }, firmware);
-  assert.deepEqual(tones(newer), ['good', 'good']);
-
-  assert.match(core.reviewImage({ header, size: 1000, digest: 'aa' }, firmware).notes[1].text, /already registered as 1\.1\.0\+7/);
-  assert.match(core.reviewImage({ header: { ...header, version: '1.1.0+7' }, size: 1000, digest: 'dd' }, firmware).notes[1].text, /can be used once/);
-  assert.match(core.reviewImage({ header: { ...header, version: '0.0.0+0' }, size: 1000, digest: 'dd' }, firmware).notes[1].text, /never accepted/);
-  assert.match(core.reviewImage({ header, size: 1000, digest: 'dd' }, { slotSize: 933888, releases: [] }).notes[1].text, /first release/);
-  // Before the list of releases has arrived nothing is claimed about the slot.
-  assert.equal(core.reviewImage({ header, size: 1000, digest: 'dd' }, null).blocked, false);
+  assert.deepEqual(tones(review({ header: { ...header, version: '1.10.0+0' } })), ['good', 'good']);
+  assert.match(review({ digest: 'aa' }).notes[1].text, /already registered as 1\.1\.0\+7/);
+  assert.match(review({ header: { ...header, version: '1.1.0+7' } }).notes[1].text, /can be used once/);
+  assert.match(review({ header: { ...header, version: '0.0.0+0' } }).notes[1].text, /never accepted/);
+  assert.match(review({}, { slotSize: 933888, releases: [] }).notes[1].text, /first release/);
+  // Before the list of releases has arrived nothing is claimed about the slot or the others.
+  assert.deepEqual(review({}, null), { blocked: false, notes: [] });
 });
 
 // Sign-in.
@@ -284,12 +318,19 @@ function reply(status, body, headers = {}) {
   return new Response(body === undefined ? null : JSON.stringify(body), { status, headers });
 }
 
-const TOKENS = { access_token: 'ACCESS-TOKEN', id_token: 'ID-TOKEN', refresh_token: 'REFRESH-TOKEN', token_type: 'Bearer', expires_in: 3600 };
+const TOKENS = {
+  access_token: 'ACCESS-TOKEN',
+  id_token: 'ID-TOKEN',
+  refresh_token: 'REFRESH-TOKEN',
+  token_type: 'Bearer',
+  expires_in: 3600,
+};
 
 /** A browser as far as sign-in is concerned. `answer` decides what each fetch returns. */
-function browser({ search = '', hash = '', answer = () => reply(200, TOKENS), storage = memory(), crypto = globalThis.crypto } = {}) {
+function browser(options = {}) {
+  const { search = '', hash = '', answer = () => reply(200, TOKENS), storage = memory() } = options;
   const events = [];
-  let time = Date.parse('2026-10-10T12:00:00Z');
+  let time = Date.parse(NOON);
   const location = {
     search,
     hash,
@@ -302,11 +343,19 @@ function browser({ search = '', hash = '', answer = () => reply(200, TOKENS), st
       location.search = '';
     },
   };
-  const fetch = async (url, options = {}) => {
-    events.push({ type: 'fetch', url, options });
-    return answer(url, options);
+  const fetch = async (url, request = {}) => {
+    events.push({ type: 'fetch', url, options: request });
+    return answer(url, request);
   };
-  const auth = core.createAuth({ config: CONFIG, storage, location, history, fetch, crypto, now: () => time });
+  const auth = core.createAuth({
+    config: CONFIG,
+    storage,
+    location,
+    history,
+    fetch,
+    crypto: options.crypto ?? globalThis.crypto,
+    now: () => time,
+  });
   return {
     auth,
     events,
@@ -314,6 +363,7 @@ function browser({ search = '', hash = '', answer = () => reply(200, TOKENS), st
     location,
     fetches: () => events.filter((event) => event.type === 'fetch'),
     navigations: () => events.filter((event) => event.type === 'navigate').map((event) => new URL(event.url)),
+    pending: () => JSON.parse(storage.contents()['cranium.signin']),
     advance(seconds) {
       time += seconds * 1000;
     },
@@ -328,15 +378,26 @@ async function began(route = '#/firmware') {
   return { storage: tab.storage, state: authorize.searchParams.get('state'), authorize };
 }
 
+/** A tab that has just come back from the login page with a code for its own sign-in. */
+async function returned(options = {}) {
+  const { storage, state } = await began(options.route);
+  return browser({ search: `?code=THE-CODE&state=${state}`, storage, ...options });
+}
+
 test('sign-in settings are read from the page, or not at all', () => {
   assert.deepEqual(core.readConfig(JSON.stringify(CONFIG)), CONFIG);
-  assert.deepEqual(core.readConfig(JSON.stringify({ ...CONFIG, loginOrigin: 'http://127.0.0.1:8787', redirectUri: 'http://127.0.0.1:8787/', extra: 1 })),
-    { ...CONFIG, loginOrigin: 'http://127.0.0.1:8787', redirectUri: 'http://127.0.0.1:8787/' });
-  for (const text of [undefined, null, '', '%CONFIG%', 'null', '[]', '{}', JSON.stringify({ ...CONFIG, clientId: '' }),
-    JSON.stringify({ ...CONFIG, scope: 5 }), JSON.stringify({ ...CONFIG, loginOrigin: 'javascript:alert(1)' }),
-    JSON.stringify({ ...CONFIG, loginOrigin: 'https://login.example/path' }), JSON.stringify({ ...CONFIG, redirectUri: '/relative' })]) {
-    assert.equal(core.readConfig(text), null, String(text));
-  }
+  const local = { ...CONFIG, loginOrigin: 'http://127.0.0.1:8787', redirectUri: 'http://127.0.0.1:8787/' };
+  assert.deepEqual(core.readConfig(JSON.stringify({ ...local, extra: 1 })), local);
+
+  const unusable = [
+    undefined, null, '', '%CONFIG%', 'null', '[]', '{}',
+    JSON.stringify({ ...CONFIG, clientId: '' }),
+    JSON.stringify({ ...CONFIG, scope: 5 }),
+    JSON.stringify({ ...CONFIG, loginOrigin: 'javascript:alert(1)' }),
+    JSON.stringify({ ...CONFIG, loginOrigin: 'https://login.example/path' }),
+    JSON.stringify({ ...CONFIG, redirectUri: '/relative' }),
+  ];
+  for (const text of unusable) assert.equal(core.readConfig(text), null, String(text));
 });
 
 test('starting a sign-in sends the browser to the login page with state and an S256 challenge', async () => {
@@ -347,7 +408,9 @@ test('starting a sign-in sends the browser to the login page with state and an S
   const [authorize] = tab.navigations();
   assert.equal(`${authorize.origin}${authorize.pathname}`, 'https://login.example/oauth2/authorize');
   const query = authorize.searchParams;
-  assert.deepEqual([...query.keys()].sort(), ['client_id', 'code_challenge', 'code_challenge_method', 'redirect_uri', 'response_type', 'scope', 'state']);
+  assert.deepEqual([...query.keys()].sort(), [
+    'client_id', 'code_challenge', 'code_challenge_method', 'redirect_uri', 'response_type', 'scope', 'state',
+  ]);
   assert.equal(query.get('response_type'), 'code');
   assert.equal(query.get('client_id'), 'client-1');
   assert.equal(query.get('redirect_uri'), 'https://console.example/');
@@ -355,7 +418,7 @@ test('starting a sign-in sends the browser to the login page with state and an S
   assert.equal(query.get('code_challenge_method'), 'S256');
   assert.match(query.get('state'), /^[A-Za-z0-9_-]{43}$/);
 
-  const stored = JSON.parse(tab.storage.contents()['cranium.signin']);
+  const stored = tab.pending();
   assert.deepEqual(Object.keys(stored).sort(), ['route', 'state', 'verifier']);
   assert.equal(stored.state, query.get('state'));
   assert.equal(stored.route, `#/devices/${THING}`);
@@ -368,8 +431,10 @@ test('starting a sign-in sends the browser to the login page with state and an S
 
 test('state and verifier are 32 bytes each from the CSPRNG, and the challenge matches RFC 7636', async () => {
   // The verifier of RFC 7636 appendix B, as the bytes it is the encoding of.
-  const octets = [116, 24, 223, 180, 151, 153, 224, 37, 79, 250, 96, 125, 216, 173, 187, 186, 22, 212, 37, 77, 105, 214,
-    191, 240, 91, 88, 5, 88, 83, 132, 141, 121];
+  const octets = [
+    116, 24, 223, 180, 151, 153, 224, 37, 79, 250, 96, 125, 216, 173, 187, 186,
+    22, 212, 37, 77, 105, 214, 191, 240, 91, 88, 5, 88, 83, 132, 141, 121,
+  ];
   const asked = [];
   const crypto = {
     subtle: globalThis.crypto.subtle,
@@ -384,9 +449,9 @@ test('state and verifier are 32 bytes each from the CSPRNG, and the challenge ma
   await tab.auth.signIn('#/overview');
 
   assert.deepEqual(asked, [32, 32]);
-  const stored = JSON.parse(tab.storage.contents()['cranium.signin']);
-  assert.equal(stored.verifier, 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk');
-  assert.equal(tab.navigations()[0].searchParams.get('code_challenge'), 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM');
+  assert.equal(tab.pending().verifier, 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk');
+  assert.equal(tab.navigations()[0].searchParams.get('code_challenge'),
+    'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM');
 });
 
 test('two sign-ins never share a state or a verifier', async () => {
@@ -394,83 +459,100 @@ test('two sign-ins never share a state or a verifier', async () => {
   for (let i = 0; i < 20; i += 1) {
     const tab = browser();
     await tab.auth.signIn('#/overview');
-    const stored = JSON.parse(tab.storage.contents()['cranium.signin']);
-    seen.add(stored.state);
-    seen.add(stored.verifier);
+    seen.add(tab.pending().state);
+    seen.add(tab.pending().verifier);
   }
   assert.equal(seen.size, 40);
 });
 
 test('only a route of the console is remembered for after sign-in', async () => {
-  for (const [given, kept] of [['#/firmware', '#/firmware'], [`#/deployments/${DEPLOYMENT}`, `#/deployments/${DEPLOYMENT}`],
-    ['', '#/overview'], ['#/nowhere', '#/overview'], ['https://evil.example/', '#/overview'], ['#//evil.example', '#/overview'],
-    ['javascript:alert(1)', '#/overview'], [undefined, '#/overview']]) {
+  const cases = [
+    ['#/firmware', '#/firmware'],
+    [`#/deployments/${DEPLOYMENT}`, `#/deployments/${DEPLOYMENT}`],
+    ['', '#/overview'],
+    ['#/nowhere', '#/overview'],
+    ['https://evil.example/', '#/overview'],
+    ['#//evil.example', '#/overview'],
+    ['javascript:alert(1)', '#/overview'],
+    [undefined, '#/overview'],
+  ];
+  for (const [given, kept] of cases) {
     const tab = browser();
     await tab.auth.signIn(given);
-    assert.equal(JSON.parse(tab.storage.contents()['cranium.signin']).route, kept, String(given));
+    assert.equal(tab.pending().route, kept, String(given));
   }
 });
 
-test('coming back with the right state redeems the code, keeps only the access token and revokes the refresh token', async () => {
-  const { storage, state } = await began('#/firmware');
-  const tab = browser({ search: `?code=THE-CODE&state=${state}`, storage });
+test('coming back with the right state redeems the code and keeps only the access token', async () => {
+  const tab = await returned();
   const outcome = await tab.auth.resume('');
-
   assert.deepEqual(outcome, { status: 'signed-in', route: '#/firmware' });
 
   // The address bar is cleaned before anything is requested.
   assert.deepEqual(tab.events[0], { type: 'replaceState', url: '/' });
   assert.equal(tab.events.slice(1).every((event) => event.type === 'fetch'), true);
 
-  const [token, revoke] = tab.fetches();
-  assert.equal(tab.fetches().length, 2);
+  const [token] = tab.fetches();
   assert.equal(token.url, 'https://login.example/oauth2/token');
   assert.equal(token.options.method, 'POST');
   assert.equal(token.options.headers['content-type'], 'application/x-www-form-urlencoded');
   assert.equal(token.options.credentials, 'omit');
   const sent = new URLSearchParams(token.options.body);
-  assert.deepEqual([...sent.keys()].sort(), ['client_id', 'code', 'code_verifier', 'grant_type', 'redirect_uri']);
+  assert.deepEqual([...sent.keys()].sort(),
+    ['client_id', 'code', 'code_verifier', 'grant_type', 'redirect_uri']);
   assert.equal(sent.get('grant_type'), 'authorization_code');
   assert.equal(sent.get('client_id'), 'client-1');
   assert.equal(sent.get('code'), 'THE-CODE');
   assert.equal(sent.get('redirect_uri'), 'https://console.example/');
   assert.match(sent.get('code_verifier'), /^[A-Za-z0-9_-]{43}$/);
 
-  assert.equal(revoke.url, 'https://login.example/oauth2/revoke');
-  assert.equal(revoke.options.method, 'POST');
-  assert.equal(revoke.options.credentials, 'omit');
-  assert.deepEqual(Object.fromEntries(new URLSearchParams(revoke.options.body)), { token: 'REFRESH-TOKEN', client_id: 'client-1' });
-  assert.equal(await tab.auth.revocation(), 'revoked');
-
   // What is left in storage: the access token and when it ends.
-  const kept = storage.contents();
+  const kept = tab.storage.contents();
   assert.deepEqual(Object.keys(kept), ['cranium.session']);
-  assert.deepEqual(JSON.parse(kept['cranium.session']), { accessToken: 'ACCESS-TOKEN', expiresAt: Date.parse('2026-10-10T13:00:00Z') / 1000 });
-  for (const [, value] of storage.writes) {
-    assert.equal(value.includes('REFRESH-TOKEN'), false, 'the refresh token must never be stored');
-    assert.equal(value.includes('ID-TOKEN'), false, 'the ID token must never be stored');
-    assert.equal(value.includes('THE-CODE'), false, 'the authorization code must never be stored');
-  }
+  assert.deepEqual(JSON.parse(kept['cranium.session']),
+    { accessToken: 'ACCESS-TOKEN', expiresAt: Date.parse('2026-10-10T13:00:00Z') / 1000 });
   assert.equal(tab.auth.accessToken(), 'ACCESS-TOKEN');
   assert.equal(tab.navigations().length, 0);
 });
 
+test('the refresh token is revoked at once and never stored, nor the ID token or the code', async () => {
+  const tab = await returned();
+  await tab.auth.resume('');
+
+  assert.equal(tab.fetches().length, 2);
+  const revoke = tab.fetches()[1];
+  assert.equal(revoke.url, 'https://login.example/oauth2/revoke');
+  assert.equal(revoke.options.method, 'POST');
+  assert.equal(revoke.options.credentials, 'omit');
+  assert.deepEqual(Object.fromEntries(new URLSearchParams(revoke.options.body)),
+    { token: 'REFRESH-TOKEN', client_id: 'client-1' });
+  assert.equal(await tab.auth.revocation(), 'revoked');
+
+  for (const [, value] of tab.storage.writes) {
+    for (const secret of ['REFRESH-TOKEN', 'ID-TOKEN', 'THE-CODE']) {
+      assert.equal(value.includes(secret), false, `${secret} must never be stored`);
+    }
+  }
+});
+
 test('the hash of the address is kept when the query string is removed', async () => {
-  const { storage, state } = await began();
-  const tab = browser({ search: `?code=c&state=${state}`, hash: '#/activity', storage });
+  const tab = await returned({ hash: '#/activity' });
   await tab.auth.resume('#/activity');
   assert.deepEqual(tab.events[0], { type: 'replaceState', url: '/#/activity' });
 });
 
 test('a reply with an unknown state is discarded without redeeming the code', async () => {
-  const { storage, state } = await began();
-  for (const search of ['?code=STOLEN&state=someone-elses', '?code=STOLEN', `?code=STOLEN&state=${state}x`, '?code=STOLEN&state=']) {
-    const tab = browser({ search, storage: memory() });
+  const { state } = await began();
+  const replies = [
+    '?code=STOLEN&state=someone-elses', '?code=STOLEN', `?code=STOLEN&state=${state}x`, '?code=STOLEN&state=',
+  ];
+  for (const search of replies) {
+    const tab = browser({ search });
     await tab.auth.signIn('#/firmware');
     tab.events.length = 0;
     const outcome = await tab.auth.resume('');
     assert.deepEqual(outcome, { status: 'signed-out', reason: 'unknown-reply' }, search);
-    assert.deepEqual(tab.events, [{ type: 'replaceState', url: '/' }], 'nothing is fetched and nothing is navigated');
+    assert.deepEqual(tab.events, [{ type: 'replaceState', url: '/' }], 'nothing is fetched or navigated');
     assert.deepEqual(tab.storage.contents(), {}, 'the pending sign-in is spent');
   }
   // With nothing pending at all.
@@ -493,40 +575,47 @@ test('a state works once', async () => {
 
 test('an error from the login page is reported without redeeming anything', async () => {
   const { storage, state } = await began();
-  const tab = browser({ search: `?error=access_denied&error_description=%3Cb%3Ehello%3C%2Fb%3E&state=${state}`, storage });
-  assert.deepEqual(await tab.auth.resume(''), { status: 'signed-out', reason: 'login-error', message: 'access_denied' });
+  const search = `?error=access_denied&error_description=%3Cb%3Ehello%3C%2Fb%3E&state=${state}`;
+  const tab = browser({ search, storage });
+  assert.deepEqual(await tab.auth.resume(''),
+    { status: 'signed-out', reason: 'login-error', message: 'access_denied' });
   assert.equal(tab.fetches().length, 0);
   assert.deepEqual(storage.contents(), {});
 
   // An error code that is not a code is not repeated.
   const other = await began();
-  const hostile = browser({ search: `?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E&state=${other.state}`, storage: other.storage });
-  assert.deepEqual(await hostile.auth.resume(''), { status: 'signed-out', reason: 'login-error', message: '' });
+  const hostile = browser({
+    search: `?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E&state=${other.state}`,
+    storage: other.storage,
+  });
+  assert.deepEqual(await hostile.auth.resume(''),
+    { status: 'signed-out', reason: 'login-error', message: '' });
 });
 
 test('a failed token request signs nobody in and is not retried', async () => {
+  const unreadable = /could not read/;
   const cases = [
-    [() => reply(400, { error: 'invalid_grant', error_description: '<b>hello</b>' }), /refused to issue a token \(invalid_grant\)\.$/],
+    [() => reply(400, { error: 'invalid_grant', error_description: '<b>hello</b>' }),
+      /refused to issue a token \(invalid_grant\)\.$/],
     [() => reply(400, { error: '<script>' }), /refused to issue a token\.$/],
     [() => reply(500), /refused to issue a token\.$/],
     [() => { throw new TypeError('network down'); }, /could not be reached/],
-    [() => reply(200, { ...TOKENS, access_token: '' }), /could not read/],
-    [() => reply(200, { ...TOKENS, access_token: undefined }), /could not read/],
-    [() => reply(200, { ...TOKENS, token_type: 'mac' }), /could not read/],
-    [() => reply(200, { ...TOKENS, expires_in: 0 }), /could not read/],
-    [() => reply(200, { ...TOKENS, expires_in: '3600' }), /could not read/],
-    [() => new Response('<html>not json</html>', { status: 200 }), /could not read/],
+    [() => reply(200, { ...TOKENS, access_token: '' }), unreadable],
+    [() => reply(200, { ...TOKENS, access_token: undefined }), unreadable],
+    [() => reply(200, { ...TOKENS, token_type: 'mac' }), unreadable],
+    [() => reply(200, { ...TOKENS, expires_in: 0 }), unreadable],
+    [() => reply(200, { ...TOKENS, expires_in: '3600' }), unreadable],
+    [() => new Response('<html>not json</html>', { status: 200 }), unreadable],
   ];
   for (const [answer, message] of cases) {
-    const { storage, state } = await began();
-    const tab = browser({ search: `?code=c&state=${state}`, storage, answer });
+    const tab = await returned({ answer });
     const outcome = await tab.auth.resume('');
     assert.equal(outcome.status, 'signed-out');
     assert.equal(outcome.reason, 'no-token');
     assert.match(outcome.message, message);
     assert.doesNotMatch(outcome.message, /[<>]/);
     assert.equal(tab.fetches().length, 1);
-    assert.deepEqual(storage.contents(), {});
+    assert.deepEqual(tab.storage.contents(), {});
     assert.equal(tab.auth.accessToken(), null);
     assert.equal(tab.navigations().length, 0);
   }
@@ -534,12 +623,9 @@ test('a failed token request signs nobody in and is not retried', async () => {
 
 test('how the revocation went is known even when its reply cannot be read', async () => {
   const run = async (answerRevoke) => {
-    const { storage, state } = await began();
-    const tab = browser({
-      search: `?code=c&state=${state}`,
-      storage,
-      answer: (url, options) => (url.endsWith('/oauth2/token') ? reply(200, TOKENS) : answerRevoke(options)),
-    });
+    const answer = (url, options) =>
+      (url.endsWith('/oauth2/token') ? reply(200, TOKENS) : answerRevoke(options));
+    const tab = await returned({ answer });
     await tab.auth.resume('');
     return { result: await tab.auth.revocation(), revokes: tab.fetches().slice(1) };
   };
@@ -562,8 +648,7 @@ test('how the revocation went is known even when its reply cannot be read', asyn
   assert.equal(offline.result, 'failed');
 
   // Without a refresh token in the reply there is nothing to revoke.
-  const { storage, state } = await began();
-  const none = browser({ search: `?code=c&state=${state}`, storage, answer: () => reply(200, { ...TOKENS, refresh_token: undefined }) });
+  const none = await returned({ answer: () => reply(200, { ...TOKENS, refresh_token: undefined }) });
   await none.auth.resume('');
   assert.equal(await none.auth.revocation(), 'none');
   assert.equal(none.fetches().length, 1);
@@ -575,21 +660,20 @@ test('without a session, loading the page starts a sign-in and remembers the rou
   assert.equal(tab.fetches().length, 0);
   assert.equal(tab.navigations().length, 1);
   assert.equal(tab.navigations()[0].pathname, '/oauth2/authorize');
-  assert.equal(JSON.parse(tab.storage.contents()['cranium.signin']).route, `#/devices/${THING}`);
+  assert.equal(tab.pending().route, `#/devices/${THING}`);
 });
 
 test('with a session, loading the page asks nobody', async () => {
-  const { storage, state } = await began();
-  await browser({ search: `?code=c&state=${state}`, storage }).auth.resume('');
+  const signedIn = await returned();
+  await signedIn.auth.resume('');
 
-  const tab = browser({ storage, hash: '#/activity' });
+  const tab = browser({ storage: signedIn.storage, hash: '#/activity' });
   assert.deepEqual(await tab.auth.resume('#/activity'), { status: 'signed-in', route: null });
   assert.deepEqual(tab.events, []);
 });
 
 test('the session ends with the token, and is renewed a minute before', async () => {
-  const { storage, state } = await began();
-  const tab = browser({ search: `?code=c&state=${state}`, storage });
+  const tab = await returned();
   await tab.auth.resume('');
 
   assert.equal(tab.auth.secondsLeft(), 3600);
@@ -607,15 +691,20 @@ test('the session ends with the token, and is renewed a minute before', async ()
   assert.equal(tab.auth.accessToken(), null);
 
   // A page loaded with less than a minute left signs in again straight away.
-  const late = browser({ storage });
+  const late = browser({ storage: tab.storage });
   late.advance(3600 - 30);
   assert.deepEqual(await late.auth.resume('#/firmware'), { status: 'redirecting' });
   assert.equal(late.storage.contents()['cranium.session'], undefined);
 });
 
 test('a damaged session record counts as none', async () => {
-  for (const value of ['', 'null', '[]', '{}', 'not json', JSON.stringify({ accessToken: 5, expiresAt: 9e9 }),
-    JSON.stringify({ accessToken: 'x', expiresAt: 'soon' }), JSON.stringify({ accessToken: '', expiresAt: 9e9 })]) {
+  const damaged = [
+    '', 'null', '[]', '{}', 'not json',
+    JSON.stringify({ accessToken: 5, expiresAt: 9e9 }),
+    JSON.stringify({ accessToken: 'x', expiresAt: 'soon' }),
+    JSON.stringify({ accessToken: '', expiresAt: 9e9 }),
+  ];
+  for (const value of damaged) {
     const storage = memory();
     storage.setItem('cranium.session', value);
     const tab = browser({ storage });
@@ -626,8 +715,8 @@ test('a damaged session record counts as none', async () => {
 });
 
 test('signing out clears the tab and ends the session at the login pages', async () => {
-  const { storage, state } = await began();
-  const tab = browser({ search: `?code=c&state=${state}`, storage });
+  const tab = await returned();
+  const { storage } = tab;
   await tab.auth.resume('');
   storage.setItem('something.else', 'left by another script');
 
@@ -636,7 +725,8 @@ test('signing out clears the tab and ends the session at the login pages', async
   assert.equal(tab.auth.accessToken(), null);
   const [logout] = tab.navigations();
   assert.equal(`${logout.origin}${logout.pathname}`, 'https://login.example/logout');
-  assert.deepEqual(Object.fromEntries(logout.searchParams), { client_id: 'client-1', logout_uri: 'https://console.example/' });
+  assert.deepEqual(Object.fromEntries(logout.searchParams),
+    { client_id: 'client-1', logout_uri: 'https://console.example/' });
 
   // Back from the login pages: signed out, and no sign-in starts by itself.
   const back = browser({ storage });
@@ -670,6 +760,9 @@ function client({ answers, token = 'TOKEN-1' }) {
   return { api, calls, pauses, refused: () => refused };
 }
 
+/** The API client with a single reply waiting for it. */
+const answering = (status, body) => client({ answers: [reply(status, body)] });
+
 const failure = async (promise) => {
   try {
     await promise;
@@ -680,8 +773,8 @@ const failure = async (promise) => {
 };
 
 test('requests carry the access token and nothing else that identifies the browser', async () => {
-  const { api, calls } = client({ answers: [reply(200, { devices: [], generatedAt: '2026-10-10T12:00:00Z' })] });
-  assert.deepEqual(await api.devices(), { devices: [], generatedAt: '2026-10-10T12:00:00Z' });
+  const { api, calls } = answering(200, { devices: [], generatedAt: NOON });
+  assert.deepEqual(await api.devices(), { devices: [], generatedAt: NOON });
   assert.equal(calls[0].path, '/api/devices');
   assert.equal(calls[0].options.method, 'GET');
   assert.deepEqual(calls[0].options.headers, { authorization: 'Bearer TOKEN-1', accept: 'application/json' });
@@ -699,7 +792,7 @@ test('without a token nothing is sent', async () => {
 });
 
 test('a 401 is not retried and is reported so that sign-in can start again', async () => {
-  const { api, calls, refused } = client({ answers: [reply(401, { message: 'Unauthorized' })] });
+  const { api, calls, refused } = answering(401, { message: 'Unauthorized' });
   const error = await failure(api.firmware());
   assert.equal(error instanceof core.ApiError, true);
   assert.equal(error.status, 401);
@@ -709,7 +802,8 @@ test('a 401 is not retried and is reported so that sign-in can start again', asy
 
 test('a GET is tried three times on 429, 502, 503 and 504, with a growing, jittered pause', async () => {
   for (const status of [429, 502, 503, 504]) {
-    const { api, calls, pauses } = client({ answers: [reply(status, { message: 'Busy' }), reply(status, { message: 'Busy' }), reply(200, { deployments: [] })] });
+    const busy = () => reply(status, { message: 'Busy' });
+    const { api, calls, pauses } = client({ answers: [busy(), busy(), reply(200, { deployments: [] })] });
     assert.deepEqual(await api.deployments(), []);
     assert.equal(calls.length, 3, String(status));
     assert.equal(pauses.length, 2);
@@ -717,7 +811,8 @@ test('a GET is tried three times on 429, 502, 503 and 504, with a growing, jitte
     assert.equal(pauses[1] >= 400 && pauses[1] < 1200, true, `second pause ${pauses[1]}`);
   }
 
-  const { api, calls } = client({ answers: [reply(503, { message: 'Service Unavailable' }), reply(503, { message: 'Service Unavailable' }), reply(503, { message: 'Service Unavailable' })] });
+  const down = () => reply(503, { message: 'Service Unavailable' });
+  const { api, calls } = client({ answers: [down(), down(), down()] });
   const error = await failure(api.deployments());
   assert.equal(calls.length, 3);
   assert.equal(error.status, 503);
@@ -726,7 +821,7 @@ test('a GET is tried three times on 429, 502, 503 and 504, with a growing, jitte
 
 test('a GET is not retried on other failures', async () => {
   for (const status of [400, 403, 404, 409, 422, 500]) {
-    const { api, calls, pauses } = client({ answers: [reply(status, { error: { code: 'some_code', message: 'No.', requestId: 'r-1' } })] });
+    const { api, calls, pauses } = answering(status, { error: { code: 'some_code', message: 'No.' } });
     const error = await failure(api.devices());
     assert.equal(calls.length, 1, String(status));
     assert.equal(pauses.length, 0);
@@ -734,25 +829,38 @@ test('a GET is not retried on other failures', async () => {
   }
 });
 
+const SOME_DEPLOYMENT = {
+  id: DEPLOYMENT,
+  version: '1.1.0+7',
+  status: 'IN_PROGRESS',
+  things: [THING],
+  executions: [],
+};
+
 test('a POST is retried on 429 only', async () => {
-  const body = { deployment: { id: DEPLOYMENT, version: '1.1.0+7', status: 'CANCELED', things: [], counts: {}, executions: [] } };
-  const throttled = client({ answers: [reply(429, { message: 'Too Many Requests' }), reply(429, { message: 'Too Many Requests' }), reply(200, body)] });
-  assert.equal((await throttled.api.cancel(DEPLOYMENT, true)).id, DEPLOYMENT);
-  assert.equal(throttled.calls.length, 3);
-  assert.deepEqual(JSON.parse(throttled.calls[0].options.body), { force: true });
-  assert.equal(throttled.calls[0].options.headers['content-type'], 'application/json');
+  const throttled = () => reply(429, { message: 'Too Many Requests' });
+  const twice = client({ answers: [throttled(), throttled(), reply(200, { deployment: SOME_DEPLOYMENT })] });
+  assert.equal((await twice.api.cancel(DEPLOYMENT, true)).id, DEPLOYMENT);
+  assert.equal(twice.calls.length, 3);
+  assert.deepEqual(JSON.parse(twice.calls[0].options.body), { force: true });
+  assert.equal(twice.calls[0].options.headers['content-type'], 'application/json');
 
   for (const status of [500, 502, 503, 504]) {
-    const { api, calls } = client({ answers: [reply(status, { message: 'Bad Gateway' })] });
+    const { api, calls } = answering(status, { message: 'Bad Gateway' });
     await failure(api.cancel(DEPLOYMENT, false));
     assert.equal(calls.length, 1, String(status));
   }
 });
 
 test('a failed request carries the server\'s own message', async () => {
-  const own = client({ answers: [reply(409, { error: { code: 'device_busy', message: 'A board still has an unfinished update.', requestId: 'req-7',
-    details: [{ thing: THING, deployment: DEPLOYMENT }, { thing: '<img>', deployment: 'x' }, null] } })] });
-  const error = await failure(own.api.deploy({ version: '1.1.0+7', things: [THING] }));
+  const busy = {
+    code: 'device_busy',
+    message: 'A board still has an unfinished update.',
+    requestId: 'req-7',
+    details: [{ thing: THING, deployment: DEPLOYMENT }, { thing: '<img>', deployment: 'x' }, null],
+  };
+  const { api } = answering(409, { error: busy });
+  const error = await failure(api.deploy({ version: '1.1.0+7', things: [THING] }));
   assert.equal(error.status, 409);
   assert.equal(error.code, 'device_busy');
   assert.equal(error.message, 'A board still has an unfinished update.');
@@ -760,25 +868,25 @@ test('a failed request carries the server\'s own message', async () => {
   assert.deepEqual(core.busyBoards(error), [{ thing: THING, deployment: DEPLOYMENT }]);
   assert.deepEqual(core.busyBoards(new Error('other')), []);
 
-  const gateway = await failure(client({ answers: [reply(403, { message: 'Forbidden' })] }).api.me());
+  const gateway = await failure(answering(403, { message: 'Forbidden' }).api.me());
   assert.equal(gateway.message, 'Forbidden (HTTP 403).');
   assert.equal(gateway.code, 'gateway');
 
-  const bare = await failure(client({ answers: [new Response('<html>oops</html>', { status: 500 })] }).api.me());
+  const page = new Response('<html>oops</html>', { status: 500 });
+  const bare = await failure(client({ answers: [page] }).api.me());
   assert.equal(bare.message, 'The server answered with HTTP 500.');
 
-  const unreachable = await failure(client({ answers: [new TypeError('Failed to fetch')] }).api.me());
-  assert.equal(unreachable.code, 'network');
-  const slow = await failure(client({ answers: [new DOMException('timed out', 'TimeoutError')] }).api.me());
-  assert.equal(slow.code, 'timeout');
-
-  const garbled = await failure(client({ answers: [new Response('not json', { status: 200 })] }).api.me());
-  assert.equal(garbled.code, 'bad_response');
+  const offline = new TypeError('Failed to fetch');
+  assert.equal((await failure(client({ answers: [offline] }).api.me())).code, 'network');
+  const slow = new DOMException('timed out', 'TimeoutError');
+  assert.equal((await failure(client({ answers: [slow] }).api.me())).code, 'timeout');
+  const garbled = new Response('not json', { status: 200 });
+  assert.equal((await failure(client({ answers: [garbled] }).api.me())).code, 'bad_response');
 });
 
 test('names are checked before they are put into a path', async () => {
   const { api, calls } = client({ answers: [] });
-  for (const attempt of [
+  const attempts = [
     () => api.device('../firmware'),
     () => api.device(`${THING}/../../me`),
     () => api.device(''),
@@ -791,16 +899,20 @@ test('names are checked before they are put into a path', async () => {
     () => api.deploy({ version: '1.0.0+1', things: [THING, 'cranium-*'] }),
     () => api.audit({ before: 'a b' }),
     () => api.audit({ before: '../x' }),
-  ]) {
-    const error = await failure(attempt());
-    assert.equal(error instanceof core.ApiError, true);
+  ];
+  for (const attempt of attempts) {
+    assert.equal((await failure(attempt())) instanceof core.ApiError, true);
   }
   assert.equal(calls.length, 0);
 });
 
 test('paths and bodies are what the API expects', async () => {
-  const deployment = { deployment: { id: DEPLOYMENT, version: '1.1.0+7', status: 'IN_PROGRESS', things: [THING], counts: { queued: 1 }, executions: [] } };
-  const release = { version: '1.1.0+7', status: 'revoked', revoked: { by: { sub: 's', email: 'e' }, at: '2026-10-10T12:00:00Z', reason: 'r' } };
+  const deployment = { deployment: SOME_DEPLOYMENT };
+  const revokedRelease = {
+    version: '1.1.0+7',
+    status: 'revoked',
+    revoked: { by: { sub: 's', email: 'e' }, at: NOON, reason: 'r' },
+  };
   const { api, calls } = client({ answers: [
     reply(200, { device: { thing: THING }, certificates: [], executions: [] }),
     reply(200, deployment),
@@ -809,7 +921,7 @@ test('paths and bodies are what the API expects', async () => {
     reply(201, deployment),
     reply(201, deployment),
     reply(200, deployment),
-    reply(200, { release, cancelled: [DEPLOYMENT, 'not-an-id'] }),
+    reply(200, { release: revokedRelease, cancelled: [DEPLOYMENT, 'not-an-id'] }),
   ] });
 
   await api.device(THING);
@@ -831,10 +943,11 @@ test('paths and bodies are what the API expects', async () => {
     `POST /api/deployments/${DEPLOYMENT}/cancel`,
     'POST /api/firmware/1.1.0+7/revoke',
   ]);
-  assert.deepEqual(JSON.parse(calls[4].options.body), { version: '1.1.0+7', things: [THING], note: 'a note' });
-  assert.deepEqual(JSON.parse(calls[5].options.body), { version: '1.1.0+7', things: [THING] });
-  assert.deepEqual(JSON.parse(calls[6].options.body), { force: false });
-  assert.deepEqual(JSON.parse(calls[7].options.body), { reason: 'the reason' });
+  const sent = (index) => JSON.parse(calls[index].options.body);
+  assert.deepEqual(sent(4), { version: '1.1.0+7', things: [THING], note: 'a note' });
+  assert.deepEqual(sent(5), { version: '1.1.0+7', things: [THING] });
+  assert.deepEqual(sent(6), { force: false });
+  assert.deepEqual(sent(7), { reason: 'the reason' });
   assert.deepEqual(revoked.cancelled, [DEPLOYMENT]);
   assert.equal(revoked.release.revoked.reason, 'r');
 });
@@ -850,15 +963,22 @@ test('what a board reports is cut down to known shapes', async () => {
       job: '../../etc/passwd',
       progress: 4000,
       last: 'none\u202eevil',
-      error: `${'x'.repeat(200)}\u0007`,
+      error: `${'x'.repeat(200)}\x07`,
     },
     rssi: 12,
     uptime: -5,
     extra: { nested: true },
   };
-  const { api } = client({ answers: [reply(200, { devices: [hostile, { thing: 7 }, { thing: THING, online: true, lastSeen: '2026-10-10T12:00:00Z',
-    fw: { version: '1.0.0+3', confirmed: true }, ota: { state: 'downloading', job: DEPLOYMENT, progress: 40, last: 'none', error: '' }, rssi: -52, uptime: 8040 }],
-  generatedAt: 5 })] });
+  const honest = {
+    thing: THING,
+    online: true,
+    lastSeen: NOON,
+    fw: { version: '1.0.0+3', confirmed: true },
+    ota: { state: 'downloading', job: DEPLOYMENT, progress: 40, last: 'none', error: '' },
+    rssi: -52,
+    uptime: 8040,
+  };
+  const { api } = answering(200, { devices: [hostile, { thing: 7 }, honest], generatedAt: 5 });
   const { devices, generatedAt } = await api.devices();
 
   assert.equal(generatedAt, null);
@@ -876,21 +996,42 @@ test('what a board reports is cut down to known shapes', async () => {
   assert.equal(bad.ota.last, 'none?evil');
   assert.equal(bad.ota.error.length, 64);
   assert.match(bad.ota.error, /^[\x20-\x7e]*$/);
-
-  assert.deepEqual(good, { thing: THING, online: true, lastSeen: '2026-10-10T12:00:00Z', fw: { version: '1.0.0+3', confirmed: true },
-    ota: { state: 'downloading', job: DEPLOYMENT, progress: 40, last: 'none', error: '' }, rssi: -52, uptime: 8040 });
+  assert.deepEqual(good, honest);
 });
 
 test('a board\'s reason and note are plain ASCII and short', async () => {
-  const execution = { thing: THING, status: 'FAILED', phase: 'failed', progress: 'half', reason: 'café\u202e<script>',
-    detail: `${'y'.repeat(300)}`, running: '9.9.9', online: 1, queuedAt: '2026-10-10T12:00:00Z', startedAt: null, lastUpdatedAt: 'x', secondsLeft: -3 };
-  const { api } = client({ answers: [reply(200, { deployment: { id: DEPLOYMENT, version: '1.1.0+7', status: 'COMPLETED', createdAt: '2026-10-10T12:00:00Z',
-    completedAt: null, createdBy: null, note: 4, things: [THING, 9], counts: { failed: 1, queued: 'many' }, executions: [execution, { thing: null }] } })] });
+  const execution = {
+    thing: THING,
+    status: 'FAILED',
+    phase: 'failed',
+    progress: 'half',
+    reason: 'café\u202e<script>',
+    detail: 'y'.repeat(300),
+    running: '9.9.9',
+    online: 1,
+    queuedAt: NOON,
+    startedAt: null,
+    lastUpdatedAt: 'x',
+    secondsLeft: -3,
+  };
+  const { api } = answering(200, { deployment: {
+    id: DEPLOYMENT,
+    version: '1.1.0+7',
+    status: 'COMPLETED',
+    createdAt: NOON,
+    completedAt: null,
+    createdBy: null,
+    note: 4,
+    things: [THING, 9],
+    counts: { failed: 1, queued: 'many' },
+    executions: [execution, { thing: null }],
+  } });
   const deployment = await api.deployment(DEPLOYMENT);
 
   assert.deepEqual(deployment.things, [THING]);
   assert.equal(deployment.note, '');
-  assert.deepEqual(deployment.counts, { queued: 0, inProgress: 0, succeeded: 0, failed: 1, rejected: 0, canceled: 0, timedOut: 0, removed: 0 });
+  assert.deepEqual(deployment.counts,
+    { queued: 0, inProgress: 0, succeeded: 0, failed: 1, rejected: 0, canceled: 0, timedOut: 0, removed: 0 });
   assert.equal(deployment.executions.length, 1);
   const [read] = deployment.executions;
   assert.equal(read.reason, 'caf??<script>');
@@ -916,18 +1057,41 @@ test('a reply with the wrong outline is an error, not a blank page', async () =>
     [(api) => api.me(), 'text'],
   ];
   for (const [call, body] of cases) {
-    const error = await failure(call(client({ answers: [reply(200, body)] }).api));
+    const error = await failure(call(answering(200, body).api));
     assert.equal(error.code, 'bad_response', JSON.stringify(body));
   }
 });
 
 test('releases, the audit log and the caller are read field by field', async () => {
+  const release = {
+    version: '1.1.0+7',
+    size: 815284,
+    sha256: 'a'.repeat(64),
+    imageHash: 'b'.repeat(64),
+    keyHash: 'c'.repeat(64),
+    payloadSize: 814000,
+    headerSize: 512,
+    loadAddress: 196608,
+    filename: 'zephyr.signed.bin',
+    notes: 'n',
+    uploadedBy: { sub: 's', email: 'e', role: 'x' },
+    uploadedAt: NOON,
+    status: 'anything else',
+    revoked: null,
+    extra: 1,
+  };
+  const entry = {
+    at: NOON,
+    actor: { sub: 's', email: 'e' },
+    action: 'firmware.upload',
+    target: '1.1.0+7',
+    outcome: 'ok',
+    detail: { size: 815284, nested: { a: 1 }, code: 'x' },
+    requestId: 'r-1',
+  };
   const { api } = client({ answers: [
-    reply(200, { releases: [{ version: '1.1.0+7', size: 815284, sha256: 'a'.repeat(64), imageHash: 'b'.repeat(64), keyHash: 'c'.repeat(64),
-      payloadSize: 814000, headerSize: 512, loadAddress: 196608, filename: 'zephyr.signed.bin', notes: 'n', uploadedBy: { sub: 's', email: 'e', role: 'x' },
-      uploadedAt: '2026-10-10T12:00:00Z', status: 'anything else', revoked: null, extra: 1 }], signingKey: { fingerprint: 'd'.repeat(64) }, slotSize: 933888 }),
-    reply(200, { entries: [{ at: '2026-10-10T12:00:00Z', actor: { sub: 's', email: 'e' }, action: 'firmware.upload', target: '1.1.0+7', outcome: 'ok',
-      detail: { size: 815284, nested: { a: 1 }, code: 'x' }, requestId: 'r-1' }], next: 'not a cursor!' }),
+    reply(200, { releases: [release], signingKey: { fingerprint: 'd'.repeat(64) }, slotSize: 933888 }),
+    reply(200, { entries: [entry], next: 'not a cursor!' }),
     reply(200, { sub: 's', email: 'e', groups: ['release-managers', 4], canWrite: 'yes', expiresAt: 1 }),
   ] });
 
@@ -947,7 +1111,13 @@ test('releases, the audit log and the caller are read field by field', async () 
 
 test('uploading reports progress and returns the release', async () => {
   const sent = [];
-  class FakeRequest {
+  const answers = [
+    { status: 429, body: { message: 'Too Many Requests' } },
+    { status: 201, body: { release: { version: '1.2.3+4', status: 'active', size: 1264 } } },
+    { status: 422, body: { error: { code: 'wrong_key', message: 'Signed with a different key' } } },
+  ];
+  // The little of XMLHttpRequest the upload uses.
+  class Request {
     constructor() {
       this.headers = {};
       this.upload = {};
@@ -969,7 +1139,7 @@ test('uploading reports progress and returns the release', async () => {
     send(body) {
       sent.push(this);
       this.body = body;
-      const answer = FakeRequest.answers.shift();
+      const answer = answers.shift();
       this.upload.onprogress({ lengthComputable: true, loaded: 50, total: 200 });
       this.upload.onload();
       this.status = answer.status;
@@ -977,16 +1147,11 @@ test('uploading reports progress and returns the release', async () => {
       this.onload();
     }
   }
-  FakeRequest.answers = [
-    { status: 429, body: { message: 'Too Many Requests' } },
-    { status: 201, body: { release: { version: '1.2.3+4', status: 'active', size: 1264 } } },
-    { status: 422, body: { error: { code: 'wrong_key', message: 'The image is signed with a different key than this project\'s', requestId: 'r-9' } } },
-  ];
   const progress = [];
   const pauses = [];
   const api = core.createApi({
     auth: { accessToken: () => 'TOKEN-1' },
-    XMLHttpRequest: FakeRequest,
+    XMLHttpRequest: Request,
     crypto: globalThis.crypto,
     clock: core.createClock(),
     onUnauthorized: () => {},
@@ -994,7 +1159,8 @@ test('uploading reports progress and returns the release', async () => {
     fetch: async () => { throw new Error('the upload does not use fetch'); },
   });
 
-  const release = await api.upload({ filename: 'zephyr.signed.bin', notes: '', data: 'AAAA' }, (step) => progress.push(step));
+  const image = { filename: 'zephyr.signed.bin', notes: '', data: 'AAAA' };
+  const release = await api.upload(image, (step) => progress.push(step));
   assert.equal(release.version, '1.2.3+4');
   assert.equal(sent.length, 2, 'a throttled upload is sent again');
   assert.equal(pauses.length, 1);
@@ -1003,12 +1169,16 @@ test('uploading reports progress and returns the release', async () => {
   assert.equal(sent[1].headers.authorization, 'Bearer TOKEN-1');
   assert.equal(sent[1].headers['content-type'], 'application/json');
   assert.deepEqual(JSON.parse(sent[1].body), { filename: 'zephyr.signed.bin', data: 'AAAA' });
-  assert.deepEqual(progress.slice(-3), [{ stage: 'sending', sent: 0 }, { stage: 'sending', sent: 0.25 }, { stage: 'checking', sent: 1 }]);
+  assert.deepEqual(progress.slice(-3), [
+    { stage: 'sending', sent: 0 },
+    { stage: 'sending', sent: 0.25 },
+    { stage: 'checking', sent: 1 },
+  ]);
 
-  const refused = await failure(api.upload({ filename: 'zephyr.signed.bin', notes: 'with notes', data: 'AAAA' }));
+  const refused = await failure(api.upload({ ...image, notes: 'with notes' }));
   assert.equal(refused.status, 422);
   assert.equal(refused.code, 'wrong_key');
-  assert.equal(refused.message, 'The image is signed with a different key than this project\'s');
+  assert.equal(refused.message, 'Signed with a different key');
   assert.equal(JSON.parse(sent[2].body).notes, 'with notes');
 });
 
@@ -1019,7 +1189,7 @@ test('a clock that is far off is corrected from the server\'s Date header', () =
   clock.observe('Sat, 10 Oct 2026 10:00:02 GMT');
   assert.equal(clock.now(), local, 'a couple of seconds is within what the header can tell');
   clock.observe('Sat, 10 Oct 2026 12:00:00 GMT');
-  assert.equal(clock.now(), Date.parse('2026-10-10T12:00:00Z'));
+  assert.equal(clock.now(), Date.parse(NOON));
   local += 5000;
   assert.equal(clock.now(), Date.parse('2026-10-10T12:00:05Z'));
   clock.observe(null);
@@ -1033,7 +1203,8 @@ test('a deployment is polled every 3 s while installing, every 10 s while waitin
   assert.equal(core.pollInterval(['SUCCEEDED', 'IN_PROGRESS', 'QUEUED']), 3000);
   assert.equal(core.pollInterval(['QUEUED', 'IN_PROGRESS']), 3000);
   assert.equal(core.pollInterval(['SUCCEEDED', 'QUEUED', 'FAILED']), 10000);
-  for (const status of ['SUCCEEDED', 'FAILED', 'TIMED_OUT', 'REJECTED', 'REMOVED', 'CANCELED', null, 'SOMETHING_NEW']) {
+  const finished = ['SUCCEEDED', 'FAILED', 'TIMED_OUT', 'REJECTED', 'REMOVED', 'CANCELED'];
+  for (const status of [...finished, null, 'SOMETHING_NEW']) {
     assert.equal(core.pollInterval([status]), 0, String(status));
   }
   assert.equal(core.pollInterval([]), 0);
@@ -1059,22 +1230,44 @@ test('a deployment is polled every 3 s while installing, every 10 s while waitin
 
 // Words.
 
-const PHASES = ['waiting_for_device', 'waiting_for_button', 'downloading', 'verifying', 'rebooting', 'testing', 'succeeded',
-  'failed', 'rolled_back', 'declined', 'refused', 'cancelled', 'timed_out', 'removed'];
+const PHASES = [
+  'waiting_for_device', 'waiting_for_button', 'downloading', 'verifying', 'rebooting', 'testing',
+  'succeeded', 'failed', 'rolled_back', 'declined', 'refused', 'cancelled', 'timed_out', 'removed',
+];
 const TONES = ['wait', 'live', 'good', 'warn', 'bad', 'idle'];
 const STEP_STATES = ['done', 'current', 'failed', 'skipped', 'upcoming'];
+const STARTED = '2026-10-10T12:01:00Z';
 
 function execution(phase, extra = {}) {
-  return { thing: THING, phase, status: 'QUEUED', progress: null, reason: null, detail: null, running: null, online: true,
-    queuedAt: '2026-10-10T12:00:00Z', startedAt: null, lastUpdatedAt: '2026-10-10T12:00:00Z', secondsLeft: null, ...extra };
+  return {
+    thing: THING,
+    phase,
+    status: 'QUEUED',
+    progress: null,
+    reason: null,
+    detail: null,
+    running: null,
+    online: true,
+    queuedAt: NOON,
+    startedAt: null,
+    lastUpdatedAt: NOON,
+    secondsLeft: null,
+    ...extra,
+  };
 }
 
+const describe = (phase, extra) => core.describeExecution(execution(phase, extra));
 const states = (description) => description.steps.map((step) => step.state);
 
 test('every phase has plain words, a tone, an icon and seven steps', () => {
+  const variations = [
+    {},
+    { online: false },
+    { running: '1.0.0+3', startedAt: STARTED, reason: 'something_new' },
+  ];
   for (const phase of PHASES) {
-    for (const extra of [{}, { online: false }, { running: '1.0.0+3', startedAt: '2026-10-10T12:01:00Z', reason: 'something_new' }]) {
-      const description = core.describeExecution(execution(phase, extra));
+    for (const extra of variations) {
+      const description = describe(phase, extra);
       assert.equal(TONES.includes(description.tone), true, phase);
       assert.match(description.icon, /^[a-z-]+$/);
       assert.equal(description.title.length > 3, true, phase);
@@ -1085,79 +1278,84 @@ test('every phase has plain words, a tone, an icon and seven steps', () => {
       assert.equal(states(description).filter((state) => state === 'current').length <= 1, true);
     }
   }
-  assert.deepEqual(core.STEPS, ['Offered', 'Approved on the board', 'Downloading', 'Verified', 'Restarting', 'Testing', 'Confirmed']);
+  assert.deepEqual(core.STEPS,
+    ['Offered', 'Approved on the board', 'Downloading', 'Verified', 'Restarting', 'Testing', 'Confirmed']);
 });
 
 test('waiting is told apart: offline, not picked up yet, waiting for the button', () => {
-  const offline = core.describeExecution(execution('waiting_for_device', { online: false }));
+  const upcoming = new Array(6).fill('upcoming');
+  const offline = describe('waiting_for_device', { online: false });
   assert.equal(offline.text, 'The board is offline; it will see this update when it reconnects.');
-  assert.deepEqual(states(offline), ['current', 'upcoming', 'upcoming', 'upcoming', 'upcoming', 'upcoming', 'upcoming']);
+  assert.deepEqual(states(offline), ['current', ...upcoming]);
 
-  const idle = core.describeExecution(execution('waiting_for_device', { online: true }));
+  const idle = describe('waiting_for_device', { online: true });
   assert.notEqual(idle.title, offline.title);
   assert.match(idle.text, /has not picked up the offer yet/);
 
-  const button = core.describeExecution(execution('waiting_for_button'));
+  const button = describe('waiting_for_button');
   assert.equal(button.tone, 'wait');
   assert.match(button.text, /^Waiting for someone to press Button 1 on the board\./);
-  assert.deepEqual(states(button), ['done', 'current', 'upcoming', 'upcoming', 'upcoming', 'upcoming', 'upcoming']);
+  assert.deepEqual(states(button), ['done', 'current', ...upcoming.slice(1)]);
 });
 
 test('the installing phases move along the steps, with the download in percent', () => {
-  const downloading = core.describeExecution(execution('downloading', { status: 'IN_PROGRESS', progress: 40 }));
+  const downloading = describe('downloading', { status: 'IN_PROGRESS', progress: 40 });
   assert.equal(downloading.title, 'Downloading 40%');
   assert.equal(downloading.progress, 40);
   assert.equal(downloading.tone, 'live');
-  assert.deepEqual(states(downloading), ['done', 'done', 'current', 'upcoming', 'upcoming', 'upcoming', 'upcoming']);
-  assert.equal(core.describeExecution(execution('downloading')).title, 'Downloading');
-  assert.equal(core.describeExecution(execution('downloading')).progress, 0);
+  assert.deepEqual(states(downloading),
+    ['done', 'done', 'current', 'upcoming', 'upcoming', 'upcoming', 'upcoming']);
+  // Without a figure from the board there is no percentage to show.
+  assert.equal(describe('downloading').title, 'Downloading');
+  assert.equal(describe('downloading').progress, null);
 
-  const current = (phase) => states(core.describeExecution(execution(phase))).indexOf('current');
-  assert.deepEqual(['verifying', 'rebooting', 'testing'].map(current), [3, 4, 5]);
-  for (const phase of ['verifying', 'rebooting', 'testing']) {
-    assert.equal(core.describeExecution(execution(phase)).progress, null);
+  for (const [phase, step] of [['verifying', 3], ['rebooting', 4], ['testing', 5]]) {
+    assert.equal(states(describe(phase)).indexOf('current'), step);
+    assert.equal(describe(phase).progress, null);
   }
 });
 
 test('the ways an update ends are said plainly', () => {
-  const done = core.describeExecution(execution('succeeded', { running: '1.1.0+7' }));
+  const reportsOld = /The board reports that it runs 1\.0\.0\+3\.$/;
+
+  const done = describe('succeeded', { running: '1.1.0+7' });
   assert.equal(done.tone, 'good');
   assert.equal(done.text, 'The board runs 1.1.0+7 and has confirmed it.');
   assert.deepEqual(states(done), new Array(7).fill('done'));
 
-  const rolledBack = core.describeExecution(execution('rolled_back', { reason: 'rolled_back', running: '1.0.0+3' }));
+  const rolledBack = describe('rolled_back', { reason: 'rolled_back', running: '1.0.0+3' });
   assert.equal(rolledBack.tone, 'bad');
   assert.match(rolledBack.text, /^The bootloader put the previous firmware back\./);
-  assert.match(rolledBack.text, /The board reports that it runs 1\.0\.0\+3\.$/);
+  assert.match(rolledBack.text, reportsOld);
   assert.deepEqual(states(rolledBack), ['done', 'done', 'done', 'done', 'done', 'failed', 'skipped']);
 
-  const refused = core.describeExecution(execution('refused', { reason: 'not_newer' }));
+  const refused = describe('refused', { reason: 'not_newer' });
   assert.equal(refused.text, 'Refused: the board already runs this version or a newer one.');
   assert.equal(refused.code, null);
-  assert.deepEqual(states(refused), ['done', 'failed', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped']);
+  assert.deepEqual(states(refused), ['done', 'failed', ...new Array(5).fill('skipped')]);
   for (const reason of ['too_large', 'bad_document', 'unsupported', 'url_not_allowed']) {
-    assert.match(core.describeExecution(execution('refused', { reason })).text, /^Refused: /);
+    assert.match(describe('refused', { reason }).text, /^Refused: /);
   }
 
-  const declined = core.describeExecution(execution('declined', { reason: 'declined' }));
+  const declined = describe('declined', { reason: 'declined' });
   assert.match(declined.text, /Button 2/);
   assert.match(declined.text, /Nothing was installed\./);
 
-  const early = core.describeExecution(execution('cancelled'));
+  const early = describe('cancelled');
   assert.match(early.text, /^Cancelled before the board started\./);
   assert.deepEqual(states(early), new Array(7).fill('skipped'));
-  const late = core.describeExecution(execution('cancelled', { startedAt: '2026-10-10T12:01:00Z', running: '1.0.0+3' }));
+  const late = describe('cancelled', { startedAt: STARTED, running: '1.0.0+3' });
   assert.match(late.text, /^Cancelled after the board had started\./);
-  assert.match(late.text, /The board reports that it runs 1\.0\.0\+3\.$/);
+  assert.match(late.text, reportsOld);
   assert.deepEqual(states(late).slice(0, 3), ['done', 'done', 'skipped']);
 
-  const timedOut = core.describeExecution(execution('timed_out', { running: '1.0.0+3' }));
+  const timedOut = describe('timed_out', { running: '1.0.0+3' });
   assert.equal(timedOut.tone, 'bad');
-  assert.match(timedOut.text, /The board reports that it runs 1\.0\.0\+3\.$/);
+  assert.match(timedOut.text, reportsOld);
 });
 
 test('a failure is pinned to the step the board names, and only then', () => {
-  const failedAt = (reason) => states(core.describeExecution(execution('failed', { reason }))).indexOf('failed');
+  const failedAt = (reason) => states(describe('failed', { reason })).indexOf('failed');
   assert.equal(failedAt('download_failed'), 2);
   assert.equal(failedAt('digest_mismatch'), 3);
   assert.equal(failedAt('header_mismatch'), 3);
@@ -1167,8 +1365,11 @@ test('a failure is pinned to the step the board names, and only then', () => {
   assert.equal(failedAt('something_new'), -1);
   assert.equal(failedAt(null), -1);
 
-  for (const reason of ['download_failed', 'digest_mismatch', 'header_mismatch', 'flash_error', 'interrupted', 'not_installed']) {
-    const description = core.describeExecution(execution('failed', { reason }));
+  const known = [
+    'download_failed', 'digest_mismatch', 'header_mismatch', 'flash_error', 'interrupted', 'not_installed',
+  ];
+  for (const reason of known) {
+    const description = describe('failed', { reason });
     assert.equal(description.tone, 'bad');
     assert.equal(description.code, null);
     assert.match(description.text, /It keeps running the firmware it had\./);
@@ -1176,19 +1377,46 @@ test('a failure is pinned to the step the board names, and only then', () => {
 });
 
 test('a reason the console has no words for is shown as the board gave it', () => {
-  assert.equal(core.describeExecution(execution('failed', { reason: 'something_new' })).code, 'something_new');
-  assert.equal(core.describeExecution(execution('refused', { reason: 'something_new' })).code, 'something_new');
-  assert.equal(core.describeExecution(execution('failed', { reason: null })).code, null);
+  assert.equal(describe('failed', { reason: 'something_new' }).code, 'something_new');
+  assert.equal(describe('refused', { reason: 'something_new' }).code, 'something_new');
+  assert.equal(describe('failed', { reason: null }).code, null);
   // A refusal reported while the update was already under way is a failure with that reason.
-  assert.match(core.describeExecution(execution('failed', { reason: 'not_newer' })).text, /already runs this version or a newer one/);
+  assert.match(describe('failed', { reason: 'not_newer' }).text, /already runs this version or a newer one/);
 
-  const unknown = core.describeExecution(execution('a_phase_from_the_future'));
+  const unknown = describe('a_phase_from_the_future');
   assert.equal(unknown.code, 'a_phase_from_the_future');
   assert.equal(unknown.steps.length, 7);
 });
 
+test('a word from a board is never mistaken for something every object has', () => {
+  const inherited = ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf'];
+  for (const word of inherited) {
+    for (const phase of ['failed', 'refused']) {
+      const description = describe(phase, { reason: word });
+      assert.equal(description.code, word);
+      assert.doesNotMatch(description.text, /undefined|native code|\[object/);
+    }
+    const update = core.describeUpdate({
+      thing: THING,
+      online: true,
+      ota: { state: 'idle', job: null, progress: 0, last: word, error: word },
+    });
+    assert.equal(update.title, 'No update in progress');
+    assert.equal(update.text, '');
+
+    const line = core.describeAudit({ action: word, target: word, outcome: word });
+    assert.equal(line.verb, word);
+    assert.deepEqual(line.outcome, { tone: 'idle', icon: 'minus', label: word });
+    assert.equal(line.href, null);
+  }
+});
+
 test('an execution status has words even when the phase is not known', () => {
-  for (const status of ['QUEUED', 'IN_PROGRESS', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'REJECTED', 'REMOVED', 'CANCELED', 'NEW_STATUS']) {
+  const statuses = [
+    'QUEUED', 'IN_PROGRESS', 'SUCCEEDED', 'FAILED', 'TIMED_OUT', 'REJECTED', 'REMOVED', 'CANCELED',
+    'NEW_STATUS',
+  ];
+  for (const status of statuses) {
     const description = core.describeStatus(status);
     assert.equal(TONES.includes(description.tone), true);
     assert.equal(description.label.length > 3, true);
@@ -1196,36 +1424,41 @@ test('an execution status has words even when the phase is not known', () => {
 });
 
 test('what a board last reported about updates is put into words', () => {
-  const board = (ota, online = true) => ({ thing: THING, online, ota });
-  const ota = (state, extra = {}) => ({ state, job: DEPLOYMENT, progress: 0, last: 'none', error: '', ...extra });
+  const ota = (state, extra = {}) =>
+    ({ state, job: DEPLOYMENT, progress: 0, last: 'none', error: '', ...extra });
+  const update = (report, online = true) => core.describeUpdate({ thing: THING, online, ota: report });
+  const idle = (extra = {}) => update(ota('idle', { job: null, ...extra }));
 
-  assert.equal(core.describeUpdate(board(null)).title, 'Nothing reported');
-  assert.equal(core.describeUpdate(board(ota('idle', { job: null }))).title, 'No update in progress');
-  assert.equal(core.describeUpdate(board(ota('idle', { job: null, last: 'succeeded' }))).tone, 'good');
-  assert.equal(core.describeUpdate(board(ota('idle', { job: null, last: 'rolled_back', error: 'not confirmed' }))).tone, 'bad');
-  assert.equal(core.describeUpdate(board(ota('idle', { job: null, last: 'failed', error: 'download_failed' }))).text, 'The download failed');
-  assert.match(core.describeUpdate(board(ota('idle', { job: null, last: 'refused', error: 'not_newer' }))).text, /already runs this version/);
-  assert.equal(core.describeUpdate(board(ota('idle', { job: null, last: 'a new word' }))).title, 'No update in progress');
+  assert.equal(update(null).title, 'Nothing reported');
+  assert.equal(idle().title, 'No update in progress');
+  assert.equal(idle({ last: 'succeeded' }).tone, 'good');
+  assert.equal(idle({ last: 'rolled_back', error: 'not confirmed' }).tone, 'bad');
+  assert.equal(idle({ last: 'failed', error: 'download_failed' }).text, 'The download failed');
+  assert.match(idle({ last: 'refused', error: 'not_newer' }).text, /already runs this version/);
+  assert.equal(idle({ last: 'a new word' }).title, 'No update in progress');
 
-  const downloading = core.describeUpdate(board(ota('downloading', { progress: 40 })));
+  const downloading = update(ota('downloading', { progress: 40 }));
   assert.equal(downloading.title, 'Downloading 1.1.0+7');
   assert.equal(downloading.progress, 40);
   assert.equal(downloading.deployment, DEPLOYMENT);
-  assert.equal(core.describeUpdate(board(ota('awaiting_user'))).title, 'Waiting for Button 1');
-  assert.equal(core.describeUpdate(board(ota('downloading', { job: null }))).title, 'Downloading an update');
+  assert.equal(update(ota('awaiting_user')).title, 'Waiting for Button 1');
+  assert.equal(update(ota('downloading', { job: null })).title, 'Downloading an update');
 
   // An offline board's words are old news and say so.
-  const stale = core.describeUpdate(board(ota('downloading', { progress: 40 }), false));
+  const stale = update(ota('downloading', { progress: 40 }), false);
   assert.equal(stale.title, 'Was downloading 1.1.0+7 when last seen');
   assert.equal(stale.progress, null);
   assert.equal(stale.tone, 'idle');
 
-  assert.equal(TONES.includes(core.describeUpdate(board(ota('a_new_state'))).tone), true);
+  assert.equal(TONES.includes(update(ota('a_new_state')).tone), true);
 });
 
 test('a deployment as a whole is summed up from its boards', () => {
-  const summary = (status, counts, things = 2) => core.describeDeployment({ status, things: new Array(things).fill(THING),
-    counts: { queued: 0, inProgress: 0, succeeded: 0, failed: 0, rejected: 0, canceled: 0, timedOut: 0, removed: 0, ...counts } }).label;
+  const none = {
+    queued: 0, inProgress: 0, succeeded: 0, failed: 0, rejected: 0, canceled: 0, timedOut: 0, removed: 0,
+  };
+  const summary = (status, counts) =>
+    core.describeDeployment({ status, things: [THING, THING], counts: { ...none, ...counts } }).label;
   assert.equal(summary('IN_PROGRESS', { inProgress: 1, queued: 1 }), 'Installing');
   assert.equal(summary('IN_PROGRESS', { queued: 2 }), 'Waiting for boards');
   assert.equal(summary('COMPLETED', { succeeded: 2 }), 'Succeeded');
@@ -1237,19 +1470,23 @@ test('a deployment as a whole is summed up from its boards', () => {
   assert.equal(summary('DELETION_IN_PROGRESS', {}), 'Being deleted');
   assert.equal(summary('SOMETHING_NEW', {}), 'Unknown');
 
-  assert.deepEqual(core.describeCounts({ queued: 2, inProgress: 1, succeeded: 0, failed: 1, rejected: 0, canceled: 0, timedOut: 0, removed: 0 })
-    .map((entry) => `${entry.count} ${entry.label}`), ['1 installing', '2 waiting', '1 failed']);
+  const counted = core.describeCounts({ ...none, queued: 2, inProgress: 1, failed: 1 });
+  assert.deepEqual(counted.map((entry) => `${entry.count} ${entry.label}`),
+    ['1 installing', '2 waiting', '1 failed']);
 });
 
 test('an entry of the activity log reads as a sentence and links only to what exists', () => {
   const entry = (action, target, outcome = 'ok') => core.describeAudit({ action, target, outcome });
-  assert.deepEqual(entry('firmware.upload', '1.1.0+7'), { icon: 'upload', verb: 'uploaded firmware', outcome: null, href: '#/firmware' });
+  assert.deepEqual(entry('firmware.upload', '1.1.0+7'),
+    { icon: 'upload', verb: 'uploaded firmware', outcome: null, href: '#/firmware' });
   assert.equal(entry('deployment.create', DEPLOYMENT).href, `#/deployments/${DEPLOYMENT}`);
   assert.equal(entry('deployment.cancel', DEPLOYMENT).verb, 'cancelled deployment');
   assert.equal(entry('firmware.revoke', '1.1.0+7').verb, 'revoked firmware');
-  assert.equal(entry('firmware.upload', 'zephyr.signed.bin', 'rejected').href, null);
-  assert.equal(entry('firmware.upload', 'zephyr.signed.bin', 'rejected').verb, 'tried to upload');
-  assert.equal(entry('firmware.upload', 'zephyr.signed.bin', 'rejected').outcome.label, 'Refused');
+
+  const refused = entry('firmware.upload', 'zephyr.signed.bin', 'rejected');
+  assert.equal(refused.href, null);
+  assert.equal(refused.verb, 'tried to upload');
+  assert.equal(refused.outcome.label, 'Refused');
   assert.equal(entry('deployment.create', '1.1.0+7', 'denied').outcome.label, 'Not allowed');
   assert.equal(entry('deployment.create', '1.1.0+7', 'error').outcome.label, 'Server error');
   assert.equal(entry('something.new', 'javascript:alert(1)', 'odd').href, null);

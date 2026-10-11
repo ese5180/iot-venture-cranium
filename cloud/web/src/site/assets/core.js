@@ -30,9 +30,8 @@ export function parseVersion(text) {
     revision: Number(match[3]),
     build: Number(match[4]),
   };
-  if (version.major > 0xff || version.minor > 0xff || version.revision > 0xffff || version.build > 0xffffffff) {
-    return null;
-  }
+  const { major, minor, revision, build } = version;
+  if (major > 0xff || minor > 0xff || revision > 0xffff || build > 0xffffffff) return null;
   return version;
 }
 
@@ -136,7 +135,8 @@ export function dayLabel(iso, nowMs) {
   const days = Math.round((startOfDay(new Date(nowMs)) - startOfDay(then)) / DAY);
   if (days === 0) return 'Today';
   if (days === 1) return 'Yesterday';
-  return then.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  return then.toLocaleDateString(undefined,
+    { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 }
 
 /** A length of time: "42 s", "5 min", "2 h 14 min", "3 d 4 h". */
@@ -195,7 +195,10 @@ export function readImageHeader(data) {
     return { ok: false, message: 'The file is too small to be a firmware image.' };
   }
   if (view.getUint32(0, true) !== IMAGE_MAGIC) {
-    return { ok: false, message: 'This is not an MCUboot image. Choose the *.signed.bin file from the build.' };
+    return {
+      ok: false,
+      message: 'This is not an MCUboot image. Choose the *.signed.bin file from the build.',
+    };
   }
   return {
     ok: true,
@@ -262,28 +265,36 @@ export function reviewImage({ header, size, digest }, firmware) {
     notes.push({ tone: 'good', text: `Fits the board’s ${fileSize(slot)} slot.` });
   }
 
+  if (header.version === '0.0.0+0') {
+    notes.push({ tone: 'warn', text: 'Version 0.0.0+0 is never accepted. Give the build a version first.' });
+    return { blocked, notes };
+  }
+  // Nothing is said about other releases until the list of them has arrived.
+  if (!firmware) return { blocked, notes };
+
   const version = parseVersion(header.version);
-  const releases = firmware?.releases ?? [];
-  const same = releases.find((release) => release.sha256 === digest);
-  const taken = releases.find((release) => release.version === header.version);
-  const highest = releases.reduce((top, release) => {
+  const same = firmware.releases.find((release) => release.sha256 === digest);
+  const taken = firmware.releases.find((release) => release.version === header.version);
+  const highest = firmware.releases.reduce((top, release) => {
     const parsed = parseVersion(release.version);
     return parsed && (!top || compareVersions(parsed, top) > 0) ? parsed : top;
   }, null);
 
-  if (!version || header.version === '0.0.0+0') {
-    notes.push({ tone: 'warn', text: 'Version 0.0.0+0 is never accepted. Give the build a version first.' });
-  } else if (same) {
+  const top = highest ? formatVersion(highest) : '';
+  if (same) {
     notes.push({ tone: 'warn', text: `This exact file is already registered as ${same.version}.` });
   } else if (taken) {
-    notes.push({ tone: 'warn', text: `${taken.version} is already registered with different contents. A version can be used once.` });
+    notes.push({
+      tone: 'warn',
+      text: `${taken.version} is already registered with different contents. A version can be used once.`,
+    });
   } else if (highest && compareVersions(version, highest) <= 0) {
     notes.push({
       tone: 'warn',
-      text: `Not newer than ${formatVersion(highest)}, the highest version registered so far. The server will refuse it.`,
+      text: `Not newer than ${top}, the highest version registered so far. The server will refuse it.`,
     });
   } else if (highest) {
-    notes.push({ tone: 'good', text: `Newer than every registered release (highest so far: ${formatVersion(highest)}).` });
+    notes.push({ tone: 'good', text: `Newer than every registered release (highest so far: ${top}).` });
   } else {
     notes.push({ tone: 'good', text: 'This will be the first release.' });
   }
@@ -307,6 +318,14 @@ export class ApiError extends Error {
 
 function unreadable() {
   return new ApiError(0, 'bad_response', 'The server sent a reply the console could not read.');
+}
+
+function unreachable() {
+  return new ApiError(0, 'network', 'The server could not be reached. Check the connection.');
+}
+
+function tooSlow() {
+  return new ApiError(0, 'timeout', 'The server did not answer in time.');
 }
 
 function record(value) {
@@ -342,6 +361,12 @@ function instant(value) {
 
 function versionOrNull(value) {
   return isVersion(value) ? value : null;
+}
+
+/** The strings in a list, each cut to a sensible length; anything else in it is left out. */
+function texts(value, limit = 64) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => typeof item === 'string').map((item) => item.slice(0, limit));
 }
 
 function person(value) {
@@ -398,7 +423,7 @@ function readDeviceDetail(body) {
   const reply = record(body);
   return {
     device: readDevice(reply.device),
-    certificates: list(reply.certificates).filter((id) => typeof id === 'string').map((id) => boardText(id, 64)),
+    certificates: texts(list(reply.certificates)).map((id) => boardText(id)),
     executions: list(reply.executions).map(readExecutionSummary),
   };
 }
@@ -449,7 +474,7 @@ function readDeploymentSummary(raw) {
     completedAt: instant(item.completedAt),
     createdBy: person(item.createdBy),
     note: text(item.note, 200),
-    things: Array.isArray(item.things) ? item.things.filter((thing) => typeof thing === 'string').map((thing) => text(thing, 64)) : [],
+    things: texts(item.things),
     counts,
   };
 }
@@ -473,12 +498,13 @@ function readExecution(raw) {
 }
 
 function readDeployment(raw) {
-  const summary = readDeploymentSummary(raw);
-  return { ...summary, executions: list(raw.executions).map(readExecution).filter((execution) => execution.thing !== '') };
+  const executions = list(raw.executions).map(readExecution).filter((execution) => execution.thing !== '');
+  return { ...readDeploymentSummary(raw), executions };
 }
 
 function readDeployments(body) {
-  return list(record(body).deployments).map(readDeploymentSummary).filter((deployment) => deployment.id !== '');
+  const deployments = list(record(body).deployments).map(readDeploymentSummary);
+  return deployments.filter((deployment) => deployment.id !== '');
 }
 
 function readAuditEntry(raw) {
@@ -486,7 +512,9 @@ function readAuditEntry(raw) {
   const detail = [];
   if (item.detail && typeof item.detail === 'object' && !Array.isArray(item.detail)) {
     for (const [key, value] of Object.entries(item.detail).slice(0, 8)) {
-      if (typeof value === 'string' || typeof value === 'number') detail.push([text(key, 24), text(String(value), 120)]);
+      if (typeof value === 'string' || typeof value === 'number') {
+        detail.push([text(key, 24), text(String(value), 120)]);
+      }
     }
   }
   return {
@@ -513,7 +541,7 @@ function readMe(body) {
   return {
     sub: text(reply.sub, 64),
     email: text(reply.email, 254),
-    groups: Array.isArray(reply.groups) ? reply.groups.filter((group) => typeof group === 'string').map((group) => text(group, 64)) : [],
+    groups: texts(reply.groups),
     canWrite: reply.canWrite === true,
   };
 }
@@ -523,7 +551,7 @@ export function busyBoards(error) {
   if (!(error instanceof ApiError) || !Array.isArray(error.details)) return [];
   return error.details
     .filter((entry) => entry && isThing(entry.thing))
-    .map((entry) => ({ thing: entry.thing, deployment: isDeploymentId(entry.deployment) ? entry.deployment : null }));
+    .map(({ thing, deployment }) => ({ thing, deployment: isDeploymentId(deployment) ? deployment : null }));
 }
 
 function errorFrom(status, payload) {
@@ -593,10 +621,9 @@ export function readConfig(json) {
     if (typeof value[field] !== 'string' || value[field] === '') return null;
     config[field] = value[field];
   }
-  if (!/^https?:\/\/[^/?#\s]+$/.test(config.loginOrigin) || !/^https?:\/\/[^?#\s]+$/.test(config.redirectUri)) {
-    return null;
-  }
-  return config;
+  const origin = /^https?:\/\/[^/?#\s]+$/;
+  const address = /^https?:\/\/[^?#\s]+$/;
+  return origin.test(config.loginOrigin) && address.test(config.redirectUri) ? config : null;
 }
 
 function form(fields) {
@@ -766,7 +793,8 @@ export function createAuth({ config, storage, location, history, fetch, crypto, 
           : { status: 'signed-out', reason: 'unknown-reply' };
       }
       if (failure !== null) {
-        return { status: 'signed-out', reason: 'login-error', message: OAUTH_ERROR.test(failure) ? failure : '' };
+        const message = OAUTH_ERROR.test(failure) ? failure : '';
+        return { status: 'signed-out', reason: 'login-error', message };
       }
       try {
         await redeem(code, flow.verifier);
@@ -868,9 +896,7 @@ export function createApi({ auth, fetch, XMLHttpRequest, crypto, clock, onUnauth
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
       } catch (error) {
-        throw error?.name === 'TimeoutError'
-          ? new ApiError(0, 'timeout', 'The server did not answer in time.')
-          : new ApiError(0, 'network', 'The server could not be reached. Check the connection.');
+        throw error?.name === 'TimeoutError' ? tooSlow() : unreachable();
       }
       clock.observe(response.headers.get('date'));
 
@@ -902,12 +928,17 @@ export function createApi({ auth, fetch, XMLHttpRequest, crypto, clock, onUnauth
       xhr.setRequestHeader('accept', 'application/json');
       xhr.setRequestHeader('content-type', 'application/json');
       xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable && event.total > 0) onProgress({ stage: 'sending', sent: event.loaded / event.total });
+        if (!event.lengthComputable || event.total <= 0) return;
+        onProgress({ stage: 'sending', sent: event.loaded / event.total });
       };
       xhr.upload.onload = () => onProgress({ stage: 'checking', sent: 1 });
-      xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText, date: xhr.getResponseHeader('date') });
-      xhr.onerror = () => reject(new ApiError(0, 'network', 'The server could not be reached. Check the connection.'));
-      xhr.ontimeout = () => reject(new ApiError(0, 'timeout', 'The server did not answer in time.'));
+      xhr.onload = () => resolve({
+        status: xhr.status,
+        text: xhr.responseText,
+        date: xhr.getResponseHeader('date'),
+      });
+      xhr.onerror = () => reject(unreachable());
+      xhr.ontimeout = () => reject(tooSlow());
       xhr.send(body);
     });
   }
@@ -963,7 +994,10 @@ export function createApi({ auth, fetch, XMLHttpRequest, crypto, clock, onUnauth
       };
     },
     async deploy({ version, things, note }) {
-      const body = { version: checked(isVersion, version), things: things.map((thing) => checked(isThing, thing)) };
+      const body = {
+        version: checked(isVersion, version),
+        things: things.map((thing) => checked(isThing, thing)),
+      };
       if (note) body.note = note;
       return readDeployment(record(record(await post('/api/deployments', body)).deployment));
     },
@@ -1010,7 +1044,9 @@ export function isUnfinished(status) {
 // description also names a tone (wait, live, good, warn, bad, idle) and an icon, so
 // that no state is told apart by colour alone.
 
-export const STEPS = ['Offered', 'Approved on the board', 'Downloading', 'Verified', 'Restarting', 'Testing', 'Confirmed'];
+export const STEPS = [
+  'Offered', 'Approved on the board', 'Downloading', 'Verified', 'Restarting', 'Testing', 'Confirmed',
+];
 
 const REFUSALS = {
   not_newer: 'the board already runs this version or a newer one',
@@ -1022,25 +1058,48 @@ const REFUSALS = {
 
 // `at` is the step that failed, where the board says enough to tell.
 const FAILURES = {
-  download_failed: { at: 2, title: 'The download failed', text: 'The board could not download the image.' },
+  download_failed: {
+    at: 2,
+    title: 'The download failed',
+    text: 'The board could not download the image.',
+  },
   digest_mismatch: {
     at: 3,
     title: 'The download was damaged',
-    text: 'What the board downloaded did not match the SHA-256 digest of the release, so the board discarded it.',
+    text: 'What the board downloaded did not match the SHA-256 digest of the release, so the board ' +
+      'discarded it.',
   },
   header_mismatch: {
     at: 3,
     title: 'Not the announced version',
-    text: 'The image the board downloaded does not carry the version that was announced, so the board discarded it.',
+    text: 'The image the board downloaded does not carry the version that was announced, so the board ' +
+      'discarded it.',
   },
-  flash_error: { at: null, title: 'The board could not store the update', text: 'Writing to the board’s flash memory failed.' },
-  interrupted: { at: null, title: 'Interrupted', text: 'The board restarted before the update was complete.' },
+  flash_error: {
+    at: null,
+    title: 'The board could not store the update',
+    text: 'Writing to the board’s flash memory failed.',
+  },
+  interrupted: {
+    at: null,
+    title: 'Interrupted',
+    text: 'The board restarted before the update was complete.',
+  },
   not_installed: {
     at: 4,
     title: 'Not installed',
-    text: 'The board restarted, but the bootloader did not start the new image. It turns away an image with a wrong signature or an older version.',
+    text: 'The board restarted, but the bootloader did not start the new image. It turns away an image ' +
+      'with a wrong signature or an older version.',
   },
 };
+
+/**
+ * Look a word up in one of the tables here. The word may come from a board, so names
+ * that every object has, such as "constructor", must not count as entries.
+ */
+function entryOf(table, name) {
+  return typeof name === 'string' && Object.hasOwn(table, name) ? table[name] : undefined;
+}
 
 function steps(done, { current = null, failed = null, ended = false } = {}) {
   return STEPS.map((label, index) => {
@@ -1058,95 +1117,120 @@ function firstSentence(text) {
   return end === -1 ? text : text.slice(0, end + 1);
 }
 
+function description(tone, icon, title, text, timeline, extra = {}) {
+  return {
+    tone,
+    icon,
+    title,
+    text,
+    brief: firstSentence(text),
+    steps: timeline,
+    progress: null,
+    code: null,
+    ...extra,
+  };
+}
+
 /**
  * Describe one board's part in a deployment.
  *
  * @returns {{tone: string, icon: string, title: string, text: string, brief: string,
  *   steps: Array, progress: number|null, code: string|null}} `brief` is the first
- *   sentence of `text`; `code` is the board's own reason when the console has no words
- *   for it.
+ *   sentence of `text`; `progress` is the download in percent while the board reports
+ *   it; `code` is the board's own reason when the console has no words for it.
  */
 export function describeExecution(execution) {
   const { phase, reason, running, online, progress, startedAt } = execution;
   const reports = running ? ` The board reports that it runs ${running}.` : '';
   const kept = ' It keeps running the firmware it had.';
-  const describe = (tone, icon, title, text, timeline, extra = {}) =>
-    ({ tone, icon, title, text, brief: firstSentence(text), steps: timeline, progress: null, code: null, ...extra });
 
   switch (phase) {
     case 'waiting_for_device':
-      return online
-        ? describe('wait', 'clock', 'Not picked up yet',
-          'The board is online but has not picked up the offer yet. That normally takes a few seconds.',
-          steps(0, { current: 0 }))
-        : describe('wait', 'offline', 'Board offline',
+      if (!online) {
+        return description('wait', 'offline', 'Board offline',
           'The board is offline; it will see this update when it reconnects.',
           steps(0, { current: 0 }));
+      }
+      return description('wait', 'clock', 'Not picked up yet',
+        'The board is online but has not picked up the offer yet. That normally takes a few seconds.',
+        steps(0, { current: 0 }));
     case 'waiting_for_button':
-      return describe('wait', 'press', 'Waiting for Button 1',
-        'Waiting for someone to press Button 1 on the board. LED1 blinks quickly while the offer is open, and Button 2 declines it.',
+      return description('wait', 'press', 'Waiting for Button 1',
+        'Waiting for someone to press Button 1 on the board. LED1 blinks quickly while the offer ' +
+        'is open, and Button 2 declines it.',
         steps(1, { current: 1 }));
     case 'downloading':
-      return describe('live', 'download', progress === null ? 'Downloading' : `Downloading ${progress}%`,
-        'The board is downloading the image into its spare flash slot. The firmware it runs is not touched yet.',
-        steps(2, { current: 2 }), { progress: progress ?? 0 });
+      return description('live', 'download', progress === null ? 'Downloading' : `Downloading ${progress}%`,
+        'The board is downloading the image into its spare flash slot. The firmware it runs is ' +
+        'not touched yet.',
+        steps(2, { current: 2 }), { progress });
     case 'verifying':
-      return describe('live', 'shield', 'Checking the download',
-        'The board is checking the size, the SHA-256 digest and the version in the signed header before it installs anything.',
+      return description('live', 'shield', 'Checking the download',
+        'The board is checking the size, the SHA-256 digest and the version in the signed header ' +
+        'before it installs anything.',
         steps(3, { current: 3 }));
     case 'rebooting':
-      return describe('live', 'restart', 'Restarting',
+      return description('live', 'restart', 'Restarting',
         'The board is restarting. The bootloader checks the signature before it starts the new firmware.',
         steps(4, { current: 4 }));
     case 'testing':
-      return describe('live', 'pulse', 'On trial',
-        'The new firmware is running on trial. It is kept once the board has reconnected to AWS IoT; if it cannot, the bootloader puts the previous firmware back.',
+      return description('live', 'pulse', 'On trial',
+        'The new firmware is running on trial. It is kept once the board has reconnected to AWS IoT; ' +
+        'if it cannot, the bootloader puts the previous firmware back.',
         steps(5, { current: 5 }));
     case 'succeeded':
-      return describe('good', 'check-circle', 'Installed and confirmed',
-        running ? `The board runs ${running} and has confirmed it.` : 'The board has confirmed the new firmware.',
+      return description('good', 'check-circle', 'Installed and confirmed',
+        running
+          ? `The board runs ${running} and has confirmed it.`
+          : 'The board has confirmed the new firmware.',
         steps(STEPS.length));
     case 'rolled_back':
-      return describe('bad', 'undo', 'Rolled back',
-        `The bootloader put the previous firmware back. The new firmware started but did not reconnect to AWS IoT, so it was never confirmed.${reports}`,
+      return description('bad', 'undo', 'Rolled back',
+        'The bootloader put the previous firmware back. The new firmware started but did not ' +
+        `reconnect to AWS IoT, so it was never confirmed.${reports}`,
         steps(5, { failed: 5, ended: true }));
     case 'declined':
-      return describe('warn', 'minus-circle', 'Declined on the board',
+      return description('warn', 'minus-circle', 'Declined on the board',
         `Someone pressed Button 2 on the board to decline this update. Nothing was installed.${reports}`,
         steps(1, { failed: 1, ended: true }));
     case 'refused': {
-      const why = REFUSALS[reason];
-      return describe('warn', 'ban', 'Refused by the board',
-        `${why ? `Refused: ${why}.` : 'The board refused this update before installing anything.'}${reports}`,
+      const why = entryOf(REFUSALS, reason);
+      const said = why ? `Refused: ${why}.` : 'The board refused this update before installing anything.';
+      return description('warn', 'ban', 'Refused by the board', `${said}${reports}`,
         steps(1, { failed: 1, ended: true }), { code: why ? null : reason });
     }
     case 'failed': {
-      const failure = FAILURES[reason];
+      const failure = entryOf(FAILURES, reason);
       if (failure) {
-        const done = failure.at ?? 2;
-        return describe('bad', 'x-circle', failure.title, `${failure.text}${kept}${reports}`,
-          steps(done, { failed: failure.at, ended: true }));
+        return description('bad', 'x-circle', failure.title, `${failure.text}${kept}${reports}`,
+          steps(failure.at ?? 2, { failed: failure.at, ended: true }));
       }
-      const why = REFUSALS[reason];
-      return describe('bad', 'x-circle', 'Failed',
-        `${why ? `The board stopped: ${why}.` : 'The board reported that the update failed.'}${kept}${reports}`,
+      // A refusal reported once the update was under way arrives as a failure.
+      const why = entryOf(REFUSALS, reason);
+      const said = why ? `The board stopped: ${why}.` : 'The board reported that the update failed.';
+      return description('bad', 'x-circle', 'Failed', `${said}${kept}${reports}`,
         steps(2, { ended: true }), { code: why ? null : reason });
     }
     case 'cancelled':
-      return startedAt
-        ? describe('idle', 'stop', 'Cancelled',
-          `Cancelled after the board had started. A board asks AWS before it installs, so a cancelled update is not installed.${reports}`,
-          steps(2, { ended: true }))
-        : describe('idle', 'stop', 'Cancelled', `Cancelled before the board started. Nothing was installed.${reports}`,
+      if (!startedAt) {
+        return description('idle', 'stop', 'Cancelled',
+          `Cancelled before the board started. Nothing was installed.${reports}`,
           steps(0, { ended: true }));
+      }
+      return description('idle', 'stop', 'Cancelled',
+        'Cancelled after the board had started. A board asks AWS before it installs, so a ' +
+        `cancelled update is not installed.${reports}`,
+        steps(2, { ended: true }));
     case 'timed_out':
-      return describe('bad', 'hourglass', 'Timed out',
+      return description('bad', 'hourglass', 'Timed out',
         `The board started but did not report a result before the time limit.${reports}`,
         steps(2, { ended: true }));
     case 'removed':
-      return describe('idle', 'minus', 'Removed', 'This board was taken out of the deployment.', steps(0, { ended: true }));
+      return description('idle', 'minus', 'Removed', 'This board was taken out of the deployment.',
+        steps(0, { ended: true }));
     default:
-      return describe('idle', 'minus', 'Unknown state', 'The server reported a state this console does not know.',
+      return description('idle', 'minus', 'Unknown state',
+        'The server reported a state this console does not know.',
         steps(0), { code: phase || null });
   }
 }
@@ -1177,12 +1261,13 @@ const LAST_UPDATE = {
 };
 
 /**
- * Describe what a board last said about updates. `deployment` and `version` name the
- * update it is working on, if any. An offline board's words are old news, and say so.
+ * Describe what a board last said about updates. `deployment` is the update it is
+ * working on, if any. An offline board's words are old news, and say so.
  */
 export function describeUpdate(device) {
   const { ota, online } = device;
-  if (!ota) return { tone: 'idle', icon: 'minus', title: 'Nothing reported', text: '', progress: null, deployment: null };
+  const settled = { text: '', progress: null, deployment: null };
+  if (!ota) return { tone: 'idle', icon: 'minus', title: 'Nothing reported', ...settled };
 
   const version = versionOfDeployment(ota.job);
   const target = version ?? 'an update';
@@ -1197,10 +1282,12 @@ export function describeUpdate(device) {
 
   switch (ota.state) {
     case 'idle': {
-      const last = LAST_UPDATE[ota.last] ?? LAST_UPDATE.none;
-      const known = FAILURES[ota.error]?.title ?? (REFUSALS[ota.error] ? `Because ${REFUSALS[ota.error]}.` : '');
-      const noted = ota.last === 'failed' || ota.last === 'refused' ? known : '';
-      return { ...last, text: noted, progress: null, deployment: null };
+      const last = entryOf(LAST_UPDATE, ota.last) ?? LAST_UPDATE.none;
+      // The board's error is a reason code; say it in words where there are words for it.
+      const refusal = entryOf(REFUSALS, ota.error);
+      const why = entryOf(FAILURES, ota.error)?.title ?? (refusal ? `Because ${refusal}.` : '');
+      const text = ota.last === 'failed' || ota.last === 'refused' ? why : '';
+      return { ...last, ...settled, text };
     }
     case 'awaiting_user':
       return live('wait', 'press', 'Waiting for Button 1',
@@ -1228,7 +1315,9 @@ export function describeDeployment(deployment) {
         ? { tone: 'live', icon: 'restart', label: 'Installing' }
         : { tone: 'wait', icon: 'clock', label: 'Waiting for boards' };
     case 'COMPLETED':
-      if (total > 0 && counts.succeeded === total) return { tone: 'good', icon: 'check-circle', label: 'Succeeded' };
+      if (total > 0 && counts.succeeded === total) {
+        return { tone: 'good', icon: 'check-circle', label: 'Succeeded' };
+      }
       if (counts.succeeded > 0) return { tone: 'warn', icon: 'alert', label: 'Partly succeeded' };
       if (counts.failed + counts.timedOut > 0) return { tone: 'bad', icon: 'x-circle', label: 'Failed' };
       return { tone: 'idle', icon: 'minus-circle', label: 'Not installed' };
@@ -1272,12 +1361,13 @@ const AUDIT_OUTCOMES = {
 
 /** One line of the activity log: what was done, and how it ended if not well. */
 export function describeAudit(entry) {
-  const action = AUDIT_ACTIONS[entry.action];
+  const action = entryOf(AUDIT_ACTIONS, entry.action);
   const ok = entry.outcome === 'ok';
+  const other = { tone: 'idle', icon: 'minus', label: entry.outcome || 'Unknown' };
   return {
     icon: action?.icon ?? 'list',
     verb: action ? (ok ? action.done : action.tried) : entry.action || 'did something',
-    outcome: ok ? null : AUDIT_OUTCOMES[entry.outcome] ?? { tone: 'idle', icon: 'minus', label: entry.outcome || 'Unknown' },
+    outcome: ok ? null : entryOf(AUDIT_OUTCOMES, entry.outcome) ?? other,
     href: deploymentHref(entry.target) ?? (isVersion(entry.target) ? '#/firmware' : null),
   };
 }

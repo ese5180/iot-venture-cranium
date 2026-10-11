@@ -11,8 +11,8 @@ import { test } from 'node:test';
 import { createWebHandler, handler } from '../src/server.mjs';
 
 const SITE = new URL('../src/site/', import.meta.url);
-const DOMAIN = 'abc123.execute-api.us-east-1.amazonaws.com';
-const LOGIN = 'https://cranium-0a1b2c3d.auth.us-east-1.amazoncognito.com';
+const DOMAIN = 'a1b2c3d4e5.execute-api.region-1.cloud.test';
+const LOGIN = 'https://cranium-0a1b2c3d.auth.region-1.login.test';
 const SETTINGS = { clientId: 'client-id-for-tests', loginOrigin: LOGIN, scope: 'openid cranium/console' };
 
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
@@ -88,10 +88,11 @@ test('the page carries the sign-in settings', async () => {
 });
 
 test('the redirect address is https on the domain of the request, unless one is given', async () => {
-  const other = await serve(request('/', { domainName: 'other.execute-api.eu-west-1.amazonaws.com' }));
-  assert.equal(settingsIn(other.body).redirectUri, 'https://other.execute-api.eu-west-1.amazonaws.com/');
+  const other = await serve(request('/', { domainName: 'other.execute-api.region-2.cloud.test' }));
+  assert.equal(settingsIn(other.body).redirectUri, 'https://other.execute-api.region-2.cloud.test/');
 
-  const preview = quiet({ ...SETTINGS, loginOrigin: 'http://127.0.0.1:8787', redirectUri: 'http://127.0.0.1:8787/' });
+  const loopback = 'http://127.0.0.1:8787';
+  const preview = quiet({ ...SETTINGS, loginOrigin: loopback, redirectUri: `${loopback}/` });
   const local = await preview(request('/', { domainName: 'ignored.example' }));
   const settings = settingsIn(local.body);
   assert.equal(settings.redirectUri, 'http://127.0.0.1:8787/');
@@ -136,10 +137,23 @@ test('a domain name that is not a host name is refused, not written into the pag
 });
 
 test('a login origin that could alter the security policy is refused when the handler is made', () => {
-  for (const loginOrigin of ['https://login.example"><script>', 'https://login.example; script-src *',
-    'https://login.example,https://evil.example', 'https://login.example evil.example', 'https://login.example/',
-    'https://login.example/path', 'https://LOGIN.example', 'javascript:alert(1)', '//login.example',
-    'login.example', 'https://', '', undefined, null]) {
+  const refused = [
+    'https://login.example"><script>',
+    'https://login.example; script-src *',
+    'https://login.example,https://evil.example',
+    'https://login.example evil.example',
+    'https://login.example/',
+    'https://login.example/path',
+    'https://LOGIN.example',
+    'javascript:alert(1)',
+    '//login.example',
+    'login.example',
+    'https://',
+    '',
+    undefined,
+    null,
+  ];
+  for (const loginOrigin of refused) {
     assert.throws(() => createWebHandler({ ...SETTINGS, loginOrigin }), TypeError, String(loginOrigin));
   }
   assert.throws(() => createWebHandler({ ...SETTINGS, clientId: '' }), TypeError);
@@ -256,8 +270,9 @@ test('nothing outside the site can be reached, whatever the path says', async ()
 test('any other build id is a 404 that is not cached', async () => {
   const build = await currentBuild();
   const flipped = (build[0] === '0' ? '1' : '0') + build.slice(1);
-  for (const id of ['000000000000', flipped, build.toUpperCase() === build ? 'ffffffffffff' : build.toUpperCase(),
-    build.slice(0, 11), `${build}0`, '%BUILD%', 'latest', '..']) {
+  const upper = build.toUpperCase() === build ? 'ffffffffffff' : build.toUpperCase();
+  const others = ['000000000000', flipped, upper, build.slice(0, 11), `${build}0`, '%BUILD%', 'latest', '..'];
+  for (const id of others) {
     const response = await serve(request(`/assets/${id}/app.js`));
     assert.equal(response.statusCode, 404, id);
     assert.equal(response.headers['cache-control'], 'no-store');
@@ -274,7 +289,8 @@ test('a path that is not text is a 404', async () => {
 
 test('only GET is answered', async () => {
   const build = await currentBuild();
-  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'TRACE', 'get', 'Get', '', undefined]) {
+  const methods = ['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'TRACE', 'get', 'Get', '', undefined];
+  for (const method of methods) {
     for (const path of ['/', `/assets/${build}/app.js`, '/nothing']) {
       const response = await serve(request(path, { method }));
       assert.equal(response.statusCode, 405, `${method} ${path}`);
@@ -287,7 +303,10 @@ test('only GET is answered', async () => {
 });
 
 test('an event without the expected outline is refused without throwing', async () => {
-  for (const event of [undefined, null, {}, { rawPath: '/' }, { requestContext: {} }, { requestContext: { http: {} } }, 'GET /']) {
+  const events = [
+    undefined, null, {}, { rawPath: '/' }, { requestContext: {} }, { requestContext: { http: {} } }, 'GET /',
+  ];
+  for (const event of events) {
     const response = await serve(event);
     assert.equal(response.statusCode, 405);
     assertSecurityHeaders(response);
@@ -320,8 +339,11 @@ test('one line is logged per request, and never the query string', async () => {
 test('the deployed handler reads its settings from the environment and always uses https', async (t) => {
   const names = ['USER_POOL_CLIENT_ID', 'LOGIN_DOMAIN', 'OAUTH_SCOPE'];
   const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
-  const log = t.mock.method(console, 'log', () => {});
+  const lines = [];
+  const consoleLog = console.log;
+  console.log = (line) => lines.push(line);
   t.after(() => {
+    console.log = consoleLog;
     for (const name of names) {
       if (saved[name] === undefined) delete process.env[name];
       else process.env[name] = saved[name];
@@ -336,8 +358,9 @@ test('the deployed handler reads its settings from the environment and always us
   process.env.LOGIN_DOMAIN = 'login.example"><script>';
   await assert.rejects(handler(request('/')), TypeError);
 
-  process.env.LOGIN_DOMAIN = 'cranium-0a1b2c3d.auth.us-east-1.amazoncognito.com';
-  const response = await handler(request('/', { rawQueryString: 'code=AUTHORIZATION-CODE&state=STATE-VALUE' }));
+  process.env.LOGIN_DOMAIN = LOGIN.slice('https://'.length);
+  const callback = request('/', { rawQueryString: 'code=AUTHORIZATION-CODE&state=STATE-VALUE' });
+  const response = await handler(callback);
   assert.equal(response.statusCode, 200);
   assert.deepEqual(settingsIn(response.body), {
     clientId: 'deployed-client',
@@ -347,8 +370,7 @@ test('the deployed handler reads its settings from the environment and always us
   });
   assertSecurityHeaders(response);
 
-  assert.equal(log.mock.callCount(), 1);
-  const line = log.mock.calls[0].arguments[0];
-  assert.deepEqual(JSON.parse(line), { requestId: 'request-1', method: 'GET', path: '/', status: 200 });
-  assert.equal(line.includes('AUTHORIZATION-CODE'), false);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]), { requestId: 'request-1', method: 'GET', path: '/', status: 200 });
+  assert.equal(lines[0].includes('AUTHORIZATION-CODE'), false);
 });

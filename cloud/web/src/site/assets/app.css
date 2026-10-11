@@ -332,14 +332,9 @@ strong {
 .account {
   display: flex;
   align-items: center;
-  position: relative;
 }
 
-.account .account-toggle {
-  display: none;
-}
-
-.account-panel {
+.account-box {
   display: flex;
   align-items: center;
   gap: 16px;
@@ -527,7 +522,7 @@ strong {
   gap: 7px;
   min-height: 38px;
   padding: 0 15px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line-field);
   border-radius: var(--radius-small);
   background: var(--surface);
   color: var(--ink);
@@ -542,7 +537,7 @@ strong {
 }
 
 .btn:hover {
-  border-color: var(--ink-3);
+  border-color: var(--ink);
 }
 
 .btn:disabled {
@@ -1073,10 +1068,6 @@ strong {
 textarea.input {
   min-height: 68px;
   resize: vertical;
-}
-
-.input::placeholder {
-  color: var(--ink-3);
 }
 
 /* Sign-in and other full-page messages. */
@@ -1964,7 +1955,7 @@ textarea.input {
   left: 0;
   width: 22px;
   height: 22px;
-  border: 2px solid var(--line-strong);
+  border: 2px solid var(--line-field);
   border-radius: 50%;
   background: var(--surface);
 }
@@ -2023,13 +2014,14 @@ textarea.input {
 }
 
 .step.is-skipped .step-mark {
-  border-color: var(--line);
+  border-color: var(--line-strong);
 }
 
 /* Dialogs. */
 
 .dialog {
   width: min(620px, calc(100vw - 2 * var(--gutter)));
+  max-height: min(780px, calc(100vh - 32px));
   max-height: min(780px, calc(100dvh - 32px));
   padding: 0;
   overflow: hidden;
@@ -2364,37 +2356,28 @@ textarea.input {
     padding: 12px 0;
   }
 
-  .account {
+  /*
+   * Three rows: the wordmark with Sign out, who is signed in, the sections. The account
+   * box is taken apart so that its two halves can sit in different rows.
+   */
+  .account,
+  .account-box {
+    display: contents;
+  }
+
+  .account-box > .btn {
+    align-self: center;
     margin-left: auto;
-  }
-
-  .account .account-toggle {
-    display: inline-flex;
-  }
-
-  .account-panel {
-    display: none;
-    position: absolute;
-    top: calc(100% - 4px);
-    right: 0;
-    z-index: 25;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 14px;
-    width: min(300px, calc(100vw - 2 * var(--gutter)));
-    padding: 16px;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: var(--surface);
-    box-shadow: var(--lift);
-  }
-
-  .account-box.is-open .account-panel {
-    display: flex;
+    order: 1;
   }
 
   .account-who {
-    justify-items: start;
+    display: flex;
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    gap: 0 10px;
+    order: 2;
+    padding-bottom: 6px;
   }
 
   .account-email {
@@ -2419,12 +2402,6 @@ textarea.input {
 
   .nav::-webkit-scrollbar {
     display: none;
-  }
-
-  .nav-list {
-    flex: 1;
-    justify-content: space-between;
-    gap: 14px;
   }
 
   .nav-link {
@@ -2525,18 +2502,15 @@ textarea.input {
 }
 
 @media (max-width: 460px) {
+  /* The five sections share the width of a phone, so none is cut off. */
   .nav-list {
+    flex: 1;
+    justify-content: space-between;
     gap: 8px;
   }
 
   .nav-link {
     font-size: 0.875rem;
-  }
-
-  @media (max-width: 380px) {
-    .nav-link {
-      font-size: 0.8125rem;
-    }
   }
 
   .fact {
@@ -2559,6 +2533,12 @@ textarea.input {
 
   .dialog-spacer {
     display: none;
+  }
+}
+
+@media (max-width: 380px) {
+  .nav-link {
+    font-size: 0.8125rem;
   }
 }
 

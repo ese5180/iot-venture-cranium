@@ -47,7 +47,6 @@ const state = {
   now: Date.now(),
   interval: 0,
   sessionLeft: 0,
-  accountOpen: false,
   devices: resource(),
   firmware: resource(),
   deployments: resource(),
@@ -84,10 +83,23 @@ function paint() {
   account.hidden = false;
   render(nav, navView(ctx));
   render(account, accountView(ctx));
-  const node = pages[state.route.view].view(ctx);
+  let node;
+  try {
+    node = pages[state.route.view].view(ctx);
+  } catch (error) {
+    // A fault in a view must not leave a blank or half-drawn page behind.
+    console.error(error);
+    node = gateView({
+      iconName: 'alert',
+      title: 'This page could not be shown',
+      text: 'The console ran into a problem of its own. Reload the page; if it happens again, ' +
+        'report which page it was.',
+      action: { label: 'Reload', run: () => location.reload() },
+    });
+  }
   node.key = routeHash(state.route);
   render(main, node);
-  if (dialog) dialog.redraw();
+  if (dialogOpen()) dialog.redraw();
 }
 
 function draw() {
@@ -172,7 +184,8 @@ function activeDeployments() {
 }
 
 function phasesOf(deployment) {
-  return deployment ? deployment.executions.map((execution) => `${execution.thing}:${execution.phase}`).join(' ') : '';
+  if (!deployment) return '';
+  return deployment.executions.map((execution) => `${execution.thing}:${execution.phase}`).join(' ');
 }
 
 // One entry per page: how it is drawn, what it loads, and how soon to load it again
@@ -319,7 +332,8 @@ function signedOutGate({ reason, message }) {
     case 'unknown-reply':
       return {
         title: 'That sign-in did not start here',
-        text: 'The reply from the sign-in page did not belong to a sign-in started in this tab, so it was discarded unused.',
+        text: 'The reply from the sign-in page did not belong to a sign-in started in this tab, ' +
+          'so it was discarded unused.',
         action,
       };
     case 'login-error':
@@ -332,25 +346,33 @@ function signedOutGate({ reason, message }) {
         action,
       };
     case 'no-token':
-      return { iconName: 'alert', title: 'Sign-in could not be completed', text: message, action: { ...action, label: 'Try again' } };
+      return {
+        iconName: 'alert',
+        title: 'Sign-in could not be completed',
+        text: message,
+        action: { ...action, label: 'Try again' },
+      };
     case 'refused':
       return {
         iconName: 'alert',
         title: 'The server did not accept this sign-in',
-        text: 'You signed in, but the console’s API turned the new session away. Signing in again will not help; whoever deployed the console needs to look at its API.',
+        text: 'You signed in, but the console’s API turned the new session away. Signing in again ' +
+          'will not help; whoever deployed the console needs to look at its API.',
         action: { label: 'Sign out', run: () => auth.signOut(), quiet: true },
       };
     default:
       return {
         iconName: 'alert',
         title: 'This browser cannot sign in here',
-        text: 'The console needs session storage and a secure (HTTPS) page to sign in. Check that neither is blocked.',
+        text: 'The console needs session storage and a secure (HTTPS) page to sign in. ' +
+          'Check that neither is blocked.',
       };
   }
 }
 
 function onUnauthorized() {
-  if (state.gate) return;
+  // A message that is already about signing in stays; one that only says "loading" does not.
+  if (state.gate && !state.gate.waiting) return;
   if (auth.signedInWithin(FRESH_SIGN_IN_S)) showGate(signedOutGate({ reason: 'refused' }));
   else beginSignIn();
 }
@@ -358,7 +380,7 @@ function onUnauthorized() {
 function checkSession() {
   if (state.gate || document.visibilityState !== 'visible') return;
   // A dialog is left alone; if the token runs out under it, the next request says so.
-  if (auth.needsRenewal() && !dialog) beginSignIn();
+  if (auth.needsRenewal() && !dialogOpen()) beginSignIn();
 }
 
 // Routes.
@@ -376,7 +398,6 @@ function showRoute() {
   if (dialog) dialog.close(true);
   state.route = route;
   state.interval = 0;
-  state.accountOpen = false;
   document.title = `${pages[route.view].title} · Cranium`;
   paint();
   window.scrollTo(0, 0);
@@ -389,6 +410,10 @@ function showRoute() {
 
 // Dialogs. One at a time; Escape and the backdrop close it unless a request is under way.
 
+function dialogOpen() {
+  return dialog !== null && dialog.isOpen();
+}
+
 function openDialog(build) {
   const el = document.createElement('dialog');
   el.className = 'dialog';
@@ -398,6 +423,7 @@ function openDialog(build) {
   let pressedOutside = false;
   const self = {
     busy: false,
+    isOpen: () => el.open,
     redraw: () => render(el, build()),
     close(force = false) {
       if (!self.busy || force) el.close();
@@ -436,11 +462,13 @@ async function submitFrom(self, model, task) {
     model.sending = false;
     self.busy = false;
     self.redraw();
+    // Unless the server said no, the change may have been made: show what is true now.
+    if (!(model.error.status >= 400 && model.error.status < 500)) refreshNow(true);
   }
 }
 
 function openDeploy(version) {
-  if (!state.me.canWrite || dialog) return;
+  if (!state.me.canWrite || dialogOpen()) return;
   let self = null;
   const change = (apply) => (...args) => {
     apply(...args);
@@ -533,7 +561,7 @@ function openDeploy(version) {
 }
 
 function openCancel(deployment) {
-  if (!state.me.canWrite || dialog || !deployment) return;
+  if (!state.me.canWrite || dialogOpen() || !deployment) return;
   let self = null;
   const model = {
     // The dialog counts waiting and started boards from the newest record there is.
@@ -562,7 +590,7 @@ function openCancel(deployment) {
 }
 
 function openRevoke(release) {
-  if (!state.me.canWrite || dialog) return;
+  if (!state.me.canWrite || dialogOpen()) return;
   let self = null;
   const model = {
     release,
@@ -578,11 +606,13 @@ function openRevoke(release) {
       const { release: revoked, cancelled } = await api.revoke(release.version, singleLine(model.reason));
       const firmware = state.firmware.value;
       if (firmware) {
-        firmware.releases = firmware.releases.map((item) => (item.version === revoked.version ? revoked : item));
+        firmware.releases = firmware.releases.map((item) =>
+          (item.version === revoked.version ? revoked : item));
       }
       self.close(true);
+      const stopped = plural(cancelled.length, 'unfinished deployment was', 'unfinished deployments were');
       notify(cancelled.length > 0
-        ? `Revoked ${revoked.version}. ${plural(cancelled.length, 'unfinished deployment was', 'unfinished deployments were')} cancelled.`
+        ? `Revoked ${revoked.version}. ${stopped} cancelled.`
         : `Revoked ${revoked.version}. No deployment of it was still open.`);
       refreshNow(true);
     }),
@@ -663,16 +693,13 @@ async function startUpload() {
   } catch (error) {
     state.upload = { ...upload, stage: 'refused', error: asProblem(error) };
     draw();
+    load(state.firmware, api.firmware);
   }
 }
 
 const actions = {
   refresh: () => refreshNow(true),
   signOut: () => auth.signOut(),
-  toggleAccount() {
-    state.accountOpen = !state.accountOpen;
-    draw();
-  },
   async copy(value, label) {
     try {
       await navigator.clipboard.writeText(value);
@@ -741,7 +768,8 @@ async function start() {
     showGate(fault.status === 403
       ? {
         title: 'Your account has no access yet',
-        text: 'You are signed in, but your account is in neither the viewers nor the release managers group. Ask a teammate who manages the console to add you.',
+        text: 'You are signed in, but your account is in neither the viewers nor the release ' +
+          'managers group. Ask a teammate who manages the console to add you.',
         detail: fault.message,
         action: { label: 'Sign out', run: () => auth.signOut(), quiet: true },
       }
@@ -752,7 +780,7 @@ async function start() {
         action: {
           label: 'Try again',
           run() {
-            showGate({ iconName: 'clock', title: 'Loading the console…' });
+            showGate({ iconName: 'clock', title: 'Loading the console…', waiting: true });
             start();
           },
         },
@@ -770,12 +798,6 @@ async function start() {
     checkSession();
     if (!state.gate && pages[state.route.view].interval() > 0) refreshNow(false);
   });
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && state.accountOpen) actions.toggleAccount();
-  });
-  document.addEventListener('click', (event) => {
-    if (state.accountOpen && !account.contains(event.target)) actions.toggleAccount();
-  });
   // A file dropped beside the drop zone must not make the browser open it.
   window.addEventListener('dragover', (event) => event.preventDefault());
   window.addEventListener('drop', (event) => event.preventDefault());
@@ -791,13 +813,19 @@ async function boot() {
   document.getElementById('skip')?.addEventListener('click', () => {
     (document.getElementById('page-title') ?? main).focus();
   });
+  // A page brought back by the Back button is a snapshot from before the browser left,
+  // perhaps for the sign-in page or after signing out. Start again from what is true now.
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted) location.reload();
+  });
 
   const config = readConfig(document.querySelector('meta[name="cranium-config"]')?.content);
   if (!config) {
     showGate({
       iconName: 'alert',
       title: 'The console is not set up',
-      text: 'The page arrived without its sign-in settings. Reload it; if that does not help, the console needs to be deployed again.',
+      text: 'The page arrived without its sign-in settings. Reload it; if that does not help, ' +
+        'the console needs to be deployed again.',
     });
     return;
   }
@@ -838,7 +866,8 @@ async function boot() {
   if (outcome.route) history.replaceState(null, '', location.pathname + outcome.route);
   auth.revocation().then((result) => {
     if (result === 'failed' || result === 'refused') {
-      notify('The sign-in service did not confirm that the unused refresh token was revoked. It expires by itself within the hour.', 'bad');
+      notify('The sign-in service did not confirm that the unused refresh token was revoked. ' +
+        'It expires by itself within the hour.', 'bad');
     }
   });
   await start();
