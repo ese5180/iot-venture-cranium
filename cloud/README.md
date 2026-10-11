@@ -85,11 +85,11 @@ cloud/logs.sh api       # or: web, access, iot
 | A board does not come online | `logs.sh iot`: look for `Connect` entries with status `Failure`. The client ID must be the thing name, and the certificate must be attached to the thing |
 | A board refuses or fails an update | the deployment page of the console, then the board's serial console |
 
-AWS IoT does not log a connection that fails authentication (a certificate it does not
-know, or an inactive one) unless the event type `Connection.AuthNError` is switched on
-under *Logs* in the AWS IoT console. The log group `AWSIotLogsV2` appears with the first
-entry. AWS IoT creates it itself, so it is not part of the stack and keeps its entries
-until you give it a retention period.
+A connection that fails authentication (a certificate AWS IoT does not know, or an
+inactive one) is logged as well: the stack switches on the event type
+`Connection.AuthNError`, which is off by default. The log group `AWSIotLogsV2` appears
+with the first entry. AWS IoT creates it itself, so it is not part of the stack and keeps
+its entries until you give it a retention period.
 
 ## Tear down
 

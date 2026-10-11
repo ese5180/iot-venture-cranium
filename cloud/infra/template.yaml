@@ -508,6 +508,11 @@ Resources:
       AccountId: !Ref AWS::AccountId
       RoleArn: !GetAtt IotLoggingRole.Arn
       DefaultLogLevel: !Ref IotLogLevel
+      # A connection that fails authentication (a certificate AWS IoT does not know, or
+      # an inactive one) is only logged if this event type is switched on by name.
+      EventConfigurations:
+        - EventType: Connection.AuthNError
+          LogLevel: INFO
 
   # ---------------------------------------------------------------------------------
   # Lambda functions. Each has its own role and its own log group. The log group is
