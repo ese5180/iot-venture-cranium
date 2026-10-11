@@ -74,7 +74,9 @@ We are developing a mounted attachment to beginner DJ controllers in order to re
 
 ## Secure Firmware Updates
 
-Firmware for the nRF7002 DK is in [`firmware/`](firmware/README.md).
+Firmware for the nRF7002 DK is in [`firmware/`](firmware/README.md). The update server and its
+web console are in [`cloud/`](cloud/README.md), and [`docs/aws-iot.md`](docs/aws-iot.md) describes how
+the boards, AWS IoT and the console work together.
 
 - **Draw and describe your bootloading process**
   ![Boot process](<./pics/Boot Process.png>)
