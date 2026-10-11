@@ -184,6 +184,10 @@ Resources:
       UserPoolTier: ESSENTIALS
       UsernameAttributes:
         - email
+      # Without this, sign-in names are case sensitive: an address typed with a capital
+      # letter is a different user. It cannot be changed once the pool exists.
+      UsernameConfiguration:
+        CaseSensitive: false
       AutoVerifiedAttributes:
         - email
       AdminCreateUserConfig:
@@ -261,6 +265,9 @@ Resources:
         - ALLOW_USER_SRP_AUTH
       EnableTokenRevocation: true
       PreventUserExistenceErrors: ENABLED
+      # Minutes a user has for each step of signing in. The default of 3 is short for a
+      # first sign-in, where an authenticator app may have to be installed first.
+      AuthSessionValidity: 15
       AccessTokenValidity: 60
       IdTokenValidity: 60
       RefreshTokenValidity: 60
