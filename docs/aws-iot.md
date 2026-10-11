@@ -114,6 +114,7 @@ document, so a link is never stored and is valid for 10 minutes only.
 | Button 1 | asks for the document again (fresh link), announces the start, waits for AWS IoT to accept | `IN_PROGRESS`, `step=downloading` | `downloading` |
 | Download over HTTPS into the secondary slot | | | `downloading`, `progress` |
 | SHA-256 and signed header checked | announces the installation, waits for AWS IoT to accept | `IN_PROGRESS`, `step=rebooting` | `verifying`, then `rebooting` |
+| 20 seconds later | fetches the job once more; goes on only if it is still in progress | | `rebooting` |
 | Reset: MCUboot verifies the signature and swaps | | | |
 | New image running on trial | reconnects to AWS IoT, confirms itself | `SUCCEEDED`, `running` | `testing`, then `idle` |
 | Not confirmed within 5 minutes | reset, MCUboot swaps back, old image reports | `FAILED`, `reason=rolled_back` | `idle` |
@@ -122,6 +123,12 @@ Because an offered update stays `QUEUED` until the button is pressed, cancelling
 deployment simply withdraws it. Because the board waits for AWS IoT to accept both
 announcements, an update that is cancelled, or whose release is revoked, after the
 button press is dropped before it is installed.
+
+AWS IoT applies a forced cancellation a few seconds after it is requested (5 to 15
+seconds, measured), and still accepts a board's announcements until then. That is why
+the board waits 20 seconds after its second announcement and looks at the job once
+more. Only then does it ask the bootloader for the swap, so a reset during the wait
+installs nothing.
 
 Failure reasons a board can report: `download_failed`, `digest_mismatch`,
 `header_mismatch`, `flash_error`, `interrupted`, `rolled_back`, `not_installed`.
