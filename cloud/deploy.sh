@@ -2,11 +2,15 @@
 #
 # Deploy the Cranium firmware console, or update it. Safe to run again at any time.
 #
-#   AWS_PROFILE=<profile> cloud/deploy.sh [Parameter=Value ...]
+#   AWS_PROFILE=<profile> cloud/deploy.sh [--replace-signing-key] [Parameter=Value ...]
 #
 # The profile and the Region come from AWS_PROFILE and AWS_REGION (default us-east-1).
 # Optional arguments set template parameters: SlotSize, LoadAddress, IotLogLevel and
 # UserPoolDeletionProtection. A parameter that is not given keeps its current value.
+#
+# The console accepts only images signed with the key in firmware/keys/fw_signing_pub.pem.
+# Once it is deployed, a run that finds another key in that file stops and shows both
+# fingerprints. --replace-signing-key says that the key was replaced on purpose.
 #
 # Needs the AWS CLI v2, Node.js 22 and openssl. Everything this script writes goes to
 # cloud/.deploy/, which git ignores.
@@ -19,6 +23,9 @@ DEPLOY_DIR="$CLOUD_DIR/.deploy"
 SIGNING_KEY_FILE="$REPO_DIR/firmware/keys/fw_signing_pub.pem"
 BOOTSTRAP_STACK=cranium-ota-bootstrap
 STACK=cranium-ota
+# The log group AWS IoT writes to. The name is AWS IoT's, one per account and Region.
+IOT_LOG_GROUP=AWSIotLogsV2
+IOT_LOG_RETENTION_DAYS=90
 WORK=""
 
 export AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -183,10 +190,74 @@ signing_public_key() {
   printf '%s\n' "$key"
 }
 
-# SHA-256 of the DER public key: what the console shows as the key fingerprint.
-signing_key_fingerprint() {
-  openssl pkey -pubin -in "$SIGNING_KEY_FILE" -outform DER | openssl dgst -sha256 -hex |
-    awk '{ print $NF }'
+# key_fingerprint <base64 DER public key>: SHA-256 of the DER public key, which is what
+# the console shows as the key fingerprint.
+key_fingerprint() {
+  printf '%s' "$1" | openssl base64 -d -A | openssl dgst -sha256 -hex | awk '{ print $NF }'
+}
+
+# check_signing_key <key from the file> <yes|no: replacing is intended>
+#
+# The key in the stack is the console's only trust anchor: it decides which images are
+# accepted. The key file is in a public repository with several committers, so a file
+# that changed, by a bad merge or otherwise, must not replace that key in passing. If
+# the file holds another key than the stack, this run stops, unless it was started
+# with --replace-signing-key.
+check_signing_key() {
+  local key="$1" replace="$2" trusted
+  trusted="$(stack_parameter "$STACK" SigningPublicKey)"
+  case "$trusted" in
+    ""|None) die "$STACK has no SigningPublicKey parameter: it is not a stack of this console" ;;
+  esac
+  if [ "$trusted" = "$key" ]; then
+    echo "It is the key the console trusts already."
+    return 0
+  fi
+  echo "The console trusts the key:  $(key_fingerprint "$trusted")"
+  echo "The key file holds the key:  $(key_fingerprint "$key")"
+  if [ "$replace" = yes ]; then
+    echo "Replacing the key, as --replace-signing-key says."
+    return 0
+  fi
+  die "firmware/keys/fw_signing_pub.pem does not hold the signing key this console trusts." \
+    "With another key the console refuses the images it accepts today and accepts images" \
+    "signed with that other key. The console was not changed." \
+    "If the project's signing key was replaced on purpose, run:" \
+    "  cloud/deploy.sh --replace-signing-key" \
+    "If not, find out how the file changed before you deploy."
+}
+
+# AWS IoT logs to one group per account and Region, which it creates with its first
+# entry and in which no entry ever expires. Connections that fail authentication are
+# logged there too, and those need no credential. So the group is created here if it
+# is missing, and given a retention period if it has none. A period that somebody
+# chose is kept.
+bound_iot_log() {
+  local found out
+  found="$(aws logs describe-log-groups --log-group-name-prefix "$IOT_LOG_GROUP" \
+    --query "logGroups[?logGroupName=='$IOT_LOG_GROUP'].[logGroupName, to_string(retentionInDays)] | [0]" \
+    --output text)"
+  case "$found" in
+    ""|None)
+      if ! out="$(aws logs create-log-group --log-group-name "$IOT_LOG_GROUP" 2>&1)"; then
+        case "$out" in
+          # AWS IoT created it in this very moment.
+          *ResourceAlreadyExistsException*) ;;
+          *) die "the log group $IOT_LOG_GROUP could not be created: $out" ;;
+        esac
+      fi
+      ;;
+    *$'\t'null)
+      ;;
+    *)
+      echo "The AWS IoT log ($IOT_LOG_GROUP) keeps its entries for ${found##*$'\t'} days."
+      return 0
+      ;;
+  esac
+  aws logs put-retention-policy --log-group-name "$IOT_LOG_GROUP" \
+    --retention-in-days "$IOT_LOG_RETENTION_DAYS" ||
+    die "the log group $IOT_LOG_GROUP has no retention period and could not be given one"
+  echo "The AWS IoT log ($IOT_LOG_GROUP) now keeps its entries for $IOT_LOG_RETENTION_DAYS days."
 }
 
 # AWS IoT logging is one setting per account and Region. CloudFormation refuses to
@@ -222,13 +293,16 @@ write_outputs() {
 }
 
 main() {
-  local arg requested_protection=""
+  local arg requested_protection="" replace_signing_key=no
   local extra=()
   for arg in "$@"; do
     case "$arg" in
       -h|--help)
         usage
         exit 0
+        ;;
+      --replace-signing-key)
+        replace_signing_key=yes
         ;;
       UserPoolDeletionProtection=ACTIVE|UserPoolDeletionProtection=INACTIVE)
         requested_protection="${arg#*=}"
@@ -293,7 +367,7 @@ main() {
   step "4/9 Signing public key"
   local signing_key
   signing_key="$(signing_public_key)"
-  echo "SHA-256 fingerprint: $(signing_key_fingerprint)"
+  echo "SHA-256 fingerprint: $(key_fingerprint "$signing_key")"
   echo "The Firmware page of the console shows the same fingerprint."
 
   step "5/9 State of $STACK"
@@ -316,6 +390,13 @@ main() {
       ;;
     *)
       echo "$status; it will be updated"
+      check_signing_key "$signing_key" "$replace_signing_key"
+      if [ "$(stack_parameter "$STACK" SignInNamesCaseSensitive)" != false ]; then
+        echo "Note: this user pool compares sign-in names exactly, capitals included. That is"
+        echo "fixed for the life of a pool. cloud/users.sh keeps every address in lower case,"
+        echo "and users have to type theirs that way. A console that is deployed anew does not"
+        echo "have this limit (cloud/teardown.sh, then cloud/deploy.sh)."
+      fi
       ;;
   esac
 
@@ -332,6 +413,7 @@ main() {
   step "7/9 Outputs"
   write_outputs
   echo "Wrote cloud/.deploy/outputs.json"
+  bound_iot_log
 
   step "8/9 User pool deletion protection"
   # The stack is created with the protection off, because a protected pool cannot be

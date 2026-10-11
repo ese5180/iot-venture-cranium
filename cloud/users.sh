@@ -11,7 +11,7 @@
 # A release manager may upload and revoke firmware and create and cancel deployments.
 # A viewer may only look. Cognito e-mails a temporary password to a new user; this
 # script never sets or sees a password. E-mail addresses are arguments only and are
-# not written anywhere.
+# not written anywhere. An address is always used in lower case, however it is typed.
 #
 # The profile and the Region come from AWS_PROFILE and AWS_REGION (default us-east-1).
 
@@ -70,6 +70,14 @@ stack_output() {
   printf '%s\n' "$out"
 }
 
+# A user pool can tell sign-in names apart by their capitals, which is fixed when the
+# pool is created. In such a pool the same mailbox, typed in two ways, would become two
+# accounts, and an account could not be found again under another spelling. So every
+# address is put in lower case before it is used.
+lower_case() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 # Deliberately strict: the address goes into command arguments.
 check_email() {
   if [[ ! "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$ ]]; then
@@ -109,7 +117,7 @@ group_members() {
 }
 
 cmd_add() {
-  local email="$1" role="$2" group other status memberships
+  local email="$1" role="$2" group other status memberships before="" changed
   case "$role" in
     viewer)
       group=viewers
@@ -139,6 +147,7 @@ cmd_add() {
       echo "The user has not signed in yet. If the invitation has expired or is lost:"
       echo "  cloud/users.sh resend $email"
     fi
+    before="$(user_groups "$email")"
   fi
 
   # Add first and remove second, so that the user is never without a role.
@@ -152,6 +161,18 @@ cmd_add() {
       ;;
   esac
   echo "Role: $role"
+
+  # A user who is signed in holds a token that still names the old role.
+  case " $before " in
+    *" $other "*) changed=yes ;;
+    *" $group "*) changed=no ;;
+    *) changed=yes ;;
+  esac
+  if [ "$status" = CONFIRMED ] && [ "$changed" = yes ]; then
+    echo "The new role counts at once for what the user may change: the console asks"
+    echo "Cognito every time. What the console shows follows at the user's next sign-in,"
+    echo "at the latest when the session ends after 60 minutes."
+  fi
 }
 
 cmd_resend() {
@@ -240,11 +261,12 @@ cmd_list() {
 }
 
 main() {
-  local command="${1:-}"
+  local command="${1:-}" email=""
   case "$command" in
     add)
       [ $# -eq 3 ] || usage_error
-      check_email "$2"
+      email="$(lower_case "$2")"
+      check_email "$email"
       case "$3" in
         viewer|release-manager) ;;
         *) die "the role must be viewer or release-manager" ;;
@@ -252,7 +274,8 @@ main() {
       ;;
     resend|reset-mfa|remove)
       [ $# -eq 2 ] || usage_error
-      check_email "$2"
+      email="$(lower_case "$2")"
+      check_email "$email"
       ;;
     list)
       [ $# -eq 1 ] || usage_error
@@ -265,15 +288,18 @@ main() {
       usage_error
       ;;
   esac
+  if [ -n "$email" ] && [ "$email" != "$2" ]; then
+    echo "Using the address in lower case: $email"
+  fi
 
   check_tools
   POOL="$(stack_output UserPoolId)"
 
   case "$command" in
-    add) cmd_add "$2" "$3" ;;
-    resend) cmd_resend "$2" ;;
-    reset-mfa) cmd_reset_mfa "$2" ;;
-    remove) cmd_remove "$2" ;;
+    add) cmd_add "$email" "$3" ;;
+    resend) cmd_resend "$email" ;;
+    reset-mfa) cmd_reset_mfa "$email" ;;
+    remove) cmd_remove "$email" ;;
     list) cmd_list ;;
   esac
 }

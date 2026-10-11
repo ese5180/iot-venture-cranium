@@ -152,6 +152,15 @@ Resources:
         DestinationArn: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${AccessLogGroup}'
         # The route key, never the path: a query string can carry an authorization
         # code. No headers either.
+        #
+        # An HTTP API has no way to escape a value in this format, and the two error
+        # messages are API Gateway's own text, which can contain double quotes (the
+        # message for a token signed with an unknown key does). A line with such a
+        # message is not valid JSON. The two messages therefore come last: everything
+        # before "integrationError" is made of values that cannot contain a quote, so
+        # that part of a line can always be trusted and cut off. At most one of the
+        # two is ever set, because a request that the authorizer refuses never reaches
+        # the integration. Search this log with text patterns, not JSON patterns.
         Format: >-
           {"requestId":"$context.requestId",
           "requestTime":"$context.requestTime",
@@ -160,10 +169,10 @@ Resources:
           "protocol":"$context.protocol",
           "sourceIp":"$context.identity.sourceIp",
           "sub":"$context.authorizer.claims.sub",
-          "authorizerError":"$context.authorizer.error",
-          "integrationError":"$context.integrationErrorMessage",
           "integrationLatency":"$context.integrationLatency",
-          "responseLength":"$context.responseLength"}
+          "responseLength":"$context.responseLength",
+          "integrationError":"$context.integrationErrorMessage",
+          "authorizerError":"$context.authorizer.error"}
 
   WebFnPermission:
     Type: AWS::Lambda::Permission
@@ -496,7 +505,10 @@ Resources:
                 Resource: !Sub '${FirmwareBucket.Arn}/firmware/*'
 
   # AWS IoT writes its own log (connections, refused publishes, job events) to the log
-  # group AWSIotLogsV2, which it creates on first use.
+  # group AWSIotLogsV2. That name is AWS IoT's, one per account and Region, and AWS IoT
+  # creates the group on first use without a retention period. It may exist already, so
+  # it cannot be a resource of this stack: deploy.sh creates it if it is missing and
+  # gives it a retention period if it has none.
   IotLoggingRole:
     Type: AWS::IAM::Role
     Properties:
@@ -531,6 +543,9 @@ Resources:
       DefaultLogLevel: !Ref IotLogLevel
       # A connection that fails authentication (a certificate AWS IoT does not know, or
       # an inactive one) is only logged if this event type is switched on by name.
+      # Such a connection needs no credential, so anyone who knows the endpoint can add
+      # entries to the log: the retention period that deploy.sh sets on the log group
+      # is what keeps them from piling up for ever.
       EventConfigurations:
         - EventType: Connection.AuthNError
           LogLevel: INFO
@@ -538,8 +553,9 @@ Resources:
   # ---------------------------------------------------------------------------------
   # Lambda functions. Each has its own role and its own log group. The log group is
   # created first and the role may only write to it, so the function never creates a
-  # log group of its own. The function names are fixed because Lambda logs to
-  # /aws/lambda/<function name>.
+  # log group of its own. Each function is told which group to log to (LoggingConfig),
+  # so its own name can be left to CloudFormation: a function with a fixed name could
+  # not be replaced by a stack update.
   # ---------------------------------------------------------------------------------
 
   WebLogGroup:
@@ -574,7 +590,8 @@ Resources:
     Type: AWS::Lambda::Function
     DependsOn: WebLogGroup
     Properties:
-      FunctionName: !Sub '${AWS::StackName}-web'
+      LoggingConfig:
+        LogGroup: !Ref WebLogGroup
       Description: Cranium firmware console - static web console
       Runtime: nodejs22.x
       Architectures:
@@ -696,7 +713,8 @@ Resources:
     Type: AWS::Lambda::Function
     DependsOn: ApiLogGroup
     Properties:
-      FunctionName: !Sub '${AWS::StackName}-api'
+      LoggingConfig:
+        LogGroup: !Ref ApiLogGroup
       Description: Cranium firmware console - API
       Runtime: nodejs22.x
       Architectures:

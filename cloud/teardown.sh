@@ -17,7 +17,7 @@
 # flash, but AWS IoT no longer knows them: provision them again after a new deployment.
 #
 # Not touched: the budget stack (cloud/infra/budget.yaml) and the log group
-# AWSIotLogsV2, which AWS IoT created itself.
+# AWSIotLogsV2, which belongs to AWS IoT in this account and not to the stack.
 #
 # The profile and the Region come from AWS_PROFILE and AWS_REGION (default us-east-1).
 # What it needs to remember between runs is kept in cloud/.deploy/.
@@ -502,7 +502,8 @@ main() {
 
   echo
   echo "The console is removed. AWS IoT logging for the account is switched off again."
-  echo "Left in place: the log group AWSIotLogsV2, if AWS IoT created it, and the budget stack."
+  echo "Left in place: the AWS IoT log group AWSIotLogsV2, whose entries expire with its"
+  echo "retention period, and the budget stack."
   echo "To delete the log group:  aws logs delete-log-group --log-group-name AWSIotLogsV2"
 }
 

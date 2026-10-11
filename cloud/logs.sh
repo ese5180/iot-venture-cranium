@@ -17,6 +17,14 @@
 # whose connection AWS IoT refuses shows up in the iot log as a Connect entry with
 # status Failure.
 #
+# Search the access log with text patterns, not JSON patterns. API Gateway cannot
+# escape its own error messages, so a line that carries one may not be valid JSON, and
+# a JSON pattern passes such lines over. The two messages come last in a line; what
+# stands before "integrationError" can always be relied on. For example:
+#
+#   cloud/logs.sh access --filter-pattern '"invalid_token"'       refused tokens
+#   cloud/logs.sh access --filter-pattern '"\"status\":\"401\""'  every 401
+#
 # The profile and the Region come from AWS_PROFILE and AWS_REGION (default us-east-1).
 
 set -euo pipefail

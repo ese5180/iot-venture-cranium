@@ -43,7 +43,17 @@ any change: it only changes what differs.
   deployment can clean up after itself. The same run switches the protection on once
   the stack exists.
 - The stack switches on AWS IoT logging, which is one setting per account and Region.
-  If it is already on, the script stops and says how to hand it over.
+  If it is already on, the script stops and says how to hand it over. AWS IoT logs to
+  the group `AWSIotLogsV2`, which belongs to the account and not to the stack: the
+  script creates it if it is missing and gives it a retention period of 90 days if it
+  has none.
+- The console accepts only images signed with the key in
+  `firmware/keys/fw_signing_pub.pem`. Once the console is deployed, a run that finds
+  another key in that file stops and shows both fingerprints. If the project's key was
+  replaced on purpose, run `cloud/deploy.sh --replace-signing-key`.
+- Sign-in names are not case sensitive. That is fixed when the user pool is created: a
+  pool from an earlier version of this stack compares addresses exactly, and the script
+  says so when it updates one. Users of such a pool type their address in lower case.
 - Template parameters can be given as arguments, for example
   `cloud/deploy.sh IotLogLevel=DEBUG`. See `cloud/deploy.sh --help`.
 
@@ -58,16 +68,18 @@ cloud/users.sh remove <email>
 ```
 
 A release manager may upload and revoke firmware and create and cancel deployments. A
-viewer may only look. `add` on an existing account changes its role.
+viewer may only look. `add` on an existing account changes its role. An address is
+always stored in lower case, however it is typed.
 
 Cognito sends the new user a temporary password that is valid for three days. At the
 first sign-in the user chooses a password and registers an authenticator app. Nobody
 can sign up or reset a password alone: for a forgotten password, remove the account and
 add it again. A session lasts 60 minutes, then the console asks to sign in again.
 
-Removing a user, or taking away the release manager role, stops every change by that
-user at once. A browser that is still signed in can keep reading for the rest of its
-session.
+Whether a user may change something is asked of Cognito for every change. Removing a
+user, or giving or taking away the release manager role, therefore counts at once. What
+a browser that is still signed in shows follows at the next sign-in: until then it
+keeps reading, and it shows the controls of the old role.
 
 ## Check and watch
 
@@ -84,12 +96,61 @@ cloud/logs.sh api       # or: web, access, iot
 | A 500 with no line in the API log | `logs.sh access`: `integrationError` |
 | A board does not come online | `logs.sh iot`: look for `Connect` entries with status `Failure`. The client ID must be the thing name, and the certificate must be attached to the thing |
 | A board refuses or fails an update | the deployment page of the console, then the board's serial console |
+| A revocation answers that it is not complete, or a release shows as not completely revoked | Revoke it again. The release is marked, so nothing new can start; blocking the image or cancelling a deployment did not go through, or a board is still at work that could not be stopped (see below). The answer says which |
+
+Search the access log with text patterns, for example
+`cloud/logs.sh access --filter-pattern '"invalid_token"'`. API Gateway cannot escape
+its own error messages, so a line that carries one is not always valid JSON, and a
+JSON pattern such as `{ $.status = "401" }` passes those lines over. The two messages,
+`integrationError` and `authorizerError`, come last in a line; everything before them
+can be relied on.
 
 A connection that fails authentication (a certificate AWS IoT does not know, or an
 inactive one) is logged as well: the stack switches on the event type
-`Connection.AuthNError`, which is off by default. The log group `AWSIotLogsV2` appears
-with the first entry. AWS IoT creates it itself, so it is not part of the stack and keeps
-its entries until you give it a retention period.
+`Connection.AuthNError`, which is off by default. Such a connection needs no
+credential, so anyone who knows the endpoint can add entries to that log. They cost a
+little each and expire with the retention period of the log group `AWSIotLogsV2`
+(90 days unless you chose another).
+
+### Stop an update without the console
+
+The console's API has one request limit for all its users. If it answers 429 to
+everybody, or cannot be reached, an update can still be stopped with the AWS CLI.
+The bucket name is `FirmwareBucketName` in `cloud/.deploy/outputs.json`; the digest is
+shown with the release on the Firmware page, and `aws iot list-jobs` lists the
+deployments.
+
+```sh
+# 1. Block the image: the bucket refuses every download of a tagged object at once.
+aws s3api put-object-tagging --bucket <FirmwareBucketName> \
+  --key firmware/<sha256 of the image>.bin --tagging 'TagSet=[{Key=revoked,Value=true}]'
+# 2. Stop the boards that have started.
+aws iot cancel-job --job-id <deployment id> --force --reason-code RELEASE_REVOKED
+```
+
+Then revoke the release in the console as soon as it answers again, so that it cannot
+be deployed any more.
+
+### A board at work on a cancelled deployment
+
+Cancelling a deployment without force leaves a board that had started alone, and the
+deployment then counts as cancelled in AWS. What a second, forced cancellation does to
+such a deployment, AWS does not document, and it is what the console sends when you
+cancel with force or revoke the release afterwards. Measured in October 2026, AWS
+accepts it and stops the board 5 to 15 seconds later. The console does not assume that:
+it reads the board's state back, answers that the cancellation was refused or that the
+revocation is not complete while a board is still at work, and shows the release as
+such until no board is left. Asking again a few seconds later then completes it. A board in that state can no longer download a revoked image, and AWS ends its
+part in the deployment 30 minutes after it started. To stop it at once:
+
+```sh
+aws iot cancel-job-execution --job-id <deployment id> --thing-name <board> --force
+```
+
+Then revoke the release again; it completes. The role of the API function may not
+cancel a single board's part in a job, so the console cannot do this itself. What AWS
+did with the second cancellation is in the API log (`cloud/logs.sh api`): `cancel_refused`
+if it refused, `cancel_unconfirmed` if it accepted and the board was still at work.
 
 ## Tear down
 
@@ -104,8 +165,8 @@ two tables). It can be run again if it stops halfway. Boards have to be provisio
 again after a new deployment.
 
 It leaves two things alone: the budget stack (`infra/budget.yaml`, a monthly cost alert
-that is deployed on its own) and the log group `AWSIotLogsV2`, which AWS IoT creates
-itself.
+that is deployed on its own) and the log group `AWSIotLogsV2`, which belongs to AWS IoT
+in this account and not to the stack. Its entries expire with its retention period.
 
 ## Try it without AWS
 
@@ -118,6 +179,11 @@ stand-in for AWS, an emulated sign-in without a password, and simulated boards. 
 to nothing outside this computer, shows no real data, and is never deployed. Add `--live`
 to let the boards act and press their buttons from the terminal, or `--viewer` to see the
 console as a viewer does.
+
+The stand-in refuses a forced cancellation of a deployment that is cancelled already
+(see "A board at work on a cancelled deployment" above). `--repeated-cancel accepted`
+and `--repeated-cancel ignored` show the console in the two other cases that AWS could
+turn out to be.
 
 ## Layout
 
