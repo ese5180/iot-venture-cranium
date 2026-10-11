@@ -39,4 +39,10 @@ int net_credentials_clear(void);
 /* Signal strength of the current association in dBm, or 0 when not connected. */
 int net_rssi(void);
 
+/*
+ * The Wi-Fi interface's hardware address as text ("aa:bb:cc:dd:ee:ff"), for networks
+ * that admit devices by address. buf needs 18 bytes.
+ */
+int net_mac_address(char *buf, size_t len);
+
 #endif /* NET_H_ */

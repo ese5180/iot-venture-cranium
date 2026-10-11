@@ -266,6 +266,26 @@ int net_credentials_clear(void)
 	return wifi_credentials_delete_all();
 }
 
+int net_mac_address(char *buf, size_t len)
+{
+	struct net_if *iface = net_if_get_first_wifi();
+	const struct net_linkaddr *link;
+	int written;
+
+	if (iface == NULL) {
+		return -ENODEV;
+	}
+
+	link = net_if_get_link_addr(iface);
+	if (link == NULL || link->len != 6) {
+		return -ENODATA;
+	}
+
+	written = snprintk(buf, len, "%02x:%02x:%02x:%02x:%02x:%02x", link->addr[0], link->addr[1],
+			   link->addr[2], link->addr[3], link->addr[4], link->addr[5]);
+	return (written < 0 || written >= (int)len) ? -ENOSPC : 0;
+}
+
 int net_rssi(void)
 {
 	struct wifi_iface_status status;

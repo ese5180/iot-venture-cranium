@@ -50,6 +50,7 @@ static uint8_t der[DER_MAX];
 static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 {
 	const struct identity_settings *config = identity_settings_get();
+	char address[18];
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
@@ -58,6 +59,8 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "firmware       %s", fw_version_running_string());
 	shell_print(sh, "wifi network   %s, link %s", net_has_credentials() ? "stored" : "missing",
 		    net_is_up() ? "up" : "down");
+	shell_print(sh, "wifi address   %s",
+		    net_mac_address(address, sizeof(address)) == 0 ? address : "unknown");
 	shell_print(sh, "endpoint       %s", config ? config->endpoint : "missing");
 	shell_print(sh, "download from  %s", config ? config->download_url_prefix : "missing");
 	shell_print(sh, "root CA        %s", factory_has_root_ca() ? "stored" : "missing");
