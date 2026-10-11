@@ -34,6 +34,10 @@
   --bad: #a4262c;
   --bad-wash: #f9e2df;
   --on-bad: #fffaf7;
+  /* The fill of a button or message that destroys something: a red that carries light
+     lettering in both themes, where --bad itself turns into a text colour in the dark. */
+  --bad-fill: #a4262c;
+  --on-bad-fill: #fffaf7;
 
   --shade: rgb(28 24 20 / 0.5);
   --lift: 0 18px 40px -18px rgb(28 24 20 / 0.35);
@@ -70,6 +74,8 @@
     --bad: #f08a86;
     --bad-wash: #3a1e1c;
     --on-bad: #2a0d0c;
+    --bad-fill: #c2413c;
+    --on-bad-fill: #fff6f3;
 
     --shade: rgb(0 0 0 / 0.6);
     --lift: 0 18px 40px -18px rgb(0 0 0 / 0.7);
@@ -245,8 +251,15 @@ strong {
   padding: 0 var(--gutter);
 }
 
+/*
+ * One row where there is room for it; "Narrower screens" below has the rest. The
+ * sections are never squeezed. If a row gets tight all the same, with a wider typeface
+ * or larger text, the account block gives way and its texts end in an ellipsis, so
+ * that nothing can come to lie on top of a link.
+ */
 .brand {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 11px;
   color: var(--ink);
@@ -291,8 +304,7 @@ strong {
 
 .nav {
   display: flex;
-  flex: 1;
-  min-width: 0;
+  flex: 1 0 auto;
 }
 
 .nav-list {
@@ -331,33 +343,47 @@ strong {
 
 .account {
   display: flex;
+  flex: 0 1 auto;
   align-items: center;
+  min-width: 0;
 }
 
 .account-box {
   display: flex;
   align-items: center;
   gap: 16px;
+  min-width: 0;
 }
 
+.account-box > .btn {
+  flex: none;
+}
+
+/* Two lines set flush right. Both take the width of the block, so both give way with it. */
 .account-who {
   display: grid;
-  justify-items: end;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   line-height: 1.35;
 }
 
 .account-email {
+  width: 100%;
   max-width: 260px;
+  margin-left: auto;
   overflow: hidden;
   font-size: 0.875rem;
   font-weight: 560;
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .account-meta {
   display: flex;
+  justify-content: flex-end;
   gap: 6px;
+  min-width: 0;
   color: var(--ink-3);
   font-size: 0.78rem;
   white-space: nowrap;
@@ -365,9 +391,16 @@ strong {
 
 .account-role {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: 4px;
   color: var(--ink-2);
+}
+
+.account-session {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .account-role::after {
@@ -409,8 +442,10 @@ strong {
   min-width: 0;
 }
 
-.page-head .eyebrow {
-  margin-bottom: 4px;
+/* The eyebrow of a title is part of the heading and takes a row of its own above it. */
+.page-title .eyebrow {
+  flex-basis: 100%;
+  margin-bottom: -4px;
 }
 
 .page-title {
@@ -453,6 +488,8 @@ strong {
 
 .page-meta .mono {
   overflow-wrap: anywhere;
+  /* An id that does not fit on one line breaks into lines of equal length. */
+  text-wrap: balance;
 }
 
 .page-tools {
@@ -557,9 +594,9 @@ strong {
 }
 
 .btn.is-danger {
-  border-color: var(--bad);
-  background: var(--bad);
-  color: var(--on-bad);
+  border-color: var(--bad-fill);
+  background: var(--bad-fill);
+  color: var(--on-bad-fill);
 }
 
 .btn.is-danger-quiet .icon {
@@ -639,7 +676,8 @@ strong {
   background: var(--bad-wash);
 }
 
-.badge.is-live {
+.badge.is-live,
+.badge.is-act {
   background: var(--accent-wash);
 }
 
@@ -661,7 +699,8 @@ strong {
   color: var(--bad);
 }
 
-.is-live > .icon {
+.is-live > .icon,
+.is-act > .icon {
   color: var(--accent);
 }
 
@@ -774,10 +813,15 @@ strong {
   display: grid;
 }
 
+/*
+ * A label and its value side by side. They are lined up by giving the label the height
+ * of the value's first line, not by their baselines: a value that begins with an icon
+ * has the baseline of the icon, which would push its label down.
+ */
 .fact {
   display: grid;
   grid-template-columns: 104px minmax(0, 1fr);
-  align-items: baseline;
+  align-items: start;
   gap: 4px 16px;
   padding: 12px 0;
   border-top: 1px solid var(--line);
@@ -790,6 +834,7 @@ strong {
 .fact dt {
   color: var(--ink-3);
   font-size: 0.8125rem;
+  line-height: 1.5rem;
 }
 
 .fact dd {
@@ -798,6 +843,7 @@ strong {
   align-items: center;
   gap: 6px 10px;
   min-width: 0;
+  min-height: 1.5rem;
 }
 
 .fact-strong {
@@ -898,14 +944,32 @@ strong {
   background: var(--bad-wash);
 }
 
+.notice.is-warn {
+  border-color: transparent;
+  background: var(--warn-wash);
+}
+
+/* The accent on the red wash falls just short of 4.5:1. A link there is ink, and underlined. */
+.notice.is-bad a:not(.btn) {
+  color: var(--ink);
+}
+
 .notice > .icon {
   margin-top: 2px;
+}
+
+.notice > .btn {
+  flex: none;
 }
 
 .notice-text {
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.notice-more {
+  margin-top: 4px;
 }
 
 .notice-ref {
@@ -946,6 +1010,10 @@ strong {
 .empty-text {
   max-width: 54ch;
   color: var(--ink-2);
+}
+
+.empty .btn {
+  margin-top: 8px;
 }
 
 .rows > .row {
@@ -1038,6 +1106,10 @@ strong {
   min-width: 0;
 }
 
+.plain-list + .card-note {
+  margin-top: 10px;
+}
+
 .field {
   display: grid;
   gap: 6px;
@@ -1055,6 +1127,17 @@ strong {
 .field-hint {
   color: var(--ink-3);
   font-size: 0.8125rem;
+}
+
+/* How much of a limited field is used, shown once the limit is in sight. */
+.field-count {
+  color: var(--ink-2);
+  font-weight: 560;
+  white-space: nowrap;
+}
+
+.field-count.is-full {
+  color: var(--ink);
 }
 
 .input {
@@ -1207,6 +1290,22 @@ textarea.input {
   white-space: nowrap;
 }
 
+/*
+ * Where the list is too narrow for a board and its state on one line (a phone, the side
+ * column), every board takes two lines, its state under its name. Left to wrap by
+ * itself, only the boards with a longer state would, and the list would be ragged.
+ */
+.board-list {
+  container-type: inline-size;
+}
+
+@container (max-width: 360px) {
+  .board-line-note {
+    flex-basis: 100%;
+    margin-left: 19px;
+  }
+}
+
 .presence-dot {
   flex: none;
   width: 9px;
@@ -1220,8 +1319,9 @@ textarea.input {
   background: var(--good);
 }
 
+/* In rem, not ch: the versions are monospace and "Not reported" is not, and both start the same column. */
 .fleet-version {
-  min-width: 8.5ch;
+  min-width: 7.25rem;
   font-size: 1rem;
   font-weight: 620;
 }
@@ -1275,10 +1375,6 @@ textarea.input {
   font-weight: 620;
 }
 
-.calm-title .icon {
-  color: var(--good);
-}
-
 .run-list {
   display: grid;
   gap: 20px;
@@ -1302,6 +1398,10 @@ textarea.input {
   font-size: 1.25rem;
   font-weight: 640;
   letter-spacing: -0.03em;
+}
+
+.run-note {
+  margin-bottom: 6px;
 }
 
 .board-runs {
@@ -1390,8 +1490,18 @@ textarea.input {
   color: var(--good);
 }
 
+/* The next thing to do stands out; what is done steps back. */
+.guide-step.is-next .guide-mark {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .guide-title {
   font-weight: 620;
+}
+
+.guide-step.is-done .guide-title {
+  color: var(--ink-2);
 }
 
 .guide-text {
@@ -1533,6 +1643,22 @@ textarea.input {
   margin-bottom: 18px;
 }
 
+/* The badge keeps its corner, also beside a long line about when the board was seen. */
+@media (min-width: 461px) {
+  .device-head {
+    flex-wrap: nowrap;
+  }
+
+  .device-head > div {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .device-head > .badge {
+    flex: none;
+  }
+}
+
 .device-name {
   font-size: 1.0625rem;
   font-weight: 620;
@@ -1548,6 +1674,11 @@ textarea.input {
 
 .device .cover-link:hover {
   color: var(--accent);
+}
+
+/* The focus ring of a card follows the corners of the card. */
+.device .cover-link::after {
+  border-radius: calc(var(--radius) - 1px);
 }
 
 .device:has(.cover-link:hover) {
@@ -1642,6 +1773,12 @@ textarea.input {
   padding-top: 14px;
   border-top: 1px solid var(--line);
   color: var(--ink);
+}
+
+/* Two lines of 32, so that the button to copy it stands next to it and not at the far edge. */
+.fingerprint .digest {
+  flex: 0 1 auto;
+  max-width: 34ch;
 }
 
 .drop {
@@ -1810,6 +1947,11 @@ textarea.input {
   color: var(--bad);
 }
 
+/* A revocation that the server has not recorded as finished. */
+.release-revoked.is-open .icon {
+  color: var(--warn);
+}
+
 .release-actions {
   display: flex;
   gap: 8px;
@@ -1899,6 +2041,11 @@ textarea.input {
   height: 22px;
 }
 
+/* A title that takes two lines on a phone breaks into lines of similar length. */
+.execution-title > span {
+  text-wrap: balance;
+}
+
 .execution-text {
   max-width: 74ch;
   color: var(--ink-2);
@@ -1912,6 +2059,24 @@ textarea.input {
 
 .execution-state .meter {
   margin-top: 4px;
+}
+
+/*
+ * The one state in which an update waits for a person. It is the only card on the page
+ * with a tinted panel, so that the eye goes to what somebody has to do.
+ */
+.execution.is-act {
+  border-color: var(--accent);
+}
+
+.execution.is-act .execution-state {
+  padding: 16px 18px;
+  border-radius: 11px;
+  background: var(--accent-wash);
+}
+
+.execution.is-act .execution-text {
+  color: var(--ink);
 }
 
 .execution-foot {
@@ -2004,6 +2169,21 @@ textarea.input {
   animation: breathe 1.8s ease-in-out infinite;
 }
 
+/*
+ * While the image comes in, the rail from "Downloading" to the next step fills with
+ * it, and the separate bar above the steps is left out: one rail tells the story.
+ * Where the steps stand in a column (see "Narrower screens") the bar stays.
+ */
+@media (min-width: 721px) {
+  .step.has-progress::before {
+    background: linear-gradient(to right, var(--accent) var(--progress, 0%), var(--line) var(--progress, 0%));
+  }
+
+  .execution-state .meter {
+    display: none;
+  }
+}
+
 .step.is-failed {
   color: var(--ink);
   font-weight: 620;
@@ -2021,10 +2201,16 @@ textarea.input {
 
 /* Dialogs. */
 
+/*
+ * A dialog hangs from a fixed line near the top of the window, so that its title and
+ * its steps stay where they are when its height changes from one step to the next.
+ */
 .dialog {
+  --dialog-top: max(16px, 9vh);
   width: min(620px, calc(100vw - 2 * var(--gutter)));
-  max-height: min(780px, calc(100vh - 32px));
-  max-height: min(780px, calc(100dvh - 32px));
+  max-height: min(780px, calc(100vh - var(--dialog-top) - 16px));
+  max-height: min(780px, calc(100dvh - var(--dialog-top) - 16px));
+  margin-top: var(--dialog-top);
   padding: 0;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -2087,6 +2273,13 @@ textarea.input {
 
 .dialog-spacer {
   flex: 1;
+}
+
+/* Why the button next to it cannot be used yet. */
+.dialog-hint {
+  align-self: center;
+  color: var(--ink-2);
+  font-size: 0.875rem;
 }
 
 .choices {
@@ -2297,49 +2490,54 @@ textarea.input {
 }
 
 .toast.is-bad {
-  background: var(--bad);
-  color: var(--on-bad);
+  background: var(--bad-fill);
+  color: var(--on-bad-fill);
 }
 
 /* Narrower screens. */
 
-@media (max-width: 1000px) {
-  /* One column, boards first: the two halves of the wide layout are taken apart. */
-  .overview {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .overview-main,
-  .overview-side {
-    display: contents;
-  }
-
-  .overview-boards {
-    order: 1;
-  }
-
-  .overview-updates {
-    order: 2;
-  }
-
-  .overview-pair {
-    order: 3;
-  }
-
-  .overview-activity {
-    order: 4;
+/*
+ * With the longest address and session text it can hold, the masthead needs about
+ * 1105 px to stand in one row. Below 1141 px it therefore takes two rows: the wordmark
+ * and who is signed in, then the sections. Below 861 px it takes three.
+ */
+@media (min-width: 861px) and (max-width: 1140px) {
+  .masthead {
+    position: static;
   }
 
   .masthead-inner {
-    gap: 24px;
+    flex-wrap: wrap;
+    gap: 0 24px;
+    min-height: 0;
   }
 
-  .nav-list {
-    gap: 20px;
+  .brand {
+    padding: 12px 0;
   }
 
-  .account-email {
-    max-width: 180px;
+  .account {
+    margin-left: auto;
+  }
+
+  .nav {
+    flex-basis: 100%;
+    order: 3;
+  }
+
+  .nav-link {
+    padding: 9px 0 10px;
+  }
+}
+
+@media (max-width: 1000px) {
+  /*
+   * One column, in the order of the document, which is the order in which the Tab key
+   * and a screen reader go through the cards: updates, versions and release, boards,
+   * activity.
+   */
+  .overview {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -2356,6 +2554,10 @@ textarea.input {
 
   .brand {
     padding: 12px 0;
+  }
+
+  .nav-list {
+    gap: 20px;
   }
 
   /*
@@ -2383,13 +2585,17 @@ textarea.input {
   }
 
   .account-email {
+    width: auto;
     max-width: 100%;
+    margin-left: 0;
     overflow-wrap: anywhere;
+    text-align: left;
     white-space: normal;
   }
 
   .account-meta {
     flex-wrap: wrap;
+    justify-content: flex-start;
     white-space: normal;
   }
 
@@ -2434,6 +2640,12 @@ textarea.input {
 
   .page-title {
     font-size: 1.625rem;
+  }
+
+  /* The tools of a page share one row: how fresh it is on the left, its action on the right. */
+  .page-tools {
+    flex: 1 1 100%;
+    justify-content: space-between;
   }
 
   .overview-pair {
@@ -2486,6 +2698,12 @@ textarea.input {
     height: auto;
   }
 
+  /* A sheet in the middle of the screen, as tall as the screen allows. */
+  .dialog {
+    --dialog-top: 16px;
+    margin-top: auto;
+  }
+
   .dialog-head {
     padding: 18px 10px 4px 18px;
   }
@@ -2515,8 +2733,22 @@ textarea.input {
     font-size: 0.875rem;
   }
 
+  /* "Live" and its button; how often is in the tooltip. */
+  .freshness-rate {
+    display: none;
+  }
+
+  /* A label above its value. */
   .fact {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fact dt {
+    line-height: 1.4;
+  }
+
+  .fact dd {
+    min-height: 0;
   }
 
   .log-line {
@@ -2535,6 +2767,11 @@ textarea.input {
 
   .dialog-spacer {
     display: none;
+  }
+
+  .dialog-hint {
+    flex-basis: 100%;
+    order: -1;
   }
 }
 
@@ -2556,6 +2793,48 @@ textarea.input {
   .btn.is-icon {
     width: 44px;
     min-height: 44px;
+  }
+
+  /*
+   * A link that stands alone gets the height of a button to aim at. The margins take
+   * back what the height adds, so that nothing around it moves.
+   */
+  .back,
+  .card-more,
+  .fact-link {
+    min-height: 44px;
+  }
+
+  .back {
+    margin-top: -11px;
+    margin-bottom: 5px;
+  }
+
+  .card-more {
+    margin-block: -12px;
+  }
+
+  .fact-link {
+    margin-block: -11px;
+  }
+
+  /* Still a list item, so that it keeps its triangle. */
+  .more summary {
+    margin-block: -11px;
+    padding-block: 11px;
+  }
+
+  .more[open] summary {
+    margin-bottom: -7px;
+  }
+
+  .execution-name a,
+  .board-line a,
+  .board-run-name,
+  .run-version {
+    display: inline-block;
+    margin-block: -12px;
+    padding-block: 12px;
   }
 }
 
@@ -2590,6 +2869,12 @@ textarea.input {
   *::after {
     animation: none !important;
     transition: none !important;
+  }
+
+  /* Standing still, a bar that is a third full would read as a third done. */
+  .meter.is-busy .meter-fill {
+    width: 100%;
+    opacity: 0.4;
   }
 }
 

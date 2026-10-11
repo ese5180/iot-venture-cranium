@@ -1237,14 +1237,220 @@ test('a deployment is polled every 3 s while installing, every 10 s while waitin
   assert.equal(core.isUnfinished('CANCELED'), false);
 });
 
+test('a deployment is under way while a board is waiting or at work, whatever the job says', () => {
+  const deployment = (status, counts = {}) =>
+    ({ status, counts: { queued: 0, inProgress: 0, succeeded: 0, canceled: 0, ...counts } });
+  assert.equal(core.isUnderWay(deployment('IN_PROGRESS', { queued: 1 })), true);
+  assert.equal(core.isUnderWay(deployment('IN_PROGRESS', { inProgress: 1 })), true);
+  // AWS creates the executions a moment after the job.
+  assert.equal(core.isUnderWay(deployment('IN_PROGRESS')), true);
+  // Cancelled without force while a board was installing: that board carries on.
+  assert.equal(core.isUnderWay(deployment('CANCELED', { inProgress: 1, canceled: 1 })), true);
+  assert.equal(core.isUnderWay(deployment('CANCELED', { queued: 1 })), true, 'the counts follow the status');
+  assert.equal(core.isUnderWay(deployment('CANCELED', { canceled: 2 })), false);
+  assert.equal(core.isUnderWay(deployment('COMPLETED', { succeeded: 2 })), false);
+  assert.equal(core.isUnderWay(deployment('DELETION_IN_PROGRESS')), false);
+});
+
+// The decisions of the timers.
+
+test('a page is read again on its schedule, more slowly after a failure, and not in the background', () => {
+  const plan = (interval, failed = false, visible = true) => core.refreshPlan({ interval, failed, visible });
+  assert.deepEqual(plan(3000), { every: 3000, wait: 3000 });
+  assert.deepEqual(plan(10000), { every: 10000, wait: 10000 });
+  assert.deepEqual(plan(0), { every: 0, wait: 0 });
+  assert.deepEqual(plan(0, true), { every: 0, wait: 0 }, 'a page that is not polled is not retried either');
+  assert.deepEqual(plan(3000, true), { every: 15000, wait: 15000 });
+  assert.deepEqual(plan(30000, true), { every: 30000, wait: 30000 });
+  // In the background the page still says how often it is read, but no timer is set.
+  assert.deepEqual(plan(3000, false, false), { every: 3000, wait: 0 });
+  assert.deepEqual(plan(3000, true, false), { every: 15000, wait: 0 });
+});
+
+test('sign-in starts again shortly before the token ends, unless work is in hand', () => {
+  const idle = { needsRenewal: true, visible: true, gate: false, dialogOpen: false, uploadStage: 'idle' };
+  const renew = (changes) => core.shouldRenew({ ...idle, ...changes });
+  assert.equal(renew({}), true);
+  assert.equal(renew({ needsRenewal: false }), false);
+  assert.equal(renew({ visible: false }), false, 'not while the tab is in the background');
+  assert.equal(renew({ gate: true }), false, 'a message already fills the page');
+  assert.equal(renew({ dialogOpen: true }), false, 'a dialog is left alone');
+  // A chosen file would be gone after the round trip, and an upload on its way cut off.
+  for (const stage of ['reading', 'ready', 'sending', 'checking', 'refused']) {
+    assert.equal(core.uploadInHand(stage), true, stage);
+    assert.equal(renew({ uploadStage: stage }), false, stage);
+  }
+  for (const stage of ['idle', 'done']) {
+    assert.equal(core.uploadInHand(stage), false, stage);
+    assert.equal(renew({ uploadStage: stage }), true, stage);
+  }
+  assert.equal(core.SESSION_WARNING_S > 60, true, 'the warning comes before the token is about to end');
+});
+
+test('a refused token leads back to sign-in, except where that would go round in circles', () => {
+  assert.equal(core.afterUnauthorized({ gate: null, fresh: false }), 'sign-in');
+  // Straight after signing in, signing in again would only repeat the refusal.
+  assert.equal(core.afterUnauthorized({ gate: null, fresh: true }), 'refused');
+  // A message that only says "loading" gives way; one about signing in stays.
+  assert.equal(core.afterUnauthorized({ gate: { waiting: true }, fresh: false }), 'sign-in');
+  assert.equal(core.afterUnauthorized({ gate: { waiting: true }, fresh: true }), 'refused');
+  assert.equal(core.afterUnauthorized({ gate: { title: 'You are signed out' }, fresh: false }), 'stay');
+  assert.equal(core.afterUnauthorized({ gate: { leaving: true }, fresh: true }), 'stay');
+});
+
+// Failed requests.
+
+test('a failed request is a refusal, or it is not known whether it went through', () => {
+  const error = (status, code = 'some_code') => new core.ApiError(status, code, 'No.');
+  for (const status of [400, 403, 404, 409, 413, 422, 429]) {
+    assert.equal(core.isRefusal(error(status)), true, String(status));
+  }
+  for (const status of [0, 500, 502, 503, 504]) {
+    assert.equal(core.isRefusal(error(status)), false, String(status));
+  }
+
+  // The page is read again unless the server plainly said no. A conflict is a no that
+  // says the page is out of date.
+  assert.equal(core.staleAfter(error(422)), false);
+  assert.equal(core.staleAfter(error(403)), false);
+  assert.equal(core.staleAfter(error(404)), false);
+  assert.equal(core.staleAfter(error(409, 'device_busy')), true);
+  assert.equal(core.staleAfter(error(409, 'already_finished')), true);
+  assert.equal(core.staleAfter(error(500)), true);
+  assert.equal(core.staleAfter(error(0, 'network')), true);
+});
+
+test('an upload is offered again only where the same file could end differently', () => {
+  const error = (status, code) => new core.ApiError(status, code, 'No.');
+  const final = [
+    [422, 'wrong_key'], [422, 'unsigned'], [422, 'bad_signature'], [422, 'trailing_data'],
+    [422, 'wrong_target'], [422, 'version_zero'], [422, 'version_not_newer'], [409, 'version_exists'],
+    [413, 'gateway'], [400, 'invalid_data'], [403, 'release_manager_required'],
+  ];
+  for (const [status, code] of final) {
+    assert.equal(core.canRetryUpload(error(status, code)), false, code);
+  }
+  const passing = [
+    [429, 'gateway'], [409, 'upload_conflict'], [500, 'internal'], [503, 'gateway'], [0, 'network'],
+    [0, 'timeout'], [0, 'bad_response'],
+  ];
+  for (const [status, code] of passing) {
+    assert.equal(core.canRetryUpload(error(status, code)), true, code);
+  }
+});
+
+test('a message of the server is finished as a sentence', () => {
+  assert.equal(core.sentence('The image is signed with a different key than this project\'s'),
+    'The image is signed with a different key than this project\'s.');
+  assert.equal(core.sentence('This is not an MCUboot image (upload the *.signed.bin file)'),
+    'This is not an MCUboot image (upload the *.signed.bin file).');
+  assert.equal(core.sentence('There is no release 1.2.3+4.'), 'There is no release 1.2.3+4.');
+  assert.equal(core.sentence('Is it?'), 'Is it?');
+  assert.equal(core.sentence('Wait…'), 'Wait…');
+  assert.equal(core.sentence('  padded  '), 'padded.');
+  assert.equal(core.sentence(''), '');
+  assert.equal(core.sentence(undefined), '');
+});
+
+// Revocation.
+
+test('a revocation counts as complete only when the server has recorded that it is', async () => {
+  const mark = { by: { sub: 's', email: 'e' }, at: NOON, reason: 'r' };
+  const release = (revoked, status = 'revoked') => ({ version: '1.1.0+7', status, revoked });
+  const done = '2026-10-10T12:00:05Z';
+  const { api } = answering(200, {
+    releases: [
+      release(null, 'active'),
+      release(mark),
+      release({ ...mark, enforcedAt: null }),
+      release({ ...mark, enforcedAt: done }),
+      release({ ...mark, enforcedAt: 'not a time' }),
+      release({ ...mark, enforcedAt: 1 }),
+      release(null),
+    ],
+    signingKey: { fingerprint: 'd'.repeat(64) },
+    slotSize: 933888,
+  });
+  const { releases } = await api.firmware();
+
+  // 'unknown' is a server that keeps no record at all; the field is then left out here
+  // too, so that the console holds exactly what the API sent.
+  assert.deepEqual(releases.map(core.revocationState),
+    [null, 'unknown', 'incomplete', 'complete', 'incomplete', 'incomplete', 'unknown']);
+  assert.deepEqual(Object.keys(releases[1].revoked), ['by', 'at', 'reason']);
+  assert.deepEqual(Object.keys(releases[2].revoked), ['by', 'at', 'reason', 'enforcedAt']);
+  assert.equal(releases[2].revoked.enforcedAt, null);
+  assert.equal(releases[3].revoked.enforcedAt, done);
+  // Anything that is not a time is no record of completion.
+  assert.equal(releases[4].revoked.enforcedAt, null);
+  assert.equal(releases[5].revoked.enforcedAt, null);
+});
+
+test('a repeated revocation that finds everything in place is a success, and is said as one', async () => {
+  const already = { code: 'already_revoked', message: 'Release 1.1.0+7 is already revoked.' };
+  const { api } = answering(409, { error: already });
+  assert.equal(core.revocationInPlace(await failure(api.revoke('1.1.0+7', 'the reason'))), true);
+
+  assert.equal(core.revocationInPlace(new core.ApiError(409, 'version_exists', 'x')), false);
+  assert.equal(core.revocationInPlace(new core.ApiError(404, 'already_revoked', 'x')), false);
+  // Marked revoked, but a step after the mark failed: that is not in place.
+  assert.equal(core.revocationInPlace(new core.ApiError(500, 'revoke_incomplete', 'x')), false);
+  assert.equal(core.revocationInPlace(new Error('other')), false);
+
+  const notice = (result) => core.revocationNotice('1.1.0+7', result);
+  assert.equal(notice({ cancelled: [], again: false }),
+    'Revoked 1.1.0+7. No deployment of it was still open.');
+  assert.equal(notice({ cancelled: [DEPLOYMENT], again: false }),
+    'Revoked 1.1.0+7. 1 unfinished deployment was cancelled.');
+  assert.equal(notice({ cancelled: [DEPLOYMENT, DEPLOYMENT], again: true }),
+    'The revocation of 1.1.0+7 is in place. 2 unfinished deployments were cancelled.');
+  assert.equal(notice({ cancelled: [], again: true }),
+    'The revocation of 1.1.0+7 is in place. No deployment of it was still open.');
+  // The server only said "already revoked": nothing is claimed about what it cancelled.
+  assert.match(notice({ cancelled: null, again: true }), /^The revocation of 1\.1\.0\+7 is in place: /);
+  assert.match(notice({ cancelled: null, again: false }), /^1\.1\.0\+7 was revoked already, and that /);
+  for (const cancelled of [null, [], [DEPLOYMENT]]) {
+    for (const again of [true, false]) {
+      assert.doesNotMatch(notice({ cancelled, again }), /\bnot\b|\bfailed\b/i);
+    }
+  }
+});
+
+// Choosing boards.
+
+test('the only free board is chosen without being asked, unless it would refuse the offer', () => {
+  const board = (thing, version) => ({ thing, fw: version ? { version, confirmed: true } : null });
+  const older = board('cranium-00000000000000aa', '1.0.0+3');
+  const same = board('cranium-00000000000000bb', '1.1.0+7');
+  const silent = board('cranium-00000000000000cc', null);
+
+  assert.equal(core.alreadyRuns(older, '1.1.0+7'), false);
+  assert.equal(core.alreadyRuns(same, '1.1.0+7'), true);
+  assert.equal(core.alreadyRuns(same, '1.0.0+3'), true, 'newer than the release counts too');
+  assert.equal(core.alreadyRuns(silent, '1.1.0+7'), false, 'a board that has said nothing is not held back');
+  assert.equal(core.alreadyRuns(older, null), false);
+
+  const none = new Map();
+  assert.equal(core.onlyChoice([older], none, '1.1.0+7'), older.thing);
+  assert.equal(core.onlyChoice([silent], none, '1.1.0+7'), silent.thing);
+  assert.equal(core.onlyChoice([older, silent], none, '1.1.0+7'), null, 'there is a choice to make');
+  assert.equal(core.onlyChoice([older, silent], new Map([[silent.thing, {}]]), '1.1.0+7'), older.thing);
+  assert.equal(core.onlyChoice([older], new Map([[older.thing, {}]]), '1.1.0+7'), null);
+  assert.equal(core.onlyChoice([same], none, '1.1.0+7'), null);
+  assert.equal(core.onlyChoice([], none, '1.1.0+7'), null);
+});
+
 // Words.
 
 const PHASES = [
   'waiting_for_device', 'waiting_for_button', 'downloading', 'verifying', 'rebooting', 'testing',
   'succeeded', 'failed', 'rolled_back', 'declined', 'refused', 'cancelled', 'timed_out', 'removed',
 ];
-const TONES = ['wait', 'live', 'good', 'warn', 'bad', 'idle'];
+const TONES = ['act', 'wait', 'live', 'good', 'warn', 'bad', 'idle'];
 const STEP_STATES = ['done', 'current', 'failed', 'skipped', 'upcoming'];
+const STEP_NAMES = [
+  'Offered', 'Approved on the board', 'Downloading', 'Verified', 'Restarting', 'Testing', 'Confirmed',
+];
 const STARTED = '2026-10-10T12:01:00Z';
 
 function execution(phase, extra = {}) {
@@ -1267,28 +1473,75 @@ function execution(phase, extra = {}) {
 
 const describe = (phase, extra) => core.describeExecution(execution(phase, extra));
 const states = (description) => description.steps.map((step) => step.state);
+const labels = (description) => description.steps.map((step) => step.label);
 
-test('every phase has plain words, a tone, an icon and seven steps', () => {
+/** Every phase, in the variations that change its words. */
+function everyDescription() {
   const variations = [
     {},
     { online: false },
     { running: '1.0.0+3', startedAt: STARTED, reason: 'something_new' },
   ];
+  const reasons = [
+    'download_failed', 'digest_mismatch', 'header_mismatch', 'flash_error', 'interrupted', 'not_installed',
+    'not_newer', 'declined', 'rolled_back',
+  ];
+  const all = [];
   for (const phase of PHASES) {
-    for (const extra of variations) {
-      const description = describe(phase, extra);
-      assert.equal(TONES.includes(description.tone), true, phase);
-      assert.match(description.icon, /^[a-z-]+$/);
-      assert.equal(description.title.length > 3, true, phase);
-      assert.match(description.text, /\.$/, `${phase}: a full sentence`);
-      assert.equal(description.text.startsWith(description.brief), true);
-      assert.deepEqual(description.steps.map((step) => step.label), core.STEPS);
-      assert.equal(states(description).every((state) => STEP_STATES.includes(state)), true);
-      assert.equal(states(description).filter((state) => state === 'current').length <= 1, true);
-    }
+    for (const extra of variations) all.push([phase, describe(phase, extra)]);
+    for (const reason of reasons) all.push([phase, describe(phase, { reason })]);
   }
-  assert.deepEqual(core.STEPS,
-    ['Offered', 'Approved on the board', 'Downloading', 'Verified', 'Restarting', 'Testing', 'Confirmed']);
+  return all;
+}
+
+test('every phase has plain words, a tone, an icon and seven steps', () => {
+  for (const [phase, description] of everyDescription()) {
+    assert.equal(TONES.includes(description.tone), true, phase);
+    assert.match(description.icon, /^[a-z-]+$/);
+    assert.equal(description.title.length > 3, true, phase);
+    assert.match(description.text, /\.$/, `${phase}: a full sentence`);
+    assert.equal(description.text.startsWith(description.brief), true);
+    assert.equal(description.steps.length, 7, phase);
+    assert.equal(states(description).every((state) => STEP_STATES.includes(state)), true);
+    assert.equal(states(description).filter((state) => state === 'current').length <= 1, true);
+    assert.equal(labels(description).every((label) => label.length > 3), true);
+  }
+  assert.deepEqual(core.STEPS.map((step) => step.name), STEP_NAMES);
+});
+
+test('a step is called by what is true of it: done, being waited for, or where it stopped', () => {
+  // Done and still ahead: the name. Everything is done after a success.
+  assert.deepEqual(labels(describe('succeeded')), STEP_NAMES);
+  assert.deepEqual(labels(describe('waiting_for_device')), STEP_NAMES);
+  assert.equal(labels(describe('downloading'))[1], 'Approved on the board');
+  assert.equal(labels(describe('rebooting'))[3], 'Verified');
+
+  // Nobody has approved anything while the board waits for its button, or after Button 2.
+  // "Button 1" is one word to a line break: the space in it is a no-break space.
+  assert.equal(labels(describe('waiting_for_button'))[1], 'Waiting for Button\u00a01');
+  assert.equal(labels(describe('declined'))[1], 'Not approved');
+  assert.equal(labels(describe('refused', { reason: 'not_newer' }))[1], 'Not approved');
+
+  // Nothing is verified while the board is checking, or after the check failed.
+  assert.equal(labels(describe('verifying'))[3], 'Verifying');
+  assert.equal(labels(describe('failed', { reason: 'digest_mismatch' }))[3], 'Check failed');
+  assert.equal(labels(describe('failed', { reason: 'header_mismatch' }))[3], 'Check failed');
+
+  assert.equal(labels(describe('failed', { reason: 'download_failed' }))[2], 'Download failed');
+  assert.equal(labels(describe('failed', { reason: 'not_installed' }))[4], 'Did not start');
+  assert.equal(labels(describe('rolled_back'))[5], 'Rolled back');
+
+  // Whatever the phase: the step a board is at, or stopped at, never reads as done,
+  // and every other step keeps its name.
+  for (const [phase, description] of everyDescription()) {
+    description.steps.forEach((step, index) => {
+      if (step.state === 'current' || step.state === 'failed') {
+        assert.doesNotMatch(step.label, /^(?:Approved|Verified|Confirmed)/, `${phase}: ${step.label}`);
+      } else {
+        assert.equal(step.label, STEP_NAMES[index], phase);
+      }
+    });
+  }
 });
 
 test('waiting is told apart: offline, not picked up yet, waiting for the button', () => {
@@ -1300,11 +1553,20 @@ test('waiting is told apart: offline, not picked up yet, waiting for the button'
   const idle = describe('waiting_for_device', { online: true });
   assert.notEqual(idle.title, offline.title);
   assert.match(idle.text, /has not picked up the offer yet/);
+  assert.equal(idle.tone, 'wait');
+  assert.equal(offline.tone, 'wait');
 
+  // The one state that waits for a person is an instruction, in a tone of its own.
   const button = describe('waiting_for_button');
-  assert.equal(button.tone, 'wait');
-  assert.match(button.text, /^Waiting for someone to press Button 1 on the board\./);
+  assert.equal(button.tone, 'act');
+  // A heading that takes two lines must not end the first one on "Button".
+  assert.equal(button.title, 'Press Button\u00a01 on the board');
+  assert.equal(button.brief, 'The board has the offer and waits for someone to press Button 1.');
+  assert.match(button.text, /LED1 blinks quickly while the offer is open; Button 2 declines it\.$/);
   assert.deepEqual(states(button), ['done', 'current', ...upcoming.slice(1)]);
+  for (const [phase, description] of everyDescription()) {
+    assert.equal(description.tone === 'act', phase === 'waiting_for_button', phase);
+  }
 });
 
 test('the installing phases move along the steps, with the download in percent', () => {
@@ -1350,9 +1612,10 @@ test('the ways an update ends are said plainly', () => {
   assert.match(declined.text, /Button 2/);
   assert.match(declined.text, /Nothing was installed\./);
 
+  // The offer was made, and withdrawn before the board acted on it.
   const early = describe('cancelled');
   assert.match(early.text, /^Cancelled before the board started\./);
-  assert.deepEqual(states(early), new Array(7).fill('skipped'));
+  assert.deepEqual(states(early), ['done', ...new Array(6).fill('skipped')]);
   const late = describe('cancelled', { startedAt: STARTED, running: '1.0.0+3' });
   assert.match(late.text, /^Cancelled after the board had started\./);
   assert.match(late.text, reportsOld);
@@ -1450,14 +1713,27 @@ test('what a board last reported about updates is put into words', () => {
   assert.equal(downloading.title, 'Downloading 1.1.0+7');
   assert.equal(downloading.progress, 40);
   assert.equal(downloading.deployment, DEPLOYMENT);
-  assert.equal(update(ota('awaiting_user')).title, 'Waiting for Button 1');
   assert.equal(update(ota('downloading', { job: null })).title, 'Downloading an update');
+
+  // A board that waits for its button asks for a person, in the tone kept for that.
+  const waiting = update(ota('awaiting_user'));
+  assert.equal(waiting.title, 'Press Button\u00a01 on the board');
+  assert.equal(waiting.tone, 'act');
+  assert.match(waiting.text, /^1\.1\.0\+7 is on offer\. Button 1 on the board installs it/);
+  assert.equal(waiting.deployment, DEPLOYMENT);
 
   // An offline board's words are old news and say so.
   const stale = update(ota('downloading', { progress: 40 }), false);
   assert.equal(stale.title, 'Was downloading 1.1.0+7 when last seen');
   assert.equal(stale.progress, null);
   assert.equal(stale.tone, 'idle');
+  const gone = update(ota('awaiting_user'), false);
+  assert.equal(gone.title, 'Was waiting for Button\u00a01 when last seen');
+  assert.equal(gone.tone, 'idle');
+  assert.equal(gone.text, '');
+  for (const state of ['awaiting_user', 'downloading', 'verifying', 'rebooting', 'testing', 'a_new_state']) {
+    assert.match(update(ota(state), false).title, /^Was [a-z].* when last seen$/, state);
+  }
 
   assert.equal(TONES.includes(update(ota('a_new_state')).tone), true);
 });
@@ -1485,21 +1761,126 @@ test('a deployment as a whole is summed up from its boards', () => {
 });
 
 test('an entry of the activity log reads as a sentence and links only to what exists', () => {
-  const entry = (action, target, outcome = 'ok') => core.describeAudit({ action, target, outcome });
-  assert.deepEqual(entry('firmware.upload', '1.1.0+7'),
-    { icon: 'upload', verb: 'uploaded firmware', outcome: null, href: '#/firmware' });
-  assert.equal(entry('deployment.create', DEPLOYMENT).href, `#/deployments/${DEPLOYMENT}`);
-  assert.equal(entry('deployment.cancel', DEPLOYMENT).verb, 'cancelled deployment');
-  assert.equal(entry('firmware.revoke', '1.1.0+7').verb, 'revoked firmware');
+  const entry = (action, target, outcome = 'ok', detail = []) =>
+    core.describeAudit({ action, target, outcome, detail });
+  const said = (line) => `${line.verb} ${line.label}`.trim();
+
+  assert.deepEqual(entry('firmware.upload', '1.1.0+7'), {
+    icon: 'upload', verb: 'uploaded firmware', label: '1.1.0+7', outcome: null, href: '#/firmware', facts: [],
+  });
+  assert.equal(said(entry('firmware.revoke', '1.1.0+7')), 'revoked firmware 1.1.0+7');
+
+  // A deployment is called by the version it installs. Its id is one of the details,
+  // and the version is not said twice.
+  const started = entry('deployment.create', DEPLOYMENT, 'ok', [['version', '1.1.0+7'], ['things', '2']]);
+  assert.equal(said(started), 'started a deployment of 1.1.0+7');
+  assert.equal(started.href, `#/deployments/${DEPLOYMENT}`);
+  assert.deepEqual(started.facts.map((fact) => [fact.label, fact.value, fact.code]),
+    [['Boards', '2', false], ['Deployment', DEPLOYMENT, true]]);
+  assert.equal(said(entry('deployment.cancel', DEPLOYMENT)), 'cancelled the deployment of 1.1.0+7');
+  assert.equal(said(entry('deployment.cancel', DEPLOYMENT, 'rejected')),
+    'tried to cancel the deployment of 1.1.0+7');
+  assert.equal(said(entry('deployment.create', '1.1.0+7', 'rejected')), 'tried to deploy 1.1.0+7');
+  assert.equal(said(entry('deployment.create', DEPLOYMENT, 'rejected')), 'tried to deploy 1.1.0+7');
+  // An id whose version is out of range is shown as it is.
+  const odd = 'cranium-999-0-0-b1-20261010T221500Z-ffff';
+  assert.equal(entry('deployment.cancel', odd).label, odd);
+  // Without a target no sentence ends in "of".
+  assert.equal(said(entry('deployment.cancel', '', 'rejected')), 'tried to cancel the deployment');
+  assert.equal(said(entry('deployment.create', '')), 'started a deployment');
+  assert.equal(said(entry('deployment.create', '', 'rejected')), 'tried to deploy');
 
   const refused = entry('firmware.upload', 'zephyr.signed.bin', 'rejected');
   assert.equal(refused.href, null);
-  assert.equal(refused.verb, 'tried to upload');
+  assert.equal(said(refused), 'tried to upload zephyr.signed.bin');
   assert.equal(refused.outcome.label, 'Refused');
   assert.equal(entry('deployment.create', '1.1.0+7', 'denied').outcome.label, 'Not allowed');
   assert.equal(entry('deployment.create', '1.1.0+7', 'error').outcome.label, 'Server error');
   assert.equal(entry('something.new', 'javascript:alert(1)', 'odd').href, null);
   assert.equal(entry('something.new', 'x', 'odd').verb, 'something.new');
+});
+
+test('the details of an entry are put in the words of the console, not in the API\'s field names', () => {
+  const facts = (action, outcome, detail) =>
+    core.describeAudit({ action, target: '1.1.0+7', outcome, detail }).facts;
+  const said = (list) => list.map((fact) => `${fact.label}${fact.phrase ? '' : ':'} ${fact.value}`);
+  const digest = 'ab'.repeat(32);
+
+  // In an order that reads well, whatever order the API sent them in.
+  const upload = facts('firmware.upload', 'rejected',
+    [['sha256', digest], ['size', '1264'], ['filename', 'zephyr.signed.bin'], ['code', 'wrong_key']]);
+  assert.deepEqual(said(upload),
+    ['Refused with wrong_key', 'File: zephyr.signed.bin', 'Size: 1,264 bytes', `SHA-256: ${digest}`]);
+  // Identifiers are marked as such; a size or a count is not one.
+  assert.deepEqual(upload.map((fact) => fact.code), [true, true, false, true]);
+
+  // A reason is prose, kept whole, and a revocation counts the deployments it cancelled.
+  const reason = 'Pads stop responding after a few minutes of use.';
+  const revoke = facts('firmware.revoke', 'ok', [['reason', reason], ['cancelled', '1']]);
+  assert.deepEqual(said(revoke), [`Reason: ${reason}`, 'Deployments cancelled: 1']);
+  assert.equal(revoke[0].code, false);
+
+  assert.deepEqual(said(facts('deployment.cancel', 'ok', [['force', 'true']])), ['Forced: yes']);
+  assert.deepEqual(said(facts('deployment.cancel', 'error', [['force', 'false'], ['cancelled', 'true'],
+    ['code', 'internal']])), ['Failed with internal', 'Forced: no', 'Cancelled: yes']);
+  assert.deepEqual(said(facts('deployment.create', 'rejected', [['version', '1.1.0+7'], ['things', '2'],
+    ['code', 'device_busy']])), ['Refused with device_busy', 'Boards: 2']);
+  // A version that is not the target is said.
+  assert.deepEqual(said(facts('deployment.create', 'ok', [['version', '9.9.9+9']])), ['Version: 9.9.9+9']);
+
+  // A revocation that could not be completed says which steps are left. One that
+  // completes what an earlier request began says so in its sentence.
+  assert.deepEqual(said(facts('firmware.revoke', 'error', [['reason', 'A fault.'], ['cancelled', '0'],
+    ['incomplete', 'tag cancel record'], ['code', 'revoke_incomplete']])), [
+    'Failed with revoke_incomplete',
+    'Left undone: refusing the image, cancelling the deployments, recording that it is done',
+    'Reason: A fault.', 'Deployments cancelled: 0',
+  ]);
+  assert.deepEqual(said(facts('firmware.revoke', 'error', [['incomplete', 'a_new_step']])),
+    ['Left undone: a_new_step']);
+  const finished = core.describeAudit({
+    action: 'firmware.revoke',
+    target: '1.1.0+7',
+    outcome: 'ok',
+    detail: [['cancelled', '1'], ['resumed', 'true']],
+  });
+  assert.equal(finished.verb, 'finished revoking firmware');
+  assert.deepEqual(said(finished.facts), ['Deployments cancelled: 1']);
+
+  // What the console has no word for is shown as the API named it, last.
+  assert.deepEqual(said(facts('firmware.upload', 'ok', [['somethingNew', 'x'], ['size', 'unknown'],
+    ['constructor', 'y']])), ['Size: unknown', 'somethingNew: x', 'constructor: y']);
+});
+
+test('a detail of the activity log is kept as long as the API stores it', async () => {
+  const reason = 'r'.repeat(200);
+  const { api } = answering(200, { entries: [{
+    at: NOON,
+    actor: { sub: 's', email: 'e' },
+    action: 'firmware.revoke',
+    target: '1.1.0+7',
+    outcome: 'ok',
+    detail: { reason: `${reason}and more`, ['k'.repeat(30)]: 'v' },
+    requestId: 'r-1',
+  }], next: null });
+  const [entry] = (await api.audit()).entries;
+  assert.deepEqual(entry.detail, [['reason', reason], ['k'.repeat(24), 'v']]);
+});
+
+test('a person is named by the address, and the account id is never far', () => {
+  const sub = '0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d';
+  assert.equal(core.shortAccount(sub), '0b1c2d3e…');
+  assert.equal(core.shortAccount('short'), 'short');
+  assert.equal(core.shortAccount(undefined), '');
+  assert.equal(core.shortAccount(7), '');
+
+  // A reserved domain that can never receive mail; the address exists only here.
+  const address = `teammate@${'example.invalid'}`;
+  assert.equal(core.nameOf({ sub, email: address }), address);
+  // Without an address the account is named by its id, not as "someone".
+  assert.equal(core.nameOf({ sub, email: '' }), 'account 0b1c2d3e…');
+  assert.equal(core.nameOf({ sub: '', email: '' }), 'an unknown account');
+  assert.equal(core.nameOf(null), 'an unknown account');
 });
 
 test('entries of the log are filed under the day they happened', () => {

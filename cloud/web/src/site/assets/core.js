@@ -438,9 +438,16 @@ function readDeviceDetail(body) {
 
 function readRelease(raw) {
   const item = record(raw);
-  const revoked = item.revoked && typeof item.revoked === 'object'
-    ? { by: person(item.revoked.by), at: instant(item.revoked.at), reason: text(item.revoked.reason, 200) }
-    : null;
+  let revoked = null;
+  if (item.revoked && typeof item.revoked === 'object') {
+    revoked = {
+      by: person(item.revoked.by), at: instant(item.revoked.at), reason: text(item.revoked.reason, 200),
+    };
+    // When the server finished what follows the mark: the image refused, the open
+    // deployments cancelled. Null until then. A server that does not record it leaves
+    // the field out, and so does this.
+    if (Object.hasOwn(item.revoked, 'enforcedAt')) revoked.enforcedAt = instant(item.revoked.enforcedAt);
+  }
   return {
     version: text(item.version, 32),
     size: whole(item.size, 0, 2 ** 32),
@@ -521,7 +528,8 @@ function readAuditEntry(raw) {
   if (item.detail && typeof item.detail === 'object' && !Array.isArray(item.detail)) {
     for (const [key, value] of Object.entries(item.detail).slice(0, 8)) {
       if (typeof value === 'string' || typeof value === 'number') {
-        detail.push([text(key, 24), text(String(value), 120)]);
+        // As long as the API stores a value: a reason is kept whole.
+        detail.push([text(key, 24), text(String(value), 200)]);
       }
     }
   }
@@ -560,6 +568,87 @@ export function busyBoards(error) {
   return error.details
     .filter((entry) => entry && isThing(entry.thing))
     .map(({ thing, deployment }) => ({ thing, deployment: isDeploymentId(deployment) ? deployment : null }));
+}
+
+// What a failed request means for what happens next.
+
+/**
+ * True for a refusal: the server understood the request and said no (a 4xx reply), so
+ * nothing was changed. After any other failure the change may have been made.
+ */
+export function isRefusal(error) {
+  return error.status >= 400 && error.status < 500;
+}
+
+/**
+ * Whether the page has to be read again after a change failed. A refusal changed
+ * nothing, but a conflict (409) says that what the page shows is out of date; after a
+ * failure that is not a refusal the change may have gone through.
+ */
+export function staleAfter(error) {
+  return !isRefusal(error) || error.status === 409;
+}
+
+/**
+ * Whether sending the same file once more could end differently. A refusal of the
+ * image cannot; being throttled, or meeting another upload at the same moment, can.
+ */
+export function canRetryUpload(error) {
+  return !isRefusal(error) || error.status === 429 || error.code === 'upload_conflict';
+}
+
+/** A message as a sentence: some of the server's come without their full stop. */
+export function sentence(message) {
+  const words = String(message ?? '').trim();
+  return words === '' || /[.!?…]$/.test(words) ? words : `${words}.`;
+}
+
+// Revoking. Marking a release revoked is the first of three steps. Refusing its image
+// and cancelling its deployments follow, and the server records when they are done. A
+// request that fails or is cut off in between leaves a release that reads "revoked"
+// with work outstanding; revoking it again completes that work.
+
+/**
+ * Where the revocation of a release stands; null for a release that is not revoked:
+ * 'complete' with the server's record of completion, 'incomplete' without it, and
+ * 'unknown' for a server that keeps no such record.
+ */
+export function revocationState(release) {
+  if (release.status === 'active') return null;
+  const mark = release.revoked;
+  if (mark?.enforcedAt) return 'complete';
+  return mark && Object.hasOwn(mark, 'enforcedAt') ? 'incomplete' : 'unknown';
+}
+
+/**
+ * True for the reply to a revocation that found the release revoked already. The
+ * server goes through the steps after the mark before it answers so; the reply
+ * therefore says that the image is refused and that no deployment of the release is
+ * open, which is what was asked for.
+ */
+export function revocationInPlace(error) {
+  return error instanceof ApiError && error.status === 409 && error.code === 'already_revoked';
+}
+
+/**
+ * What to say once a revocation has gone through.
+ *
+ * @param {string} version
+ * @param {object} result
+ * @param {string[]|null} result.cancelled  the deployments it cancelled; null when the
+ *                                          server only said that all is in place
+ * @param {boolean} result.again            the release was revoked before this request
+ */
+export function revocationNotice(version, { cancelled, again }) {
+  if (cancelled === null) {
+    return again
+      ? `The revocation of ${version} is in place: its image is refused and no deployment of it is open.`
+      : `${version} was revoked already, and that revocation is in place.`;
+  }
+  const lead = again ? `The revocation of ${version} is in place.` : `Revoked ${version}.`;
+  if (cancelled.length === 0) return `${lead} No deployment of it was still open.`;
+  const stopped = plural(cancelled.length, 'unfinished deployment was', 'unfinished deployments were');
+  return `${lead} ${stopped} cancelled.`;
 }
 
 function errorFrom(status, payload) {
@@ -1048,12 +1137,102 @@ export function isUnfinished(status) {
   return status === 'QUEUED' || status === 'IN_PROGRESS';
 }
 
-// Words. What a board is doing, said the way one would say it to a teammate. Each
-// description also names a tone (wait, live, good, warn, bad, idle) and an icon, so
-// that no state is told apart by colour alone.
+/**
+ * Whether a deployment still has a board waiting or at work. The status of the job
+ * does not say: a deployment cancelled without force keeps the boards that had started.
+ */
+export function isUnderWay(deployment) {
+  return deployment.status === 'IN_PROGRESS' || deployment.counts.inProgress + deployment.counts.queued > 0;
+}
 
+// The decisions of the console's timers: when to read a page again and when to leave
+// for the sign-in page. They are kept here so that they can be tested without a page.
+
+export const RETRY_AFTER_ERROR_MS = 15000;
+// From here on a page that holds unsent work says that the session is about to end.
+export const SESSION_WARNING_S = 300;
+
+/**
+ * What the refresh timer does for a page that asks to be read every `interval` ms
+ * (0 for never). `every` is how often the page is in fact read, which is what it tells
+ * the user; `wait` is how long to wait now, 0 for not at all. A page that could not be
+ * loaded is not asked for more often than every 15 s, and nothing is asked for while
+ * the tab is in the background.
+ */
+export function refreshPlan({ interval, failed, visible }) {
+  if (!(interval > 0)) return { every: 0, wait: 0 };
+  const every = failed ? Math.max(interval, RETRY_AFTER_ERROR_MS) : interval;
+  return { every, wait: visible ? every : 0 };
+}
+
+/** True while a chosen file is in hand: being read, waiting to be sent, on its way or refused. */
+export function uploadInHand(stage) {
+  return stage !== 'idle' && stage !== 'done';
+}
+
+/**
+ * Whether to leave for the sign-in page now, shortly before the token ends. Not while
+ * the tab is in the background or a message fills the page, and not while leaving would
+ * throw work away: an open dialog, a chosen file, an upload on its way. If the token
+ * then runs out, the next request says so.
+ */
+export function shouldRenew({ needsRenewal, visible, gate, dialogOpen, uploadStage }) {
+  if (!needsRenewal || !visible || gate) return false;
+  return !dialogOpen && !uploadInHand(uploadStage);
+}
+
+/**
+ * What follows when the API refuses the token: as a rule 'sign-in' again; 'refused'
+ * when the token is fresh, because signing in again would only repeat the refusal;
+ * 'stay' when the page already shows a message about signing in. `gate` is the message
+ * that fills the page, if any; one that only says "loading" does not count.
+ */
+export function afterUnauthorized({ gate, fresh }) {
+  if (gate && !gate.waiting) return 'stay';
+  return fresh ? 'refused' : 'sign-in';
+}
+
+// Choosing boards for a deployment.
+
+/** True if a board reports that it runs this version or a newer one: it will refuse the offer. */
+export function alreadyRuns(device, version) {
+  const target = parseVersion(version);
+  const runs = device.fw ? parseVersion(device.fw.version) : null;
+  return target !== null && runs !== null && compareVersions(runs, target) >= 0;
+}
+
+/**
+ * The board to tick without being asked: the only one that has no unfinished update,
+ * unless it would refuse the release anyway. Null when there is a choice to make.
+ * `busy` holds the names of the boards that are not free.
+ */
+export function onlyChoice(devices, busy, version) {
+  const free = devices.filter((device) => !busy.has(device.thing));
+  if (free.length !== 1 || alreadyRuns(free[0], version)) return null;
+  return free[0].thing;
+}
+
+// Words. What a board is doing, said the way one would say it to a teammate. Each
+// description also names a tone (act, wait, live, good, warn, bad, idle) and an icon,
+// so that no state is told apart by colour alone. "act" is the one state in which an
+// update waits for a person.
+
+// In a heading and in the name of a step, "Button 1" is held together by a no-break
+// space: a line that ends on "Button" reads as if the number belonged to what follows.
+const BUTTON_1 = 'Button\u00a01';
+
+// The steps of an update, in order. `name` is what a step is called once it is done
+// and while it is still ahead. Where that name would claim more than is true, `doing`
+// is what the step is called while the board is at it, and `failed` what it is called
+// when the update stopped there.
 export const STEPS = [
-  'Offered', 'Approved on the board', 'Downloading', 'Verified', 'Restarting', 'Testing', 'Confirmed',
+  { name: 'Offered' },
+  { name: 'Approved on the board', doing: `Waiting for ${BUTTON_1}`, failed: 'Not approved' },
+  { name: 'Downloading', failed: 'Download failed' },
+  { name: 'Verified', doing: 'Verifying', failed: 'Check failed' },
+  { name: 'Restarting', failed: 'Did not start' },
+  { name: 'Testing', failed: 'Rolled back' },
+  { name: 'Confirmed' },
 ];
 
 const REFUSALS = {
@@ -1110,12 +1289,15 @@ function entryOf(table, name) {
 }
 
 function steps(done, { current = null, failed = null, ended = false } = {}) {
-  return STEPS.map((label, index) => {
+  return STEPS.map((step, index) => {
     let state = 'upcoming';
     if (index < done) state = 'done';
     else if (index === failed) state = 'failed';
     else if (index === current) state = 'current';
     else if (ended) state = 'skipped';
+    let label = step.name;
+    if (state === 'current') label = step.doing ?? step.name;
+    else if (state === 'failed') label = step.failed ?? step.name;
     return { label, state };
   });
 }
@@ -1163,9 +1345,11 @@ export function describeExecution(execution) {
         'The board is online but has not picked up the offer yet. That normally takes a few seconds.',
         steps(0, { current: 0 }));
     case 'waiting_for_button':
-      return description('wait', 'press', 'Waiting for Button 1',
-        'Waiting for someone to press Button 1 on the board. LED1 blinks quickly while the offer ' +
-        'is open, and Button 2 declines it.',
+      // The one moment in an update when everything waits for a person: said as an
+      // instruction, in a tone of its own.
+      return description('act', 'press', `Press ${BUTTON_1} on the board`,
+        'The board has the offer and waits for someone to press Button 1. LED1 blinks quickly ' +
+        'while the offer is open; Button 2 declines it.',
         steps(1, { current: 1 }));
     case 'downloading':
       return description('live', 'download', progress === null ? 'Downloading' : `Downloading ${progress}%`,
@@ -1221,9 +1405,10 @@ export function describeExecution(execution) {
     }
     case 'cancelled':
       if (!startedAt) {
+        // The offer was made, and withdrawn before the board acted on it.
         return description('idle', 'stop', 'Cancelled',
           `Cancelled before the board started. Nothing was installed.${reports}`,
-          steps(0, { ended: true }));
+          steps(1, { ended: true }));
       }
       return description('idle', 'stop', 'Cancelled',
         'Cancelled after the board had started. A board asks AWS before it installs, so a ' +
@@ -1279,10 +1464,12 @@ export function describeUpdate(device) {
 
   const version = versionOfDeployment(ota.job);
   const target = version ?? 'an update';
-  const live = (tone, icon, title, text, progress = null) => ({
+  // `was` is how the state reads for a board that has gone offline since, where the
+  // title itself does not make a sentence after "Was".
+  const live = (tone, icon, title, text, { progress = null, was = null } = {}) => ({
     tone: online ? tone : 'idle',
     icon,
-    title: online ? title : `Was ${title.charAt(0).toLowerCase()}${title.slice(1)} when last seen`,
+    title: online ? title : `Was ${was ?? title.charAt(0).toLowerCase() + title.slice(1)} when last seen`,
     text: online ? text : '',
     progress: online ? progress : null,
     deployment: ota.job,
@@ -1298,10 +1485,11 @@ export function describeUpdate(device) {
       return { ...last, ...settled, text };
     }
     case 'awaiting_user':
-      return live('wait', 'press', 'Waiting for Button 1',
-        `${version ?? 'An update'} is on offer. Button 1 on the board installs it, Button 2 declines.`);
+      return live('act', 'press', `Press ${BUTTON_1} on the board`,
+        `${version ?? 'An update'} is on offer. Button 1 on the board installs it, Button 2 declines.`,
+        { was: `waiting for ${BUTTON_1}` });
     case 'downloading':
-      return live('live', 'download', `Downloading ${target}`, '', ota.progress);
+      return live('live', 'download', `Downloading ${target}`, '', { progress: ota.progress });
     case 'verifying':
       return live('live', 'shield', `Checking the download of ${target}`, '');
     case 'rebooting':
@@ -1354,11 +1542,31 @@ export function describeCounts(counts) {
     .map(([name, label, tone, icon]) => ({ name, count: counts[name], label, tone, icon }));
 }
 
+// People. An account is its id (the token's sub); the e-mail address is what it showed
+// at the time and can be changed by its owner. Wherever a person is named, the id is
+// within reach.
+
+/** The start of an account id: enough to tell a handful of accounts apart at a glance. */
+export function shortAccount(sub) {
+  const id = typeof sub === 'string' ? sub : '';
+  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
+}
+
+/** What to call a person: the address, or failing that the start of the account id. */
+export function nameOf(person) {
+  if (person?.email) return person.email;
+  return person?.sub ? `account ${shortAccount(person.sub)}` : 'an unknown account';
+}
+
+// A deployment is named by the version it installs: the words that end in "of" lose it
+// when an entry has no target.
 const AUDIT_ACTIONS = {
   'firmware.upload': { done: 'uploaded firmware', tried: 'tried to upload', icon: 'upload' },
   'firmware.revoke': { done: 'revoked firmware', tried: 'tried to revoke firmware', icon: 'ban' },
-  'deployment.create': { done: 'started deployment', tried: 'tried to deploy', icon: 'send' },
-  'deployment.cancel': { done: 'cancelled deployment', tried: 'tried to cancel deployment', icon: 'stop' },
+  'deployment.create': { done: 'started a deployment of', tried: 'tried to deploy', icon: 'send' },
+  'deployment.cancel': {
+    done: 'cancelled the deployment of', tried: 'tried to cancel the deployment of', icon: 'stop',
+  },
 };
 
 const AUDIT_OUTCOMES = {
@@ -1367,15 +1575,88 @@ const AUDIT_OUTCOMES = {
   error: { tone: 'bad', icon: 'alert', label: 'Server error' },
 };
 
-/** One line of the activity log: what was done, and how it ended if not well. */
+function yesOrNo(value) {
+  if (value === 'true') return 'yes';
+  return value === 'false' ? 'no' : value;
+}
+
+// The steps of a revocation after the mark, as the API names the ones it could not complete.
+const REVOCATION_STEPS = {
+  tag: 'refusing the image',
+  cancel: 'cancelling the deployments',
+  record: 'recording that it is done',
+};
+
+function stepsLeft(value) {
+  return value.split(' ').filter(Boolean).map((step) => entryOf(REVOCATION_STEPS, step) ?? step).join(', ');
+}
+
+// What the API records with an entry, in the words of the console and in the order in
+// which a line reads best. `code` marks a value that is an identifier and is set in
+// the monospace face; `phrase` a label that reads on into its value without a colon.
+const AUDIT_DETAILS = {
+  code: { label: 'Refused with', code: true, phrase: true },
+  incomplete: { label: 'Left undone', say: stepsLeft },
+  filename: { label: 'File', code: true },
+  version: { label: 'Version', code: true },
+  things: { label: 'Boards' },
+  force: { label: 'Forced', say: yesOrNo },
+  reason: { label: 'Reason' },
+  cancelled: { label: 'Cancelled', say: yesOrNo },
+  size: { label: 'Size', say: (value) => exactBytes(Number(value)) || value },
+  sha256: { label: 'SHA-256', code: true },
+};
+
+function auditFact(entry, key, value) {
+  const known = entryOf(AUDIT_DETAILS, key);
+  if (!known) return { key, label: key, value, code: false, phrase: false };
+  let { label } = known;
+  // A revocation counts the deployments it cancelled; a failure that is not a refusal
+  // did not refuse anything.
+  if (key === 'cancelled' && entry.action === 'firmware.revoke') label = 'Deployments cancelled';
+  if (key === 'code' && entry.outcome === 'error') label = 'Failed with';
+  return {
+    key, label, value: known.say ? known.say(value) : value, code: known.code === true,
+    phrase: known.phrase === true,
+  };
+}
+
+/**
+ * One line of the activity log: what was done, to what, and how it ended if not well.
+ * `label` is what to call the target. A deployment is called by its version; its id
+ * goes to `facts`, which are the details of the entry in words.
+ */
 export function describeAudit(entry) {
   const action = entryOf(AUDIT_ACTIONS, entry.action);
   const ok = entry.outcome === 'ok';
   const other = { tone: 'idle', icon: 'minus', label: entry.outcome || 'Unknown' };
+  const deployment = isDeploymentId(entry.target) ? entry.target : null;
+  const label = deployment ? versionOfDeployment(deployment) ?? deployment : entry.target ?? '';
+  const details = new Map(entry.detail ?? []);
+  // A revocation that completed what an earlier request had begun.
+  const resumed = entry.action === 'firmware.revoke' && ok && details.get('resumed') === 'true';
+  let words = entry.action || 'did something';
+  if (resumed) words = 'finished revoking firmware';
+  else if (action) words = ok ? action.done : action.tried;
+
+  const order = [...Object.keys(AUDIT_DETAILS), ...details.keys()];
+  const facts = [];
+  for (const key of new Set(order)) {
+    if (!details.has(key)) continue;
+    // Said by the sentence already: the version of a deployment, and that a revocation was finished.
+    if ((key === 'version' && details.get(key) === label) || (key === 'resumed' && resumed)) continue;
+    facts.push(auditFact(entry, key, details.get(key)));
+  }
+  if (deployment) {
+    facts.push({ key: 'target', label: 'Deployment', value: deployment, code: true, phrase: false });
+  }
+
   return {
     icon: action?.icon ?? 'list',
-    verb: action ? (ok ? action.done : action.tried) : entry.action || 'did something',
+    verb: label ? words : words.replace(/ of$/, ''),
+    label,
     outcome: ok ? null : entryOf(AUDIT_OUTCOMES, entry.outcome) ?? other,
     href: deploymentHref(entry.target) ?? (isVersion(entry.target) ? '#/firmware' : null),
+    facts,
   };
 }

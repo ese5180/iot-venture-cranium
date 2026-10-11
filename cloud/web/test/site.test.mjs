@@ -150,12 +150,155 @@ test('every icon a description asks for is drawn', () => {
     const asked = [
       ...source.matchAll(/\bicon(?:Name)?: '([a-z-]+)'/g),
       ...source.matchAll(/\bicon\('([a-z-]+)'/g),
-      ...source.matchAll(/describe\('[a-z]+', '([a-z-]+)'/g),
+      ...source.matchAll(/\b(?:description|live)\('[a-z]+', '([a-z-]+)'/g),
       ...source.matchAll(/badge\('[a-z]+', '([a-z-]+)'/g),
       ...source.matchAll(/\['[a-zA-Z]+', '[a-z ]+', '(?:good|live|wait|warn|bad|idle)', '([a-z-]+)'\]/g),
     ].map((match) => match[1]);
     for (const icon of asked) assert.equal(drawn.has(icon), true, `${name} asks for the icon ${icon}`);
   }
+});
+
+// The stylesheet, read as rules. It is written plainly, with at most one @media or
+// @container block around a rule, so two passes over its blocks are enough.
+
+/** The blocks of a piece of CSS at its top level, as [prelude, body]. */
+function blocks(text) {
+  const found = [];
+  let depth = 0;
+  let start = 0;
+  let open = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === '{') {
+      if (depth === 0) open = index;
+      depth += 1;
+    } else if (text[index] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        found.push([text.slice(start, open).trim(), text.slice(open + 1, index)]);
+        start = index + 1;
+      }
+    }
+  }
+  return found;
+}
+
+/** Every rule of the stylesheet as { media, selectors, values }; `media` is '' outside a block. */
+function readRules(text) {
+  const rules = [];
+  const plain = text.replace(/\/\*[\s\S]*?\*\//g, '');
+  const add = (media, [prelude, body]) => {
+    const values = new Map();
+    for (const declaration of body.split(';')) {
+      const colon = declaration.indexOf(':');
+      if (colon !== -1) values.set(declaration.slice(0, colon).trim(), declaration.slice(colon + 1).trim());
+    }
+    rules.push({ media, selectors: prelude.split(',').map((selector) => selector.trim()), values });
+  };
+  for (const block of blocks(plain)) {
+    if (/^@(?:media|container)\b/.test(block[0])) {
+      for (const inner of blocks(block[1])) add(block[0], inner);
+    } else if (!block[0].startsWith('@')) {
+      add('', block);
+    }
+  }
+  return rules;
+}
+
+const rules = readRules(css);
+
+/** What the stylesheet declares for a selector, outside any block or inside the one named. */
+function declared(selector, media = '') {
+  const values = new Map();
+  for (const rule of rules) {
+    if (rule.media === media && rule.selectors.includes(selector)) {
+      for (const [name, value] of rule.values) values.set(name, value);
+    }
+  }
+  return values;
+}
+
+test('the sections in the masthead are never squeezed under the account block', () => {
+  // In one row the sections keep their width and the account block gives way, its
+  // texts ending in an ellipsis. A link can therefore never lie under another box.
+  assert.equal(declared('.nav').get('flex'), '1 0 auto');
+  assert.equal(declared('.nav').has('min-width'), false);
+  assert.equal(declared('.brand').get('flex'), 'none');
+  assert.equal(declared('.account').get('flex'), '0 1 auto');
+  assert.equal(declared('.account').get('min-width'), '0');
+  for (const selector of ['.account-email', '.account-session']) {
+    assert.equal(declared(selector).get('overflow'), 'hidden', selector);
+    assert.equal(declared(selector).get('text-overflow'), 'ellipsis', selector);
+  }
+
+  // Below the width that one row needs, the sections take a row of their own. The two
+  // narrower layouts meet without a gap between them.
+  const media = [...new Set(rules.map((rule) => rule.media))];
+  const twoRows = media.find((name) => /^@media \(min-width: 861px\) and \(max-width: \d+px\)$/.test(name));
+  assert.notEqual(twoRows, undefined, 'a layout between the phone and the full width');
+  assert.equal(Number(/max-width: (\d+)px/.exec(twoRows)[1]) >= 1100, true);
+  assert.equal(declared('.nav', twoRows).get('flex-basis'), '100%');
+  assert.equal(declared('.masthead-inner', twoRows).get('flex-wrap'), 'wrap');
+  const threeRows = '@media (max-width: 860px)';
+  assert.equal(declared('.nav', threeRows).get('flex-basis'), '100%');
+  assert.equal(declared('.masthead-inner', threeRows).get('flex-wrap'), 'wrap');
+});
+
+/** The contrast of two colours as WCAG defines it, from "#rrggbb". */
+function contrast(first, second) {
+  const luminance = (hex) => {
+    const [red, green, blue] = [1, 3, 5].map((at) => {
+      const part = parseInt(hex.slice(at, at + 2), 16) / 255;
+      return part <= 0.03928 ? part / 12.92 : ((part + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  };
+  const [lighter, darker] = [luminance(first), luminance(second)].sort((a, b) => b - a);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+test('lettering on a filled button or a tinted panel is readable in both themes', () => {
+  const themes = {
+    light: declared(':root'),
+    dark: new Map([...declared(':root'), ...declared(':root', '@media (prefers-color-scheme: dark)')]),
+  };
+  // [lettering, what it stands on]
+  const pairs = [
+    ['--on-accent', '--accent'],
+    ['--on-bad-fill', '--bad-fill'],
+    ['--ink', '--accent-wash'],
+    ['--ink', '--good-wash'],
+    ['--ink', '--warn-wash'],
+    ['--ink', '--bad-wash'],
+    ['--ink', '--well'],
+    ['--ink-2', '--surface'],
+    ['--ink-3', '--paper'],
+    ['--paper', '--ink'],
+  ];
+  for (const [name, colours] of Object.entries(themes)) {
+    for (const [text, ground] of pairs) {
+      for (const token of [text, ground]) {
+        assert.match(colours.get(token) ?? '', /^#[0-9a-f]{6}$/, `${token} in the ${name} theme`);
+      }
+      const ratio = contrast(colours.get(text), colours.get(ground));
+      assert.equal(ratio >= 4.5, true, `${text} on ${ground}, ${name}: ${ratio.toFixed(2)}:1`);
+    }
+  }
+  // A button that destroys something is filled with a red that carries light lettering
+  // in both themes: the lettering is closer to white than the fill is.
+  assert.equal(declared('.btn.is-danger').get('background'), 'var(--bad-fill)');
+  assert.equal(declared('.btn.is-danger').get('color'), 'var(--on-bad-fill)');
+  for (const [name, colours] of Object.entries(themes)) {
+    const toWhite = (token) => contrast(colours.get(token), '#ffffff');
+    assert.equal(toWhite('--on-bad-fill') < toWhite('--bad-fill'), true, name);
+  }
+});
+
+test('a state that asks for somebody has a look of its own, and motion is never needed to read one', () => {
+  assert.equal(rules.some((rule) => rule.selectors.includes('.execution.is-act .execution-state')), true);
+  assert.equal(declared('.execution.is-act .execution-state').get('background'), 'var(--accent-wash)');
+  // With reduced motion the bar that waits for the server is not left standing part full.
+  const still = '@media (prefers-reduced-motion: reduce)';
+  assert.equal(declared('.meter.is-busy .meter-fill', still).get('width'), '100%');
 });
 
 test('no file of the site contains an e-mail address', () => {

@@ -8,9 +8,10 @@
  */
 
 import {
-  ApiError, createApi, createAuth, createClock, deviceActivity, isUnfinished, parseRoute, plural,
-  pollInterval, readConfig, readImageHeader, recordedFilename, routeHash, sha256Hex, singleLine,
-  summaryActivity, toBase64, versionOfDeployment,
+  ApiError, afterUnauthorized, createApi, createAuth, createClock, deviceActivity, isUnderWay,
+  isUnfinished, onlyChoice, parseRoute, pollInterval, readConfig, readImageHeader, recordedFilename,
+  refreshPlan, revocationInPlace, revocationNotice, routeHash, sha256Hex, shouldRenew, singleLine,
+  staleAfter, summaryActivity, toBase64, versionOfDeployment,
 } from './core.js';
 import {
   accountView, activityView, cancelDialog, deployDialog, deploymentView, deploymentsView, deviceView,
@@ -20,7 +21,6 @@ import {
 // Board lists are also refreshed when nothing is being installed, so that "online"
 // does not go stale. Deployments are not: they follow pollInterval() alone.
 const IDLE_REFRESH_MS = 30000;
-const RETRY_AFTER_ERROR_MS = 15000;
 const REDRAW_MS = 15000;
 const SESSION_CHECK_MS = 5000;
 // A refusal this soon after signing in would repeat for ever if sign-in simply restarted.
@@ -177,10 +177,9 @@ function due(target, full) {
   return full || target.loadedAt === 0 || clock.now() - target.loadedAt >= IDLE_REFRESH_MS - 2000;
 }
 
+/** The deployments whose boards the overview follows one by one: those with a board still at it. */
 function activeDeployments() {
-  return (state.deployments.value ?? [])
-    .filter((deployment) => deployment.status === 'IN_PROGRESS')
-    .slice(0, DEPLOYMENTS_ON_OVERVIEW);
+  return (state.deployments.value ?? []).filter(isUnderWay).slice(0, DEPLOYMENTS_ON_OVERVIEW);
 }
 
 function phasesOf(deployment) {
@@ -296,12 +295,13 @@ function arm() {
   clearTimeout(timer);
   if (state.gate) return;
   const page = pages[state.route.view];
-  let delay = page.interval();
-  if (delay > 0 && page.resources().some((item) => item.error)) delay = Math.max(delay, RETRY_AFTER_ERROR_MS);
-  state.interval = delay;
-  if (delay > 0 && document.visibilityState === 'visible') {
-    timer = setTimeout(() => refreshNow(false), delay);
-  }
+  const plan = refreshPlan({
+    interval: page.interval(),
+    failed: page.resources().some((item) => item.error),
+    visible: document.visibilityState === 'visible',
+  });
+  state.interval = plan.every;
+  if (plan.wait > 0) timer = setTimeout(() => refreshNow(false), plan.wait);
   draw();
 }
 
@@ -371,16 +371,21 @@ function signedOutGate({ reason, message }) {
 }
 
 function onUnauthorized() {
-  // A message that is already about signing in stays; one that only says "loading" does not.
-  if (state.gate && !state.gate.waiting) return;
-  if (auth.signedInWithin(FRESH_SIGN_IN_S)) showGate(signedOutGate({ reason: 'refused' }));
-  else beginSignIn();
+  const step = afterUnauthorized({ gate: state.gate, fresh: auth.signedInWithin(FRESH_SIGN_IN_S) });
+  if (step === 'refused') showGate(signedOutGate({ reason: 'refused' }));
+  else if (step === 'sign-in') beginSignIn();
 }
 
+/** Leave for the sign-in page shortly before the token ends, unless work is in hand. */
 function checkSession() {
-  if (state.gate || document.visibilityState !== 'visible') return;
-  // A dialog is left alone; if the token runs out under it, the next request says so.
-  if (auth.needsRenewal() && !dialogOpen()) beginSignIn();
+  const renew = shouldRenew({
+    needsRenewal: auth.needsRenewal(),
+    visible: document.visibilityState === 'visible',
+    gate: Boolean(state.gate),
+    dialogOpen: dialogOpen(),
+    uploadStage: state.upload.stage,
+  });
+  if (renew) beginSignIn();
 }
 
 // Routes.
@@ -462,8 +467,9 @@ async function submitFrom(self, model, task) {
     model.sending = false;
     self.busy = false;
     self.redraw();
-    // Unless the server said no, the change may have been made: show what is true now.
-    if (!(model.error.status >= 400 && model.error.status < 500)) refreshNow(true);
+    // The change may have been made all the same, or the server said that the page is
+    // out of date: show what is true now. The open dialog is drawn again with the page.
+    if (staleAfter(model.error)) refreshNow(true);
   }
 }
 
@@ -475,10 +481,18 @@ function openDeploy(version) {
     model.error = null;
     self.redraw();
   };
+  // With a single board to choose from, it is ticked when the boards come up. From the
+  // first tick by hand on, the selection is the user's own.
+  const suggest = () => {
+    if (model.chosenByHand || model.step !== 1 || model.devices === null) return;
+    const only = onlyChoice(model.devices, model.busy, model.version);
+    model.things = new Set(only === null ? [] : [only]);
+  };
   const model = {
     step: version ? 1 : 0,
     version,
     things: new Set(),
+    chosenByHand: false,
     note: '',
     busy: new Map(),
     releases: null,
@@ -489,16 +503,21 @@ function openDeploy(version) {
     error: null,
     close: () => self.close(),
     choose: change((picked) => { model.version = picked; }),
-    next: change(() => { model.step += 1; }),
+    next: change(() => {
+      model.step += 1;
+      suggest();
+    }),
     back: change(() => { model.step -= 1; }),
     setNote(text) {
       model.note = text;
     },
     toggle: change((thing) => {
+      model.chosenByHand = true;
       if (model.things.has(thing)) model.things.delete(thing);
       else if (!model.busy.has(thing)) model.things.add(thing);
     }),
     toggleAll: change(() => {
+      model.chosenByHand = true;
       const free = model.devices.filter((device) => !model.busy.has(device.thing));
       const all = free.every((device) => model.things.has(device.thing));
       model.things = new Set(all ? [] : free.map((device) => device.thing));
@@ -531,6 +550,7 @@ function openDeploy(version) {
           model.version = model.releases[0]?.version ?? null;
           model.step = 0;
         }
+        suggest();
       } catch (error) {
         model.loadError = asProblem(error);
       }
@@ -546,8 +566,13 @@ function openDeploy(version) {
           note: singleLine(model.note),
         });
       } catch (error) {
-        // Back to the boards, where the busy ones are named.
-        if (error?.code === 'device_busy') model.step = 1;
+        // A conflict says that what the dialog offers is out of date: a board has become
+        // busy, or the release was revoked. Read both again, so that neither can be
+        // chosen once more, and go back to the boards where a busy one is named.
+        if (error?.status === 409) {
+          if (error.code === 'device_busy') model.step = 1;
+          model.reload();
+        }
         throw error;
       }
       keep(state.deploymentDetails, deployment.id, deployment);
@@ -576,11 +601,13 @@ function openCancel(deployment) {
       model.force = force;
       self.redraw();
     },
-    submit: () => submitFrom(self, model, async () => {
-      const updated = await api.cancel(deployment.id, model.force);
+    // `force` is what the dialog shows as chosen, which is not always what was ticked:
+    // once the offer is withdrawn, stopping the boards is all that is left.
+    submit: (force) => submitFrom(self, model, async () => {
+      const updated = await api.cancel(deployment.id, force);
       keep(state.deploymentDetails, updated.id, updated);
       self.close(true);
-      notify(model.force
+      notify(force
         ? 'Cancelled. Boards that had started are being stopped.'
         : 'Cancelled. Boards that had not started are no longer offered this update.');
       refreshNow(true);
@@ -589,12 +616,31 @@ function openCancel(deployment) {
   self = openDialog(() => cancelDialog(model));
 }
 
+// The API wants a reason with every revocation. One that is repeated carries the
+// reason on record; this stands in for a record that has none.
+const REPEATED_REASON = 'Revocation applied again.';
+
+/**
+ * Revoke a release, or repeat the revocation of one that is revoked already. The
+ * second finishes a revocation that stopped half way: the server then repeats the steps
+ * after the mark, which refuse the image and cancel the open deployments.
+ */
 function openRevoke(release) {
   if (!state.me.canWrite || dialogOpen()) return;
   let self = null;
   const model = {
-    release,
+    // The newest record of the release there is: a first attempt that failed half way
+    // leaves it revoked, and the dialog then offers to finish.
+    get release() {
+      return state.firmware.value?.releases.find((item) => item.version === release.version) ?? release;
+    },
+    get again() {
+      return model.release.status !== 'active';
+    },
     reason: '',
+    // Typing starts in the reason, except on a touch screen, where the keyboard would
+    // cover what the dialog has to say.
+    focusReason: !window.matchMedia('(pointer: coarse)').matches,
     sending: false,
     error: null,
     close: () => self.close(),
@@ -603,21 +649,30 @@ function openRevoke(release) {
       self.redraw();
     },
     submit: () => submitFrom(self, model, async () => {
-      const { release: revoked, cancelled } = await api.revoke(release.version, singleLine(model.reason));
-      const firmware = state.firmware.value;
-      if (firmware) {
-        firmware.releases = firmware.releases.map((item) =>
-          (item.version === revoked.version ? revoked : item));
+      const { again } = model;
+      const reason = again
+        ? singleLine(model.release.revoked?.reason) || REPEATED_REASON
+        : singleLine(model.reason);
+      let cancelled = null;
+      try {
+        const done = await api.revoke(release.version, reason);
+        ({ cancelled } = done);
+        const firmware = state.firmware.value;
+        if (firmware) {
+          firmware.releases = firmware.releases.map((item) =>
+            (item.version === done.release.version ? done.release : item));
+        }
+      } catch (error) {
+        // The server found the release revoked and went through the steps after the
+        // mark without a failure. That is what was asked for, answered as a refusal.
+        if (!revocationInPlace(error)) throw error;
       }
       self.close(true);
-      const stopped = plural(cancelled.length, 'unfinished deployment was', 'unfinished deployments were');
-      notify(cancelled.length > 0
-        ? `Revoked ${revoked.version}. ${stopped} cancelled.`
-        : `Revoked ${revoked.version}. No deployment of it was still open.`);
+      notify(revocationNotice(release.version, { cancelled, again }));
       refreshNow(true);
     }),
   };
-  self = openDialog(() => revokeDialog(model));
+  self = openDialog(() => revokeDialog(model, { state, actions }));
 }
 
 // Uploading firmware.
@@ -687,8 +742,8 @@ async function startUpload() {
         state.upload = { ...state.upload, stage: progress.stage, sent: progress.sent };
         draw();
       });
+    // The panel itself says "Registered as …"; a toast on top of the list would only repeat it.
     state.upload = { stage: 'done', release };
-    notify(`${release.version} is registered.`);
     load(state.firmware, api.firmware);
   } catch (error) {
     state.upload = { ...upload, stage: 'refused', error: asProblem(error) };
@@ -700,6 +755,8 @@ async function startUpload() {
 const actions = {
   refresh: () => refreshNow(true),
   signOut: () => auth.signOut(),
+  // Asked for by hand where the console does not leave by itself: with a file in hand.
+  signInAgain: () => beginSignIn(),
   async copy(value, label) {
     try {
       await navigator.clipboard.writeText(value);
