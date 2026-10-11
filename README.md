@@ -97,7 +97,7 @@ the boards, AWS IoT and the console work together.
 | Question | Answer |
 | --- | --- |
 | How large is your bootloader? | MCUboot is 39,988 bytes in a 64 KB partition. |
-| How large is your existing application code? | The application is 637,660 bytes and TF-M is 130,008 bytes. Together they are one signed image of 768,884 bytes in a 912 KB slot. |
+| How large is your existing application code? | The application is 637,660 bytes and TF-M is 130,008 bytes. Together they are one signed image of about 768,900 bytes in a 912 KB slot (the signature's length varies by a byte or two from build to build). |
 | Does the bootloader or application code handle the firmware image download? | The application. MCUboot has no network stack; it only verifies and swaps images. |
 | What wireless communication is used to download the images? | Wi-Fi (nRF7002). The job arrives over MQTT with mutual TLS from AWS IoT, and the image is downloaded over HTTPS from a short-lived, signed S3 link. |
 | Why this method? | The image is about 770 KB. Wi-Fi reaches the server directly and has the bandwidth for it; Bluetooth would need a phone as a relay and stays free for audio and the controller link. |
