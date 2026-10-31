@@ -17,16 +17,17 @@ else in the repository: `cloud/deploy.sh` stores them in the ignored `cloud/.dep
 ## What is deployed
 
 Two CloudFormation stacks, `cranium-ota-bootstrap` and `cranium-ota`
-(`cloud/infra/`), plus `cranium-budget` for the cost alert.
+(`cloud/infra/`), plus `cranium-budget` for the cost alert. `cloud/trail.sh` adds a separate
+stack, `cranium-trail`, with a CloudTrail record of management events.
 
 | Resource | Purpose |
 | --- | --- |
 | IoT thing group `cranium-devices` | The fleet. The console lists and deploys to its members only. |
 | IoT policy `cranium-device` | What a board may do (below). Attached to each board's certificate. |
-| IoT jobs `cranium-…` | One job per deployment. AWS IoT is the only record of a deployment. |
-| S3 bucket | Firmware images, stored once under their SHA-256. Private, versioned, write-once. |
+| IoT jobs `cranium-…` | One job per deployment. AWS IoT is the only record of a deployment. The hardware bench also creates `cranium-bench-…` jobs, which the console's deployment list leaves out and a revocation does not cancel. |
+| S3 bucket | Firmware images, stored once under their SHA-256. Private, versioned, write-once. The bench also stores test images here, including damaged and wrongly signed ones. Boards refuse those. |
 | IAM role for signing links | Lets AWS IoT Jobs (and nothing else) create a download link for an image. |
-| DynamoDB tables | The list of releases, and an append-only audit log. |
+| DynamoDB tables | The list of releases, and the audit log. The API's role may put and query audit entries, and nothing else. What that does and does not guarantee is under [Security decisions](#security-decisions). |
 | Cognito user pool | Console accounts: created by an administrator, password plus authenticator app. |
 | HTTP API and two Lambda functions | The console: one function serves the page, one is the API. |
 | CloudWatch log groups | API access log, function logs, AWS IoT logs. |
@@ -36,9 +37,11 @@ Two CloudFormation stacks, `cranium-ota-bootstrap` and `cranium-ota`
 Each board is one *thing* named `cranium-<16 hex digits>`, derived from the nRF5340's
 hardware ID, with one X.509 certificate of its own.
 
-`python3 tools/provision_device.py` does the following over the board's serial console:
+`python3 tools/provision_device.py` does the following over the board's serial console (firmware
+1.3.0 or later, see [`firmware/README.md`](../firmware/README.md#serial-console)):
 
-1. Sends the Wi-Fi network from `~/.cranium/wifi_secrets.h`. The board stores it in TF-M.
+1. Sets the device ID of a board in factory mode (`INIT`), then sends the Wi-Fi network
+   from `~/.cranium/wifi_secrets.h`. The board stores it in TF-M.
 2. Asks the board to create a P-256 key pair. The private key is generated on the board
    and stays there; the board prints a certificate signing request.
 3. Registers the board in AWS IoT:
@@ -95,7 +98,7 @@ field before showing it and never bases a decision on it.
 
 ## An update, message by message
 
-The job document:
+An example job document:
 
 ```json
 { "op": "fw_update", "v": 1,
@@ -117,7 +120,7 @@ document, so a link is never stored and is valid for 10 minutes only.
 | 20 seconds later | fetches the job once more; goes on only if it is still in progress | | `rebooting` |
 | Reset: MCUboot verifies the signature and swaps | | | |
 | New image running on trial | reconnects to AWS IoT, confirms itself | `SUCCEEDED`, `running` | `testing`, then `idle` |
-| Not confirmed within 5 minutes | reset, MCUboot swaps back, old image reports | `FAILED`, `reason=rolled_back` | `idle` |
+| Not confirmed within 5 minutes, or the watchdog fires (120 seconds) | reset, MCUboot swaps back, old image reports | `FAILED`, `reason=rolled_back` | `idle` |
 
 Because an offered update stays `QUEUED` until the button is pressed, cancelling a
 deployment simply withdraws it. Because the board waits for AWS IoT to accept both
@@ -144,9 +147,19 @@ jobs message is about 1.6 kB (the board's buffer is 4 kB). The board only downlo
 the provisioned prefix `https://<bucket>.s3.<region>.amazonaws.com/firmware/`, over TLS
 verified against Amazon Root CA 1, using a credential slot that holds no client key.
 
+### Two TLS sessions at once
+
+The MQTT connection stays up during a download, so that a cancellation still arrives. That
+makes two TLS sessions on one Mbed TLS heap of 81,920 bytes. The second handshake first
+failed with Mbed TLS error -141, which looked like a certificate problem. It was the heap
+running out: the two sessions peaked at 86,192 bytes. Each session took 16 KB record buffers
+in both directions. Setting `CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096` brought the peak to
+61,616 bytes. What comes in must still fit 16 KB, because neither S3 nor AWS IoT can be asked
+to send shorter records.
+
 ## The console
 
-Sign-in is through Cognito: accounts are created by an administrator, and every account
+The console is at https://console.craniumiot.com. Sign-in is through Cognito: accounts are created by an administrator, and every account
 needs a password and a code from an authenticator app. *Viewers* can look; *release
 managers* can upload, deploy, cancel and revoke.
 
@@ -161,8 +174,12 @@ managers* can upload, deploy, cancel and revoke.
 - **Revoke.** Marks a release as bad: no new deployments, running deployments of it are
   cancelled, and its file is tagged so that S3 refuses every download, including links
   that were already issued.
-- **Activity.** Every upload, deployment, cancellation and revocation, with who did it
-  and whether it was allowed.
+- **Activity.** Every upload, deployment, cancellation and revocation that reaches the API
+  function, with the person it names and whether it was allowed. Entries made by `scripts/ota.sh`
+  or the test bench name the release manager they act for, not a signed-in session. Their request
+  IDs start with `bench-`. Actions taken directly in AWS, such as the AWS CLI stop in
+  `cloud/README.md`, the bench's own jobs or anything an administrator does, do not pass through
+  the API and are not listed here.
 
 ## The Raspberry Pi (planned)
 
@@ -183,23 +200,31 @@ The design is in [raspberry-pi-ota.md](raspberry-pi-ota.md#decision).
 aws login --profile cranium                     # browser sign-in, valid for 12 hours
 export AWS_PROFILE=cranium AWS_REGION=us-east-1
 
+scripts/open-console.sh                         # sign in, deploy if needed, open the console
 cloud/deploy.sh                                 # create or update the stacks
 cloud/users.sh add <email> release-manager      # the person gets an invitation by e-mail
 cloud/smoke.sh                                  # checks that do not need a sign-in
 
-python3 tools/secrets.py wifi                   # once per machine
+python3 tools/secrets.py wifi                   # once per machine, see secrets/README.md
 python3 tools/provision_device.py               # once per board
 ```
 
 Releasing an update:
 
 1. Raise the version in `firmware/app/VERSION` and build. The build signs the image with
-   the key in `~/.cranium/`.
-2. In the console, upload `build/app/zephyr/zephyr.signed.bin`.
+   the key in `~/.cranium/` and stores it in `binaries/`.
+2. In the console, upload `binaries/latest.signed.bin`.
 3. Deploy it, then press Button 1 on each board.
 
-`cloud/logs.sh api|web|access|iot` follows the logs. `cloud/teardown.sh` removes
-everything except the budget stack and the log group `AWSIotLogsV2`.
+`scripts/ota.sh` does steps 2 and 3 for one board and follows the update to the end. It invokes
+the API function directly, which bypasses API Gateway and sign-in (see [Known limits](#known-limits)).
+
+After a new signing key, run `cloud/deploy.sh --replace-signing-key`, so that the console
+trusts its public half. `secrets/README.md` covers the rest.
+
+`cloud/logs.sh api|web|access|iot` follows the logs. `cloud/teardown.sh` removes the console and
+what it stored. It leaves the budget stack, the `cranium-trail` stack with its log files, and the
+log group `AWSIotLogsV2`.
 
 ## Security decisions
 
@@ -209,25 +234,106 @@ everything except the budget stack and the log group `AWSIotLogsV2`.
 | Signing kept away from the online server | The console is verify-only. A break-in there cannot produce firmware that a board accepts. |
 | Unique identity per device; keys generated on the device | One certificate per thing; the private key is generated in the board and never leaves it. |
 | One key, one mission | Separate keys for firmware signing, device identity and storage encryption. The download connection uses a credential slot without the device key. |
-| Keys isolated from application software | Device credentials are in TF-M Protected Storage; TLS and signing run through PSA Crypto in the secure world. |
-| TLS everywhere, forward secrecy, authenticated encryption | MQTT with mutual TLS on port 8883 and HTTPS for the download. The firmware offers only ECDHE with AES-GCM. The bucket refuses plain HTTP. |
-| Least privilege | The device policy is limited to the board's own topics. The console's roles have no delete, publish, signing or certificate rights. |
-| Secure update: safe failure, no rollback to old firmware | Trial boot with automatic revert; version checks in the console, the application and MCUboot; user consent on the board. |
+| Keys isolated from application software | Partly met. Device credentials are in TF-M Protected Storage, encrypted with a key derived from the hardware unique key, and never in the image. TLS and signing run through PSA Crypto in the secure world. That is encryption at rest, not isolation: the TLS stack reads the device key into non-secure memory at each connection (see [Known limits](#known-limits)). |
+| TLS everywhere, forward secrecy, authenticated encryption | MQTT with mutual TLS on port 8883 and HTTPS for the download. The firmware offers only ECDHE suites, so every session has forward secrecy. It sets no narrower list, so it also offers CCM and CBC suites next to AES-GCM, and the server chooses (see [Known limits](#known-limits)). The bucket refuses plain HTTP. |
+| Least privilege | Met for the boards and the console. The device policy is limited to the board's own topics. The console's roles have no delete, publish, signing or certificate rights. Not met for the operator: deployment and the bench run as the AWS root user (see [Known limits](#known-limits)). |
+| Secure update: safe failure, no rollback to old firmware | Over the air: trial boot with automatic revert; version checks in the console, the application and MCUboot; user consent on the board. Serial recovery has no version check and no trial (see [Known limits](#known-limits)). |
 | No default or shared passwords, two-factor sign-in | Administrator-created accounts with a temporary password and a required authenticator code. |
-| Log security-relevant actions, never secrets | Audit log that the API can only append to; access log without query strings; no tokens, links or request bodies in any log. |
+| Log security-relevant actions, never secrets | An audit entry for every attempted change that reaches the API function. A request that API Gateway's token check refuses appears only in the access log. An entry that cannot be stored is lost, and if the change itself succeeded the caller gets `audit_failed`. IAM lets the API's role only put and query entries, so it cannot delete or update one. A put could still replace an entry with the same key, and IAM cannot forbid that: the code sends a condition on every put that refuses it. To notice a rewrite, the function logs a digest of each entry, which the role cannot change, and `cloud/api/verify-audit.mjs` compares the two for the 90 days the log keeps its lines. Access log without query strings; no tokens, links or request bodies in any log. |
 | Only the servers a device needs | The board talks to its AWS IoT endpoint and downloads from one bucket prefix. |
 
-Known limits, stated plainly:
+### Known limits
+
+Stated plainly:
 
 - The board speaks TLS 1.2; TLS 1.3 is not enabled in this build.
-- The update image is not encrypted in S3 or in external flash. It contains no secrets,
-  but it can be copied by someone who holds the board.
-- The signing key is a file on the release builder's machine. Moving it into AWS KMS
+- MCUboot's image encryption is off, so images are stored in the clear in external flash. S3
+  encrypts them at rest, but anyone with a download link gets the plain image. An image contains
+  no secrets, but it can be copied by someone who holds the board.
+- The signing key is a file on the release builder's machine, and every build uses it, including
+  test images with a fault built in. The disk is encrypted (FileVault), which protects a machine
+  that is off, not a running one. Moving the key into AWS KMS
   (sign with `imgtool --vector-to-sign`, `aws kms sign`, `imgtool --fix-sig`) would mean
   no person holds it at all.
 - Downgrade protection is by version comparison in MCUboot, not by a hardware counter.
-- The development kit's debug port is open. A product build locks it (APPROTECT) and
-  leaves out the provisioning shell.
+- Serial recovery has no version check. It writes straight into the primary slot, and the next
+  boot checks the signature only, so any image ever signed with this key can be installed over
+  a newer one, with no trial and no revert. No button is needed, because the bootloader also takes
+  a command in the half second after a reset. Today this adds no power, because the debug port is
+  open. Entry with `--reset` and with no valid image was tested on the board. Entry with Button 1 and
+  with `--console` is not tested on hardware yet.
+- The development kit's debug port is open. A product build would have to lock it (APPROTECT) and
+  leave out the serial console (`-Dapp_CONFIG_APP_CONSOLE=n`). This repository has no such build yet.
+- A product build should also narrow serial recovery. Dropping `CONFIG_BOOT_SERIAL_WAIT_FOR_DFU` means
+  a board with a valid image needs Button 1. Button 1 and the no-valid-image state still take any
+  image signed with this key. Building MCUboot without `CONFIG_MCUBOOT_SERIAL` removes the path. A
+  version check is an open design: `boot_serial_uploaded_hook` runs after the old image has been
+  overwritten, so the old version would have to be stored elsewhere, and a refusal at that point
+  leaves no image. `CONFIG_BOOT_IMAGE_ACCESS_HOOKS` is off in this build. None of this is tested.
+- MCUboot does not check the network core's image. It is flashed over the debug port. It has
+  no radio stack and no keys.
+- The board's device key is not isolated from the application. It is generated on the board and
+  never leaves it, and TF-M stores it encrypted. But it is created as exportable and stored as
+  an ordinary Protected Storage item, each TLS setup reads it into the non-secure heap, and that
+  buffer is freed without being wiped. Code running in the non-secure application could read it
+  and act as that board until its certificate is retired. It could not reach other boards or get
+  unsigned firmware accepted. A real fix needs a non-exportable PSA key used as an opaque key, and
+  this SDK's socket TLS layer shows no way to pass one.
+- The firmware sets no cipher list. It offers the 16 non-PSK suites compiled in, all ECDHE: 4
+  with GCM, 4 with CCM (2 of them CCM-8) and 8 with CBC (4 of them with HMAC-SHA1). The server
+  chooses, and TLS's Finished check stops a network attacker from forcing a weaker choice. The
+  handshake was not captured, so this document does not say which suite AWS picks.
+- The audit log shows what reached the API function. A rewrite of an entry can be detected only
+  while the log keeps its digest (90 days). Entries stored before the digest code was deployed have
+  no digest and cannot be checked. The role could still add false entries and false lines: this
+  detects changes to what was recorded, not lies told by the function. An AWS administrator can do
+  anything to the table, and the CloudTrail record does not cover items in it.
+- The CloudTrail record starts when `cloud/trail.sh` first runs, so it shows nothing older. It holds
+  management events only, so it does not show a function being invoked or an image being stored.
+- Deployment, `cloud/users.sh`, provisioning and the hardware bench run as the AWS account's root
+  user. Root has MFA on and no access keys (confirmed from AWS on 2026-10-31). But a signed-in session
+  lasts up to 12 hours and has full rights. The least-privilege row above covers the boards and the
+  console's roles, not the operator. These jobs should move to an IAM user or to IAM Identity Center
+  (SSO), with root kept for account-level tasks.
+- `scripts/ota.sh` and `firmware/tests/hil/ota_bench.py` invoke the API function directly, with
+  `aws lambda invoke` and hand-written token claims. This bypasses API Gateway and sign-in: no token
+  check, no password, no authenticator code, no request limit and no line in the access log. The
+  function trusts the claims, because it expects API Gateway to have checked them. It still asks
+  Cognito whether the named person is an active release manager, runs its upload checks and writes
+  an audit entry in that person's name. So an audit entry does not prove that the person signed in.
+  The bench's request IDs start with `bench-`, but a caller could change that. Doing this takes AWS
+  rights to invoke the function, which only an AWS administrator has. The update to 1.2.0 went this
+  way.
+- The hardware bench works on the production stack. Its `cranium-bench-…` jobs and the images it
+  stores directly leave no audit entry.
+- Sign-in can be blocked from outside. Cognito locks an account for a while after repeated wrong
+  passwords, and the attempts need no credential. Sign-in names are e-mail addresses, so anyone who
+  knows an address can keep that person from signing in. This comes from AWS's documentation and was
+  not tested here. Recovery: add an account at another address with `cloud/users.sh`, or use the AWS
+  CLI stop in `cloud/README.md`.
+- API Gateway checks a token offline, so signing out does not end a copy of the token: it works
+  for reading and writing until it expires, at most 60 minutes. A removed or disabled user cannot
+  write, and reads for at most another minute. During a Cognito outage such a user may read
+  until the token expires.
+- The signature is ECDSA P-256, by the team's decision. Ed25519 is the possible later upgrade, and
+  it needs a bootloader reflash over the debug port. Post-quantum signatures are not available in
+  this MCUboot.
+
+## Threat model
+
+What is worth protecting: the signing key, each board's device key, the Wi-Fi credentials, the
+console accounts and the audit log. Firmware images hold no secrets.
+
+| Who | What stops them | What is accepted |
+| --- | --- | --- |
+| Someone on the network path | TLS with verified certificates on every connection, and signed images. | They can block traffic. An update then waits or fails, and nothing is installed. |
+| Someone on the internet, with no account | Sign-in with a password and an authenticator code. Uploads need a valid signature. | A flood can use up the API's shared request limit, because an HTTP API has no per-caller limit. Wrong passwords against a known address can keep that person from signing in. The AWS CLI stop still works in both cases, and an administrator can add an account at another address. |
+| A stolen release-manager session | The console cannot sign. Boards verify with their own key, refuse older versions and wait for Button 1. | Until the token expires they can deploy existing releases, cancel and revoke. |
+| A break-in at the API function | The same: the function cannot sign, and boards make the same checks. | Until the code is replaced it holds the API role, with no token limit. It can create jobs, cancel, revoke and add false audit entries. |
+| Code running in the application on one board | MCUboot refuses unsigned firmware. Other boards are out of reach. | That board's device key can be read. Retire its certificate. |
+| Someone holding a development kit | Nothing yet: the debug port is open. | They can read or replace anything on that board. A product build would have to lock the port. This repository has no such build yet. |
+| Someone with the signing key | Nothing on the boards, which would accept the image. Over the air, Button 1 is still needed. With access to the UART, serial recovery takes the image with no button. | The key is a file on the builder's machine. Replacing it means reflashing boards. |
+| An AWS administrator | Nothing in the cloud. The CloudTrail record (`cloud/trail.sh`) and the audit digests show many changes afterwards. | They can change anything in the cloud, and can act in the console as any active release manager by invoking the API function. They cannot sign firmware without the key. Today this is the root user (see [Known limits](#known-limits)). |
 
 ## Cost
 
