@@ -12,6 +12,8 @@ const HEADERS = Object.freeze({
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
   'x-content-type-options': 'nosniff',
+  // The same as the web function sends, on the same names.
+  'strict-transport-security': 'max-age=63072000; includeSubDomains',
 });
 
 // Bodies other than a firmware upload are a few short fields.

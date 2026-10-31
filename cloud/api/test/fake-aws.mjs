@@ -703,16 +703,17 @@ export function apiEvent(method, path, { claims, body, query, requestId, base64 
     requestCount += 1;
     requestId = `local-${String(requestCount).padStart(6, '0')}`;
   }
+  const routeKey = `${method} /api/{proxy+}`;
   const event = {
     version: '2.0',
-    routeKey: 'ANY /api/{proxy+}',
+    routeKey,
     rawPath: path,
     rawQueryString: query === undefined ? '' : new URLSearchParams(query).toString(),
     headers: { 'content-type': 'application/json' },
     requestContext: {
       http: { method, path, protocol: 'HTTP/1.1', sourceIp: '127.0.0.1', userAgent: 'test' },
       requestId,
-      routeKey: 'ANY /api/{proxy+}',
+      routeKey,
       stage: '$default',
     },
     isBase64Encoded: false,

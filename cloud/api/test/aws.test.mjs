@@ -1382,6 +1382,10 @@ test('the Lambda entry point serves a viewer\'s reads through the adapter', asyn
     sdk.reply('GetThingShadowCommand', fails('ResourceNotFoundException', { status: 404 }));
     sdk.reply('QueryCommand', { Items: [] }, { Items: [] });
     sdk.reply('ListJobsCommand', { jobs: [] });
+    sdk.reply('AdminGetUserCommand', {
+      Enabled: true, UserStatus: 'CONFIRMED', UserAttributes: [{ Name: 'email', Value: 'viewer@example.org' }],
+    });
+    sdk.reply('AdminListGroupsForUserCommand', { Groups: [{ GroupName: 'viewers' }] });
     const claims = accessClaims({ sub: '11111111-2222-4333-8444-555555555555', groups: ['viewers'] });
     responses = [];
     for (const path of ['/api/devices', '/api/firmware', '/api/deployments', '/api/audit']) {
@@ -1397,9 +1401,11 @@ test('the Lambda entry point serves a viewer\'s reads through the adapter', asyn
   assert.deepEqual(JSON.parse(responses[2].body), { deployments: [] });
   assert.deepEqual(JSON.parse(responses[3].body), { entries: [], next: null });
 
-  // What a viewer's reads ask of AWS: nothing that writes, and no Cognito call.
-  assert.deepEqual(sdk.sent.map((entry) => entry.command),
-    ['ListThingsInThingGroupCommand', 'GetThingShadowCommand', 'QueryCommand', 'ListJobsCommand', 'QueryCommand']);
+  // What a viewer's reads ask of AWS: nothing that writes, and Cognito once for all four.
+  assert.deepEqual(sdk.sent.map((entry) => entry.command), [
+    'AdminGetUserCommand', 'AdminListGroupsForUserCommand', 'ListThingsInThingGroupCommand', 'GetThingShadowCommand',
+    'QueryCommand', 'ListJobsCommand', 'QueryCommand',
+  ]);
   assert.deepEqual(sdk.inputs('QueryCommand').map((input) => input.TableName), ['local-state', 'local-audit']);
   assert.deepEqual(sdk.inputs('ListThingsInThingGroupCommand')[0].thingGroupName, 'cranium-devices');
   assert.deepEqual(lines.map((line) => [line.route, line.status]), [

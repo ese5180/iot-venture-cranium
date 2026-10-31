@@ -2,11 +2,17 @@
 // something, whatever becomes of it, and reading the log back a page at a time.
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
-  ACTIONS, OUTCOMES, auditItem, decodeCursor, encodeCursor, entryFromItem,
+  ACTIONS, OUTCOMES, auditDigest, auditItem, decodeCursor, encodeCursor, entryFromItem,
 } from '../src/lib/audit.mjs';
+import { compareAudit } from '../verify-audit.mjs';
 import { createTestConsole, fixture, manualTimers } from './fake-aws.mjs';
 
 const BOARD = 'cranium-00000000000000aa';
@@ -493,4 +499,154 @@ test('items in the table that are not entries are skipped, not shown', async () 
   const response = await call('GET', '/api/audit', { as: viewer });
   assert.equal(response.status, 200);
   assert.deepEqual(response.body.entries.map((entry) => entry.requestId), ['r2']);
+});
+
+test('the digest of an entry follows what is stored, in any order of its keys', () => {
+  const item = auditItem({
+    at: NOW,
+    requestId: 'req-1',
+    actor: { sub: 'sub-1', email: 'manager@example.org' },
+    action: 'firmware.revoke',
+    target: '1.2.3+4',
+    outcome: 'ok',
+    detail: { version: '1.2.3+4', reason: 'bad' },
+  });
+  const digest = auditDigest(item);
+  assert.match(digest, /^[0-9a-f]{64}$/);
+
+  // As the table gives it back: with the partition key, the keys in another order.
+  const reordered = Object.fromEntries(Object.entries({ ...item, pk: 'AUD' }).reverse());
+  reordered.actor = { email: item.actor.email, sub: item.actor.sub };
+  reordered.detail = { reason: 'bad', version: '1.2.3+4' };
+  assert.equal(auditDigest(reordered), digest);
+
+  // Every field counts.
+  for (const changed of [
+    { outcome: 'denied' }, { target: '1.2.3+5' }, { action: 'firmware.upload' }, { at: 'x' }, { sk: 'x' }, { requestId: 'x' },
+    { actor: { ...item.actor, sub: 'sub-2' } }, { actor: { ...item.actor, email: 'other@example.org' } },
+    { detail: { ...item.detail, reason: 'fine' } }, { detail: { version: '1.2.3+4' } },
+  ]) {
+    assert.notEqual(auditDigest({ ...item, ...changed }), digest, JSON.stringify(changed));
+  }
+});
+
+test('a digest is logged for a stored entry only, and says nothing about the request', async () => {
+  const context = setup();
+  const { fake, manager, logs, call } = context;
+  const digests = () => logs.filter((line) => line.event === 'audit_entry');
+
+  await call('POST', '/api/firmware', { as: manager, body: uploadBody(), requestId: 'req-ok' });
+  assert.equal(digests().length, 1);
+  const [stored] = fake.auditLog();
+  assert.equal(digests()[0].digest, auditDigest(stored));
+  const text = JSON.stringify(digests());
+  for (const hidden of [manager.email, 'zephyr.signed.bin', '1.2.3+4', BOARD]) {
+    assert.equal(text.includes(hidden), false, hidden);
+  }
+
+  // An entry that could not be stored has no digest, and the failure is logged instead.
+  logs.length = 0;
+  fake.failNext('putAudit');
+  await call('POST', '/api/deployments', { as: manager, body: { version: '1.2.3+4', things: [BOARD] } });
+  assert.deepEqual(digests(), []);
+  assert.ok(logs.some((line) => line.event === 'audit_write_failed'));
+});
+
+test('the verifier finds a rewritten entry and a deleted one', async () => {
+  const context = setup();
+  const { fake, manager, viewer, logs, call } = context;
+  await call('POST', '/api/firmware', { as: manager, body: uploadBody(), requestId: 'req-a' });
+  await call('POST', '/api/firmware', { as: viewer, body: uploadBody(), requestId: 'req-b' });
+  await call('POST', '/api/firmware/1.2.3+4/revoke', { as: manager, body: { reason: 'bad' }, requestId: 'req-c' });
+
+  // As the two AWS CLI commands print them. Lambda puts a prefix before each line.
+  const attribute = (value) => (typeof value === 'string'
+    ? { S: value }
+    : { M: Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, attribute(inner)])) });
+  const asTable = (item) => attribute({ ...item, pk: 'AUD' }).M;
+  const messages = logs.map((line) => `2026-10-31T17:00:00.000Z\tid\tINFO\t${JSON.stringify(line)}\n`);
+  const items = fake.auditLog();
+  const ids = (entries) => entries.map((entry) => entry.requestId);
+  assert.deepEqual(ids(items).sort(), ['req-a', 'req-b', 'req-c']);
+
+  const clean = compareAudit(items.map(asTable), messages);
+  assert.deepEqual([clean.verified.sort(), clean.changed, clean.missing, clean.noLine],
+    [['req-a', 'req-b', 'req-c'], [], [], []]);
+
+  // Somebody makes the refused request look like it never was one, and removes the
+  // revocation from the record.
+  const tampered = items.filter((item) => item.requestId !== 'req-c').map((item) => (
+    item.requestId === 'req-b' ? { ...item, outcome: 'ok' } : item));
+  const found = compareAudit(tampered.map(asTable), messages);
+  assert.deepEqual([found.verified, found.changed, found.missing, found.noLine],
+    [['req-a'], ['req-b'], ['req-c'], []]);
+
+  // An entry older than the log is no alarm.
+  const aged = compareAudit(items.map(asTable), []);
+  assert.deepEqual([aged.verified, aged.changed, aged.missing, aged.noLine.sort()],
+    [[], [], [], ['req-a', 'req-b', 'req-c']]);
+
+  // Lines that are something else are passed over.
+  const noise = compareAudit([], ['START RequestId: x', '{not json', '{"event":"other"}', 'a { b']);
+  assert.deepEqual(noise, { verified: [], changed: [], missing: [], noLine: [], unlogged: [] });
+
+  // A request logs one digest. A rewritten entry with a second line for the new digest is
+  // still a rewritten entry, in whichever order the lines come.
+  const rewritten = { ...items[0], outcome: 'denied' };
+  const second = JSON.stringify({ event: 'audit_entry', requestId: items[0].requestId, digest: auditDigest(rewritten) });
+  for (const log of [[...messages, second], [second, ...messages]]) {
+    const twice = compareAudit([rewritten, ...items.slice(1)].map(asTable), log);
+    assert.deepEqual(twice.changed, [items[0].requestId]);
+    assert.equal(twice.verified.includes(items[0].requestId), false);
+  }
+  // The same line twice is one digest, and no alarm.
+  const own = messages.find((message) => message.includes(items[0].requestId));
+  assert.deepEqual(compareAudit([items[0]].map(asTable), [own, own]).verified, [items[0].requestId]);
+
+  // With no line: older than the first line in the log it cannot be compared, and younger
+  // it should have one. A forged entry carries today's date and no line.
+  const at = (item) => Date.parse(item.sk.split('#')[0]);
+  const before = compareAudit([items[0]].map(asTable), [], { logStart: at(items[0]) + 1 });
+  assert.deepEqual([before.noLine, before.unlogged], [[items[0].requestId], []]);
+  const after = compareAudit([items[0]].map(asTable), [], { logStart: at(items[0]) - 1 });
+  assert.deepEqual([after.noLine, after.unlogged], [[], [items[0].requestId]]);
+});
+
+test('verify-audit.mjs says what it found, and its exit status says whether to look', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'cranium-verify-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const entry = (requestId, at) => auditItem({
+    at, requestId, actor: { sub: 'a', email: 'a@example.invalid' }, action: 'firmware.revoke', target: '1.0.0+1', outcome: 'ok', detail: {},
+  });
+  const dynamo = (item) => ({
+    pk: { S: 'AUD' },
+    ...Object.fromEntries(Object.entries(item).map(([key, value]) => [key, typeof value === 'string'
+      ? { S: value }
+      : { M: Object.fromEntries(Object.entries(value).map(([name, text]) => [name, { S: text }])) }])),
+  });
+  const lineOf = (item, timestamp, digest = auditDigest(item)) => ({
+    timestamp, message: JSON.stringify({ event: 'audit_entry', requestId: item.requestId, digest }),
+  });
+  const run = (items, events) => {
+    const [audit, log] = [join(directory, 'audit.json'), join(directory, 'digests.json')];
+    writeFileSync(audit, JSON.stringify({ Items: items.map(dynamo) }));
+    writeFileSync(log, JSON.stringify({ events }));
+    return spawnSync(process.execPath, [fileURLToPath(new URL('../verify-audit.mjs', import.meta.url)), audit, log], { encoding: 'utf8' });
+  };
+
+  const first = entry('req-first', 1000);
+  const good = run([first], [lineOf(first, 1000)]);
+  assert.equal(good.status, 0, good.stderr);
+  assert.match(good.stdout, /^1 entries match their digest, 0 do not, 0 are missing, 0 should have a line and have none\. 0 are older/);
+
+  const forged = entry('req-forged', 5000);
+  const flagged = run([first, forged], [lineOf(first, 1000)]);
+  assert.equal(flagged.status, 1);
+  assert.match(flagged.stdout, /^UNLOGGED req-forged: /m);
+
+  const old = entry('req-old', 500);
+  assert.equal(run([old, first], [lineOf(first, 1000)]).status, 0, 'older than the log');
+  assert.equal(run([first], [lineOf(first, 1000), lineOf(first, 1001, 'f'.repeat(64))]).status, 1, 'two digests for one request');
+  // Nothing in it says who: a request id is all that is printed.
+  assert.doesNotMatch(flagged.stdout, /example\.invalid/);
 });

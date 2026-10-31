@@ -8,13 +8,17 @@
 # 2. GET /api/me without a token answers 401.
 # 3. The managed login page loads for the real app client and redirect URI. After a
 #    first deployment this can take a few minutes, so it is retried for 5 minutes.
-# 4. The API function, invoked directly with the event of a signed-in viewer, answers
-#    200 for the device, firmware, deployment and activity lists. That exercises the
-#    function's permissions and every AWS SDK client it uses, without a password or
-#    an authenticator code.
+# 4. The API function, invoked directly with the event of a viewer, refuses a subject
+#    that has no account. That proves the live check on reads, and that the function
+#    can reach Cognito.
+# 5. The same event with the subject of a real active account answers 200 for the
+#    device, firmware, deployment and activity lists. That exercises the function's
+#    permissions and every AWS SDK client it uses, without a password or an
+#    authenticator code. Without an active account yet, this step is skipped and says so.
 #
-# The event in step 4 is made up (subject 00000000-0000-0000-0000-000000000000) and
-# only reads. It leaves one line per request in the API log and nothing else.
+# The events in steps 4 and 5 are made up and only read. They leave one line per request
+# in the API log, whose request id starts with "smoke-", and nothing else. Step 5 does
+# name a real person's subject in those lines; that person's address is never read.
 #
 # The profile and the Region come from AWS_PROFILE and AWS_REGION (default us-east-1).
 # Needs the AWS CLI v2, curl and openssl. Temporary files stay in cloud/.deploy/.
@@ -43,6 +47,7 @@ USER_POOL_ID=""
 API_FUNCTION=""
 LOGIN_STATUS=""
 LOGIN_URL=""
+INVOKE_ERROR=""
 
 # die <message> [further lines ...]
 die() {
@@ -202,13 +207,13 @@ check_login_page() {
 # The event API Gateway hands to the function for "GET <path>" from a signed-in
 # viewer. Claims arrive as strings, and the groups as one string in brackets.
 api_event() {
-  local path="$1" now request_id
+  local path="$1" sub="$2" now request_id
   now="$(date +%s)"
   request_id="smoke-$(openssl rand -hex 8)"
   cat << EOF
 {
   "version": "2.0",
-  "routeKey": "ANY /api/{proxy+}",
+  "routeKey": "GET /api/{proxy+}",
   "rawPath": "$path",
   "rawQueryString": "",
   "headers": {
@@ -232,9 +237,9 @@ api_event() {
           "iss": "https://cognito-idp.$AWS_REGION.amazonaws.com/$USER_POOL_ID",
           "jti": "$request_id",
           "scope": "openid cranium/console",
-          "sub": "$SMOKE_SUB",
+          "sub": "$sub",
           "token_use": "access",
-          "username": "$SMOKE_SUB",
+          "username": "$sub",
           "version": "2"
         },
         "scopes": ["cranium/console"]
@@ -250,7 +255,7 @@ api_event() {
       "userAgent": "cranium-smoke"
     },
     "requestId": "$request_id",
-    "routeKey": "ANY /api/{proxy+}",
+    "routeKey": "GET /api/{proxy+}",
     "stage": "\$default",
     "time": "$(date -u '+%d/%b/%Y:%H:%M:%S +0000')",
     "timeEpoch": ${now}000
@@ -261,30 +266,80 @@ api_event() {
 EOF
 }
 
-# check_api_route <path>
-check_api_route() {
-  local path="$1" name="the API function answers 200 for GET $1 as a viewer"
-  local error status
-  api_event "$path" > "$WORK/event.json"
+# The subject of one active account, or nothing. Any member will do: the event only reads.
+active_subject() {
+  local group sub
+  for group in viewers release-managers; do
+    sub="$(aws cognito-idp list-users-in-group --user-pool-id "$USER_POOL_ID" --group-name "$group" \
+      --query "Users[?Enabled && UserStatus=='CONFIRMED'] | [0].Attributes[?Name=='sub'] | [0].Value" \
+      --output text)" || return 1
+    case "$sub" in
+      ""|None) ;;
+      *)
+        printf '%s\n' "$sub"
+        return 0
+        ;;
+    esac
+  done
+}
+
+# invoke_api <path> <sub>: writes the function's answer to answer.json and prints
+# nothing. Returns non-zero and sets INVOKE_ERROR if the function could not answer.
+invoke_api() {
+  local error
+  api_event "$1" "$2" > "$WORK/event.json"
   if ! error="$(aws lambda invoke --function-name "$API_FUNCTION" \
       --payload "fileb://$WORK/event.json" --query FunctionError --output text \
       "$WORK/answer.json" 2>&1)"; then
-    fail "$name" "$error"
+    INVOKE_ERROR="$error"
+    return 1
+  fi
+  if [ "$error" != None ]; then
+    INVOKE_ERROR="the function failed ($error); see cloud/logs.sh api"
+    return 1
+  fi
+}
+
+answer_status() {
+  sed -n 's/.*"statusCode":\([0-9][0-9]*\).*/\1/p' "$WORK/answer.json"
+}
+
+check_unknown_subject_is_refused() {
+  local name="the API function refuses a read for a subject that has no account"
+  local status
+  if ! invoke_api /api/devices "$SMOKE_SUB"; then
+    fail "$name" "$INVOKE_ERROR"
+    return 0
+  fi
+  # A 200 means that the live check is missing, or that it could not ask Cognito, which
+  # lets a read go on. The API log says which: look for live_check_failed.
+  status="$(answer_status)"
+  if [ "$status" = 403 ] && grep -q 'account_inactive' "$WORK/answer.json"; then
+    pass "$name"
+  else
+    fail "$name" "it answered ${status:-without a status}; see cloud/logs.sh api"
+  fi
+}
+
+# check_api_route <path> <sub>
+check_api_route() {
+  local path="$1" sub="$2" name="the API function answers 200 for GET $1 as a member"
+  local status
+  if ! invoke_api "$path" "$sub"; then
+    fail "$name" "$INVOKE_ERROR"
     return 0
   fi
   # The answer itself is never printed: it can hold names and e-mail addresses.
-  if [ "$error" != None ]; then
-    fail "$name" "the function failed ($error); see cloud/logs.sh api"
-  elif grep -q '"statusCode":200' "$WORK/answer.json"; then
+  status="$(answer_status)"
+  if [ "$status" = 200 ]; then
     pass "$name"
   else
-    status="$(sed -n 's/.*"statusCode":\([0-9][0-9]*\).*/\1/p' "$WORK/answer.json")"
     fail "$name" "it answered ${status:-without a status}; see cloud/logs.sh api"
   fi
 }
 
 main() {
-  local path
+  local path sub
   case "${1:-}" in
     "") ;;
     -h|--help)
@@ -317,9 +372,16 @@ main() {
   check_console
   check_token_is_required
   check_login_page
-  for path in /api/devices /api/firmware /api/deployments /api/audit; do
-    check_api_route "$path"
-  done
+  check_unknown_subject_is_refused
+  sub="$(active_subject)" || die "could not read the accounts of the user pool"
+  if [ -n "$sub" ]; then
+    for path in /api/devices /api/firmware /api/deployments /api/audit; do
+      check_api_route "$path" "$sub"
+    done
+  else
+    echo "skipped the device, firmware, deployment and activity lists: nobody has finished"
+    echo "a first sign-in yet (cloud/users.sh add <email> release-manager)"
+  fi
 
   echo
   if [ "$FAILURES" -gt 0 ]; then

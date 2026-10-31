@@ -8,7 +8,7 @@
 #   1. cancels the cranium-* jobs in AWS IoT and deletes them,
 #   2. detaches and deletes the boards' certificates and deletes their things,
 #   3. empties the firmware bucket and the artifacts bucket, all versions,
-#   4. turns off the deletion protection of the user pool,
+#   4. turns off the deletion protection of the user pool and the tables,
 #   5. deletes the stacks cranium-ota and cranium-ota-bootstrap,
 #   6. deletes what the stack keeps on purpose: the user pool with its accounts, the
 #      firmware bucket and the two tables.
@@ -16,8 +16,9 @@
 # It can be run again if it stops halfway. Boards keep their key and certificate in
 # flash, but AWS IoT no longer knows them: provision them again after a new deployment.
 #
-# Not touched: the budget stack (cloud/infra/budget.yaml) and the log group
-# AWSIotLogsV2, which belongs to AWS IoT in this account and not to the stack.
+# Not touched: the budget stack (cloud/infra/budget.yaml), the account's trail and its log
+# files (cloud/infra/trail.yaml, on purpose: the record outlives the console), and the log
+# group AWSIotLogsV2, which belongs to AWS IoT in this account and not to the stack.
 #
 # The profile and the Region come from AWS_PROFILE and AWS_REGION (default us-east-1).
 # What it needs to remember between runs is kept in cloud/.deploy/.
@@ -438,10 +439,27 @@ delete_firmware_bucket() {
 
 # delete_table <what> <table>
 delete_table() {
-  local out
+  local out protected
   if [ -z "$2" ]; then
     echo "  the $1 is not known; skipped"
     return 0
+  fi
+  # Usually off by now, through the stack in step 4. Not if the stack was unhealthy or
+  # is gone already, for example in a second run of this script.
+  if ! protected="$(aws dynamodb describe-table --table-name "$2" \
+      --query Table.DeletionProtectionEnabled --output text 2>&1)"; then
+    case "$protected" in
+      *ResourceNotFoundException*)
+        echo "  the $1 is already gone"
+        return 0
+        ;;
+    esac
+    die "$protected"
+  fi
+  if [ "$protected" = True ]; then
+    aws dynamodb update-table --table-name "$2" --no-deletion-protection-enabled > /dev/null
+    # A table that is being updated cannot be deleted yet.
+    aws dynamodb wait table-exists --table-name "$2"
   fi
   if ! out="$(aws dynamodb delete-table --table-name "$2" 2>&1)"; then
     case "$out" in
@@ -484,7 +502,7 @@ main() {
   empty_bucket_if_present "firmware bucket" "$FIRMWARE_BUCKET"
   empty_bucket_if_present "artifacts bucket" "$ARTIFACTS_BUCKET"
 
-  step "4/6 User pool deletion protection"
+  step "4/6 Deletion protection of the user pool and the tables"
   unprotect_user_pool
 
   step "5/6 Stacks"
@@ -503,7 +521,7 @@ main() {
   echo
   echo "The console is removed. AWS IoT logging for the account is switched off again."
   echo "Left in place: the AWS IoT log group AWSIotLogsV2, whose entries expire with its"
-  echo "retention period, and the budget stack."
+  echo "retention period, the budget stack, and the trail with its log files if it exists."
   echo "To delete the log group:  aws logs delete-log-group --log-group-name AWSIotLogsV2"
 }
 

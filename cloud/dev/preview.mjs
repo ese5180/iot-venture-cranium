@@ -8,13 +8,14 @@
  * at the console and trying its flows.
  *
  *   node cloud/dev/preview.mjs [--scenario <name>] [--viewer] [--live] [--port <number>]
- *                              [--repeated-cancel <refused|accepted|ignored>]
+ *                              [--repeated-cancel <refused|accepted|ignored>] [--home]
  *
  * What stands in for the parts that are AWS in production:
  *
- *   API Gateway    The three routes of the HTTP API and its JWT authorizer. A request
- *                  to /api/ needs the access token that the sign-in below issued, and
- *                  reaches the API function as the event the gateway would build.
+ *   API Gateway    The routes of the HTTP API and its JWT authorizer. A request to
+ *                  /api/ needs the access token that the sign-in below issued, and
+ *                  reaches the API function as the event the gateway would build. What
+ *                  no route claims goes to the web function, as it does when deployed.
  *   Cognito        The four addresses of the managed login that the console uses:
  *                  /oauth2/authorize, /oauth2/token, /oauth2/revoke and /logout. They
  *                  are served on the next port, so that they are another origin as in
@@ -44,7 +45,9 @@
  * cancellation, carry a started update through, and take their two buttons from the
  * terminal.
  *
- * The page is the one that is deployed. Nothing in web/ knows about the preview.
+ * The page is the one that is deployed. Nothing in web/ knows about the preview. With
+ * --home the requests carry a host name that is on the web function's list of home page
+ * names, so that the public home page is served by the same routing as when deployed.
  *
  * No dependencies.
  */
@@ -75,7 +78,12 @@ const CODE_SECONDS = 300;
 
 const WEB_ROOT = 'GET /';
 const WEB_ASSETS = 'GET /assets/{proxy+}';
-const API_ROUTE = 'ANY /api/{proxy+}';
+const WEB_DEFAULT = '$default';
+const API_READ = 'GET /api/{proxy+}';
+const API_WRITE = 'POST /api/{proxy+}';
+
+// What the requests of --home are addressed to. A reserved domain: it can never exist.
+const HOME_HOST = 'home.preview.invalid';
 
 // The largest request an HTTP API accepts, and far more than a sign-in form needs.
 const MAX_REQUEST_BYTES = 10 * 1024 * 1024;
@@ -892,6 +900,7 @@ export const SCENARIOS = Object.freeze({
  * @param {string} [options.scenario]   a name from SCENARIOS
  * @param {boolean} [options.viewer]    sign in as the local viewer, not the release manager
  * @param {boolean} [options.live]      let the boards act by themselves
+ * @param {boolean} [options.home]      serve the public home page instead of the console
  * @param {string} [options.repeatedCancel]  what the stand-in does with a forced
  *                                      cancellation of a deployment that is cancelled
  *                                      already: "refused", "accepted" or "ignored"
@@ -903,7 +912,7 @@ export const SCENARIOS = Object.freeze({
  * @param {() => number} [options.now]  the clock, epoch milliseconds
  */
 export async function createPreview({
-  scenario = 'empty', viewer = false, live = false, repeatedCancel = 'refused', host = DEFAULT_HOST,
+  scenario = 'empty', viewer = false, live = false, home = false, repeatedCancel = 'refused', host = DEFAULT_HOST,
   port = DEFAULT_PORT, log = () => {}, say = () => {}, now = Date.now,
 } = {}) {
   requireLoopback(host);
@@ -955,7 +964,7 @@ export async function createPreview({
       exp: expiresAt ?? Math.floor(now() / 1000) + TOKEN_SECONDS,
     });
     return app(gatewayEvent({
-      routeKey: API_ROUTE, method, path, query, headers, host: consoleHost, body, claims,
+      routeKey: method === 'GET' ? API_READ : API_WRITE, method, path, query, headers, host: consoleHost, body, claims,
     }));
   }
 
@@ -973,16 +982,16 @@ export async function createPreview({
     const { method, headers } = request;
 
     // The routes of the HTTP API. As deployed, {proxy+} also matches nothing at all
-    // after the slash: /api/ reaches the authorizer, /api does not.
-    let routeKey = null;
+    // after the slash: /api/ reaches the authorizer, /api does not. The API takes only
+    // these two methods, and what no route claims goes to the web function.
+    let routeKey = WEB_DEFAULT;
     if (method === 'GET' && path === '/') routeKey = WEB_ROOT;
     else if (method === 'GET' && path.startsWith('/assets/')) routeKey = WEB_ASSETS;
-    else if (path.startsWith('/api/')) routeKey = API_ROUTE;
+    else if (method === 'GET' && path.startsWith('/api/')) routeKey = API_READ;
+    else if (method === 'POST' && path.startsWith('/api/')) routeKey = API_WRITE;
 
-    if (routeKey === null) {
-      sendGateway(response, 404, 'Not Found');
-    } else if (routeKey !== API_ROUTE) {
-      const event = gatewayEvent({ routeKey, method, path, query, headers, host: consoleHost });
+    if (routeKey !== API_READ && routeKey !== API_WRITE) {
+      const event = gatewayEvent({ routeKey, method, path, query, headers, host: home ? HOME_HOST : consoleHost });
       sendResult(response, await web(event));
     } else {
       // The JWT authorizer: a valid token that carries the scope of the route. The
@@ -1061,6 +1070,7 @@ export async function createPreview({
     loginOrigin: `http://${loginHost}`,
     scope: CLIENT_SCOPES.join(' '),
     redirectUri: `http://${consoleHost}/`,
+    homeHosts: home ? [HOME_HOST] : [],
     log: (line) => log({ function: 'web', ...line }),
   });
 
@@ -1081,6 +1091,7 @@ export async function createPreview({
     scenario,
     user,
     live,
+    home,
     fake,
     boards,
     signIn,
@@ -1104,6 +1115,7 @@ const USAGE = `Usage: node cloud/dev/preview.mjs [options]
   --scenario <name>   start in the state this scenario builds (default: empty)
   --viewer            sign in as a viewer instead of a release manager
   --live              let the boards act by themselves; type 1 or 2 to press a button
+  --home              serve the public home page instead of the console
   --port <number>     port of the console (default ${DEFAULT_PORT}); sign-in uses the next one
   --host <address>    a loopback address (default ${DEFAULT_HOST}); any other is refused
   --repeated-cancel <how>
@@ -1121,7 +1133,7 @@ ${Object.entries(SCENARIOS).map(([name, { summary }]) => `  ${name.padEnd(20)}${
 /** The options the preview was started with. Throws a UsageError for anything else. */
 export function parseArguments(argv) {
   const options = {
-    scenario: 'empty', viewer: false, live: false, verbose: false, help: false,
+    scenario: 'empty', viewer: false, live: false, home: false, verbose: false, help: false,
     host: DEFAULT_HOST, port: DEFAULT_PORT, repeatedCancel: REPEATED_CANCEL[0],
   };
   // "--port=8000" is "--port 8000".
@@ -1150,6 +1162,8 @@ export function parseArguments(argv) {
       options.viewer = true;
     } else if (word === '--live') {
       options.live = true;
+    } else if (word === '--home') {
+      options.home = true;
     } else if (word === '--verbose') {
       options.verbose = true;
     } else if (word === '--help' || word === '-h') {
@@ -1161,7 +1175,19 @@ export function parseArguments(argv) {
   return options;
 }
 
-function banner({ consoleUrl, loginOrigin, user, scenario, live }) {
+function banner({ consoleUrl, loginOrigin, user, scenario, live, home }) {
+  if (home) {
+    return `
+  Cranium home page: LOCAL PREVIEW
+
+    Home page   ${consoleUrl}
+
+  The page is served by the real web function, as the host name ${HOME_HOST}. Its
+  links go to the real addresses of the console and the repository.
+
+  Stop with Ctrl+C.
+`;
+  }
   const boards = live
     ? 'live: type 1 or 2 and Enter to press that button on a waiting board'
     : 'stay where the scenario left them (--live lets them act)';

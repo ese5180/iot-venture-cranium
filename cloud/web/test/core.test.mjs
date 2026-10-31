@@ -303,6 +303,14 @@ test('a chosen file is reviewed against the slot and the releases', () => {
   assert.match(review({}, { slotSize: 933888, releases: [] }).notes[1].text, /first release/);
   // Before the list of releases has arrived nothing is claimed about the slot or the others.
   assert.deepEqual(review({}, null), { blocked: false, notes: [] });
+
+  // What is registered already says for certain that the server will refuse the file.
+  assert.equal(review({ digest: 'aa' }).doomed, true, 'the same file');
+  assert.equal(review({ header: { ...header, version: '1.1.0+7' } }).doomed, true, 'a version in use');
+  assert.equal(notNewer.doomed, true, 'an older version');
+  assert.equal(review({ header: { ...header, version: '0.0.0+0' } }).doomed, true, 'version zero');
+  assert.equal(review({ header: { ...header, version: '1.10.0+0' } }).doomed, false);
+  assert.equal(review({}, { slotSize: 933888, releases: [] }).doomed, false, 'the first release');
 });
 
 // Sign-in.
@@ -418,8 +426,10 @@ test('starting a sign-in sends the browser to the login page with state and an S
   assert.equal(`${authorize.origin}${authorize.pathname}`, 'https://login.example/oauth2/authorize');
   const query = authorize.searchParams;
   assert.deepEqual([...query.keys()].sort(), [
-    'client_id', 'code_challenge', 'code_challenge_method', 'redirect_uri', 'response_type', 'scope', 'state',
+    'client_id', 'code_challenge', 'code_challenge_method', 'prompt', 'redirect_uri', 'response_type', 'scope', 'state',
   ]);
+  // Every sign-in asks for the password and the code, also while the login page's cookie is valid.
+  assert.equal(query.get('prompt'), 'login');
   assert.equal(query.get('response_type'), 'code');
   assert.equal(query.get('client_id'), 'client-1');
   assert.equal(query.get('redirect_uri'), 'https://console.example/');
@@ -1208,7 +1218,7 @@ test('a clock that is far off is corrected from the server\'s Date header', () =
 
 // Polling.
 
-test('a deployment is polled every 3 s while installing, every 10 s while waiting, otherwise not', () => {
+test('a deployment is polled every 3 s while a board can move, every 10 s while it cannot, otherwise not', () => {
   assert.equal(core.pollInterval(['SUCCEEDED', 'IN_PROGRESS', 'QUEUED']), 3000);
   assert.equal(core.pollInterval(['QUEUED', 'IN_PROGRESS']), 3000);
   assert.equal(core.pollInterval(['SUCCEEDED', 'QUEUED', 'FAILED']), 10000);
@@ -1222,9 +1232,19 @@ test('a deployment is polled every 3 s while installing, every 10 s while waitin
   assert.equal(core.summaryActivity(counts({ inProgress: 1, queued: 3 })), 'IN_PROGRESS');
   assert.equal(core.summaryActivity(counts({ queued: 3 })), 'QUEUED');
   assert.equal(core.summaryActivity(counts({ succeeded: 2 })), null);
+  // Someone may be standing at a board that is online: the summary is watched as closely
+  // as a board that is at work, once the board list has said that one is.
+  const waiting = { ...counts({ queued: 1 }), things: ['a', 'b'] };
+  assert.equal(core.summaryActivity(waiting, [{ thing: 'a', online: false }, { thing: 'b', online: false }]), 'QUEUED');
+  assert.equal(core.summaryActivity(waiting, [{ thing: 'a', online: false }, { thing: 'b', online: true }]), 'IN_PROGRESS');
+  assert.equal(core.summaryActivity(waiting, [{ thing: 'c', online: true }]), 'QUEUED');
+
+  assert.equal(core.executionActivity({ status: 'QUEUED', online: true }), 'IN_PROGRESS');
+  assert.equal(core.executionActivity({ status: 'QUEUED', online: false }), 'QUEUED');
+  assert.equal(core.executionActivity({ status: 'CANCELED', online: true }), 'CANCELED');
 
   const board = (online, state) => ({ online, ota: state === null ? null : { state } });
-  assert.equal(core.deviceActivity(board(true, 'awaiting_user')), 'QUEUED');
+  assert.equal(core.deviceActivity(board(true, 'awaiting_user')), 'IN_PROGRESS');
   for (const state of ['downloading', 'verifying', 'rebooting', 'testing']) {
     assert.equal(core.deviceActivity(board(true, state)), 'IN_PROGRESS');
     assert.equal(core.deviceActivity(board(false, state)), null, 'an offline board is not waited on');
@@ -1296,6 +1316,55 @@ test('a refused token leads back to sign-in, except where that would go round in
   assert.equal(core.afterUnauthorized({ gate: { waiting: true }, fresh: true }), 'refused');
   assert.equal(core.afterUnauthorized({ gate: { title: 'You are signed out' }, fresh: false }), 'stay');
   assert.equal(core.afterUnauthorized({ gate: { leaving: true }, fresh: true }), 'stay');
+  // With work in hand the console stays, and the request that failed says what happened.
+  assert.equal(core.afterUnauthorized({ gate: null, fresh: false, holding: true }), 'stay');
+  assert.equal(core.afterUnauthorized({ gate: null, fresh: true, holding: true }), 'stay');
+});
+
+test('a board that a cancellation found at work is followed until it has settled', () => {
+  const id = 'cranium-1-1-0-b7-20261010T115900Z-0a0a';
+  const at = Date.parse(NOON);
+  const cancelled = { status: 'CANCELED', startedAt: NOON, lastUpdatedAt: NOON };
+  const board = (state, job = id) => ({ ota: { state, job } });
+  const settling = (execution, device, now = at + 60000) => core.stillSettling(execution, device, id, now);
+
+  assert.equal(settling(cancelled, board('rebooting')), true);
+  assert.equal(settling(cancelled, board('downloading')), true);
+  // The board has moved on, is on to something else, or never said anything.
+  assert.equal(settling(cancelled, board('idle')), false);
+  assert.equal(settling(cancelled, board('rebooting', 'another')), false);
+  assert.equal(settling(cancelled, { ota: null }), false);
+  assert.equal(settling(cancelled, undefined), false);
+  // Withdrawn before it had started, or not cancelled at all: nothing to follow.
+  assert.equal(settling({ ...cancelled, startedAt: null }, board('rebooting')), false);
+  assert.equal(settling({ ...cancelled, status: 'IN_PROGRESS' }, board('rebooting')), false);
+  // A board that never comes back is not followed for ever.
+  assert.equal(settling(cancelled, board('rebooting'), at + 3600000), false);
+});
+
+test('a board that said that it restarts counts as restarting only while it counts as online', () => {
+  const restarting = { online: true, ota: { state: 'rebooting' } };
+  assert.equal(core.isRestarting(restarting), true);
+  assert.equal(core.isRestarting({ ...restarting, online: false }), false);
+  assert.equal(core.isRestarting({ online: true, ota: { state: 'downloading' } }), false);
+  assert.equal(core.isRestarting({ online: true, ota: null }), false);
+});
+
+test('a screen reader hears when a board changes state, and not at every percent', () => {
+  const board = (state, progress = 0) => ({
+    thing: 'cranium-f55e9c7723a34296',
+    online: true,
+    fw: null,
+    ota: { state, job: 'cranium-1-2-3-b5-20261010T115900Z-0a0a', progress, last: 'none', error: '' },
+  });
+  // The first look at a board says nothing: that is not news.
+  const first = core.boardChanges(new Map(), [board('awaiting_user')]);
+  assert.deepEqual(first.said, []);
+  assert.equal(first.seen.size, 1);
+
+  const pressed = core.boardChanges(first.seen, [board('downloading', 10)]);
+  assert.deepEqual(pressed.said, ['cranium-f55e…: Downloading 1.2.3+5.']);
+  assert.deepEqual(core.boardChanges(pressed.seen, [board('downloading', 20)]).said, []);
 });
 
 // Failed requests.
@@ -1398,6 +1467,11 @@ test('a repeated revocation that finds everything in place is a success, and is 
   assert.equal(core.revocationInPlace(new Error('other')), false);
 
   const notice = (result) => core.revocationNotice('1.1.0+7', result);
+  // A board that runs the release is not touched by the revocation. That has to be said.
+  assert.match(notice({ cancelled: [], again: false, running: [THING] }),
+    new RegExp(`^Revoked 1\\.1\\.0\\+7\\. No deployment of it was still open\\. ${THING} still runs it; `));
+  assert.match(notice({ cancelled: null, again: true, running: [THING, THING] }), /2 boards still run it; /);
+  assert.doesNotMatch(notice({ cancelled: [], again: false, running: [] }), /still run/);
   assert.equal(notice({ cancelled: [], again: false }),
     'Revoked 1.1.0+7. No deployment of it was still open.');
   assert.equal(notice({ cancelled: [DEPLOYMENT], again: false }),
@@ -1447,9 +1521,9 @@ const PHASES = [
   'succeeded', 'failed', 'rolled_back', 'declined', 'refused', 'cancelled', 'timed_out', 'removed',
 ];
 const TONES = ['act', 'wait', 'live', 'good', 'warn', 'bad', 'idle'];
-const STEP_STATES = ['done', 'current', 'failed', 'skipped', 'upcoming'];
+const STEP_STATES = ['done', 'current', 'failed', 'stopped', 'skipped', 'upcoming'];
 const STEP_NAMES = [
-  'Offered', 'Approved on the board', 'Downloading', 'Verified', 'Restarting', 'Testing', 'Confirmed',
+  'Offered', 'Approved on the board', 'Downloading', 'Download checked', 'Restarting', 'On trial', 'Confirmed',
 ];
 const STARTED = '2026-10-10T12:01:00Z';
 
@@ -1514,16 +1588,17 @@ test('a step is called by what is true of it: done, being waited for, or where i
   assert.deepEqual(labels(describe('succeeded')), STEP_NAMES);
   assert.deepEqual(labels(describe('waiting_for_device')), STEP_NAMES);
   assert.equal(labels(describe('downloading'))[1], 'Approved on the board');
-  assert.equal(labels(describe('rebooting'))[3], 'Verified');
+  assert.equal(labels(describe('rebooting'))[3], 'Download checked');
 
   // Nobody has approved anything while the board waits for its button, or after Button 2.
   // "Button 1" is one word to a line break: the space in it is a no-break space.
   assert.equal(labels(describe('waiting_for_button'))[1], 'Waiting for Button\u00a01');
   assert.equal(labels(describe('declined'))[1], 'Not approved');
-  assert.equal(labels(describe('refused', { reason: 'not_newer' }))[1], 'Not approved');
+  // A board that refuses has not been turned down by anybody.
+  assert.equal(labels(describe('refused', { reason: 'not_newer' }))[1], 'Refused');
 
   // Nothing is verified while the board is checking, or after the check failed.
-  assert.equal(labels(describe('verifying'))[3], 'Verifying');
+  assert.equal(labels(describe('verifying'))[3], 'Checking the download');
   assert.equal(labels(describe('failed', { reason: 'digest_mismatch' }))[3], 'Check failed');
   assert.equal(labels(describe('failed', { reason: 'header_mismatch' }))[3], 'Check failed');
 
@@ -1535,8 +1610,8 @@ test('a step is called by what is true of it: done, being waited for, or where i
   // and every other step keeps its name.
   for (const [phase, description] of everyDescription()) {
     description.steps.forEach((step, index) => {
-      if (step.state === 'current' || step.state === 'failed') {
-        assert.doesNotMatch(step.label, /^(?:Approved|Verified|Confirmed)/, `${phase}: ${step.label}`);
+      if (step.state === 'current' || step.state === 'failed' || step.state === 'stopped') {
+        assert.doesNotMatch(step.label, /^(?:Approved|Download checked|Confirmed)/, `${phase}: ${step.label}`);
       } else {
         assert.equal(step.label, STEP_NAMES[index], phase);
       }
@@ -1561,7 +1636,7 @@ test('waiting is told apart: offline, not picked up yet, waiting for the button'
   assert.equal(button.tone, 'act');
   // A heading that takes two lines must not end the first one on "Button".
   assert.equal(button.title, 'Press Button\u00a01 on the board');
-  assert.equal(button.brief, 'The board has the offer and waits for someone to press Button 1.');
+  assert.equal(button.brief, 'The board has the offer and waits for someone to press Button\u00a01.');
   assert.match(button.text, /LED1 blinks quickly while the offer is open; Button 2 declines it\.$/);
   assert.deepEqual(states(button), ['done', 'current', ...upcoming.slice(1)]);
   for (const [phase, description] of everyDescription()) {
@@ -1619,11 +1694,259 @@ test('the ways an update ends are said plainly', () => {
   const late = describe('cancelled', { startedAt: STARTED, running: '1.0.0+3' });
   assert.match(late.text, /^Cancelled after the board had started\./);
   assert.match(late.text, reportsOld);
-  assert.deepEqual(states(late).slice(0, 3), ['done', 'done', 'skipped']);
+  // It got as far as the download, and no further: that is a place, not a failure.
+  assert.deepEqual(states(late), ['done', 'done', 'stopped', ...new Array(4).fill('skipped')]);
+  assert.equal(late.tone, 'idle');
 
   const timedOut = describe('timed_out', { running: '1.0.0+3' });
   assert.equal(timedOut.tone, 'bad');
   assert.match(timedOut.text, reportsOld);
+});
+
+test('a board that has never connected is not said to be offline, or to come back', () => {
+  const never = core.describeExecution(execution('waiting_for_device', { online: false }),
+    { board: { lastSeen: null } });
+  assert.equal(never.title, 'Never connected');
+  assert.match(never.text, /Power it up and check that it was provisioned/);
+  assert.match(never.text, /when it first connects/);
+  assert.doesNotMatch(never.text, /reconnect/);
+
+  // A board that has been seen is offline; without the board list that is all that is known.
+  const seen = core.describeExecution(execution('waiting_for_device', { online: false }),
+    { board: { lastSeen: NOON } });
+  assert.equal(seen.title, 'Board offline');
+  assert.equal(describe('waiting_for_device', { online: false }).title, 'Board offline');
+});
+
+test('a cancelled update says what became of the board, not only that it was cancelled', () => {
+  const id = 'cranium-1-1-0-b7-20261010T115900Z-0a0a';
+  const known = (ota, fw = { version: '1.0.0+3', confirmed: true }) =>
+    ({ board: { lastSeen: NOON, fw, ota }, deployment: id, version: '1.1.0+7' });
+  const cancelled = (changes, board) =>
+    core.describeExecution(execution('cancelled', { startedAt: STARTED, running: '1.0.0+3', ...changes }), board);
+
+  // Stopped at the step the board last reported, with the steps before it done.
+  const verifying = cancelled({}, known({ state: 'verifying', job: id }));
+  assert.deepEqual(states(verifying), ['done', 'done', 'done', 'stopped', 'skipped', 'skipped', 'skipped']);
+  assert.equal(labels(verifying)[3], 'Checking the download');
+  assert.equal(verifying.retry, true);
+
+  // Too far along to be stopped: the page does not claim that it was.
+  for (const [state, step] of [['rebooting', 4], ['testing', 5]]) {
+    const finishing = cancelled({}, known({ state, job: id }));
+    assert.equal(finishing.title, 'Finishing despite the cancellation');
+    assert.equal(finishing.tone, 'live');
+    assert.equal(states(finishing).indexOf('current'), step);
+    assert.equal(finishing.retry, false);
+    assert.doesNotMatch(finishing.text, /not installed/);
+  }
+  // A report about another deployment says nothing about this one.
+  assert.equal(cancelled({}, known({ state: 'rebooting', job: 'another' })).title, 'Cancelled');
+
+  // And there it is: the board runs what was cancelled.
+  const installed = cancelled({ running: '1.1.0+7' }, known({ state: 'idle', job: null }, { version: '1.1.0+7', confirmed: true }));
+  assert.equal(installed.title, 'Installed despite the cancellation');
+  assert.equal(installed.tone, 'warn');
+  assert.deepEqual(states(installed), new Array(7).fill('done'));
+  assert.match(installed.text, /It now runs 1\.1\.0\+7\.$/);
+  assert.match(installed.next, /upload a newer version/);
+  const onTrial = cancelled({ running: '1.1.0+7' },
+    known({ state: 'idle', job: null }, { version: '1.1.0+7', confirmed: false }));
+  assert.equal(states(onTrial)[5], 'current');
+});
+
+test('a version on a board that another deployment put there is not put down to this one', () => {
+  const id = 'cranium-1-1-0-b7-20261010T115900Z-0a0a';
+  const other = 'cranium-1-1-0-b7-20261010T120500Z-0b0b';
+  const board = { lastSeen: NOON, fw: { version: '1.1.0+7', confirmed: true }, ota: { state: 'idle', job: null } };
+  const entry = (deployment, status, version = '1.1.0+7') => ({ deployment, version, status });
+  const told = (history) => core.describeExecution(
+    execution('cancelled', { startedAt: STARTED, running: '1.1.0+7' }),
+    { board, deployment: id, version: '1.1.0+7', history });
+
+  // Offered again, and installed by that: this deployment stopped where it was told to.
+  const later = told([entry(id, 'CANCELED'), entry(other, 'SUCCEEDED')]);
+  assert.equal(later.title, 'Cancelled');
+  assert.equal(later.tone, 'idle');
+  assert.equal(later.installed, undefined);
+  assert.equal(later.installedBy, other);
+  assert.match(later.text, /and it stopped there\. Another deployment installed 1\.1\.0\+7\.$/);
+  assert.deepEqual(states(later), ['done', 'done', 'stopped', ...new Array(4).fill('skipped')]);
+  assert.equal(later.retry, false, 'the board runs it already: offering it again would be refused');
+  assert.equal(told([entry(id, 'CANCELED'), entry(other, 'IN_PROGRESS')]).installedBy, other, 'on trial under the other');
+
+  // Nobody else installed it: it went through all the same.
+  for (const history of [[], [entry(id, 'CANCELED')], [entry(id, 'CANCELED'), entry(other, 'REJECTED')],
+    [entry(id, 'CANCELED'), entry(other, 'SUCCEEDED', '1.0.0+3')]]) {
+    const installed = told(history);
+    assert.equal(installed.title, 'Installed despite the cancellation');
+    assert.equal(installed.installed, true);
+    assert.equal(installed.installedBy, undefined);
+  }
+  // Without a version on the entry, the name of the deployment has it.
+  assert.equal(told([{ deployment: other, version: null, status: 'SUCCEEDED' }]).installedBy, other);
+
+  // Not read yet: nothing is claimed either way.
+  const unknown = told(null);
+  assert.equal(unknown.title, 'Cancelled');
+  assert.equal(unknown.unsure, true);
+  assert.match(unknown.text, /The board now runs 1\.1\.0\+7\.$/);
+  assert.doesNotMatch(unknown.text, /keeps the firmware it had/);
+  assert.equal(unknown.retry, false);
+
+  // A board that is still restarting says so, whatever its list holds.
+  const restarting = core.describeExecution(execution('cancelled', { startedAt: STARTED, running: '1.1.0+7' }),
+    { board: { ...board, ota: { state: 'rebooting', job: id } }, deployment: id, version: '1.1.0+7', history: null });
+  assert.equal(restarting.title, 'Finishing despite the cancellation');
+});
+
+test('how a cancelled update ended is not claimed where it cannot be known', () => {
+  const id = 'cranium-1-1-0-b7-20261010T115900Z-0a0a';
+  const board = (fw, ota = { state: 'idle', job: null }) => ({ lastSeen: NOON, fw: { version: fw, confirmed: true }, ota });
+  const said = (changes, known) => core.describeExecution(execution('cancelled', changes), { deployment: id, version: '1.1.0+7', ...known });
+
+  // A newer version came later. Whether this one had finished before that is on no record.
+  const movedOn = said({ startedAt: STARTED, running: '2.0.0+0' }, { board: board('2.0.0+0'), history: [] });
+  assert.equal(movedOn.title, 'Cancelled');
+  assert.equal(movedOn.unsure, true);
+  assert.equal(movedOn.retry, false, 'the board would refuse an older version');
+  assert.match(movedOn.text, /has since moved on to 2\.0\.0\+0, so this page cannot tell how this update ended\.$/);
+  assert.doesNotMatch(movedOn.text, /stops there|keeps the firmware/);
+  assert.deepEqual(states(movedOn), ['done', 'done', ...new Array(5).fill('unknown')]);
+
+  // The board list has not been read, so a restart cannot be told from a stop.
+  const unread = said({ startedAt: STARTED, running: '1.0.0+3' }, { board: null, history: null, unread: true });
+  assert.equal(unread.unsure, true);
+  assert.equal(unread.retry, false);
+  assert.doesNotMatch(unread.text, /stops there|keeps the firmware/);
+  assert.deepEqual(states(unread), ['done', 'done', ...new Array(5).fill('unknown')]);
+  // Once it has been, it can.
+  const read = said({ startedAt: STARTED, running: '1.0.0+3' }, { board: board('1.0.0+3'), history: null });
+  assert.match(read.text, /it stops there and keeps the firmware it had/);
+  assert.equal(read.retry, true);
+
+  // The board runs this version, and its own list has not been read.
+  const unsure = said({ startedAt: STARTED, running: '1.1.0+7' }, { board: board('1.1.0+7'), history: null });
+  assert.deepEqual(states(unsure), ['done', 'done', ...new Array(5).fill('unknown')]);
+
+  // Cancelled at the button, and a later deployment put this version on the board or a newer one.
+  for (const running of ['1.1.0+7', '2.0.0+0']) {
+    const later = said({ running }, { board: board(running), history: null });
+    assert.equal(later.laterCame, true);
+    assert.equal(later.retry, false);
+    assert.equal(later.next, null);
+    assert.match(later.text, new RegExp(`^Cancelled before the board started, so this deployment installed nothing\\. A later one put ${running.replace(/[.+]/g, '\\$&')}`));
+  }
+  // With the old version still on it, it can be offered again as before.
+  const early = said({ running: '1.0.0+3' }, { board: board('1.0.0+3') });
+  assert.equal(early.retry, true);
+  assert.equal(early.laterCame, undefined);
+});
+
+test('a board that a cancellation found restarting keeps a deployment going until it has settled', () => {
+  const at = Date.parse(NOON);
+  const job = 'cranium-1-1-0-b7-20261010T115900Z-0a0a';
+  const run = { id: job, status: 'CANCELED' };
+  const board = (state, online = true, lastSeen = NOON) => ({ online, lastSeen, ota: { state, job } });
+  assert.equal(core.stillFinishing(run, [board('rebooting')], at), true);
+  assert.equal(core.stillFinishing(run, [board('testing')], at), true);
+  // A board can drop off AWS during the swap, which takes over a minute.
+  assert.equal(core.stillFinishing(run, [board('rebooting', false)], at + 60000), true);
+  // And not for ever.
+  assert.equal(core.stillFinishing(run, [board('rebooting', false)], at + 3600000), false);
+  // Nothing else counts.
+  assert.equal(core.stillFinishing(run, [board('downloading')], at), false);
+  assert.equal(core.stillFinishing(run, [board('idle')], at), false);
+  assert.equal(core.stillFinishing({ ...run, id: 'another' }, [board('rebooting')], at), false);
+  assert.equal(core.stillFinishing({ ...run, status: 'COMPLETED' }, [board('rebooting')], at), false);
+  assert.equal(core.stillFinishing(run, null, at), false);
+  assert.equal(core.stillFinishing(run, [{ online: false, lastSeen: null, ota: null }], at), false);
+});
+
+test('a board that already runs a version is not offered it again', () => {
+  const refused = describe('refused', { reason: 'not_newer' });
+  assert.equal(refused.retry, false);
+  assert.match(refused.next, /upload a newer version and deploy that/);
+  assert.doesNotMatch(refused.next, /Deal with that/);
+});
+
+test('what the server checks about an image has a name for every way it can refuse one', () => {
+  const source = new URL('../../api/src/lib/mcuboot.mjs', import.meta.url);
+  const handler = new URL('../../api/src/handlers/firmware.mjs', import.meta.url);
+  const named = new Set(core.IMAGE_CHECKS.flatMap((check) => check.codes));
+  // The one that is not about an image: the server's own key does not load.
+  const refusals = [...readFileSync(source, 'utf8').matchAll(/\bfail\('([a-z_]+)'/g)]
+    .map((match) => match[1]).filter((code) => code !== 'bad_signing_key');
+  assert.equal(refusals.length > 10, true);
+  for (const code of refusals) {
+    assert.equal(named.has(code), true, `the refusal ${code} has no check`);
+    assert.notEqual(core.failedCheck(code), null, code);
+  }
+  for (const code of ['version_zero', 'version_exists', 'version_not_newer']) {
+    assert.match(readFileSync(handler, 'utf8'), new RegExp(`'${code}'`));
+    assert.equal(core.failedCheck(code), 'Version');
+  }
+  // Not a check of the image.
+  for (const code of ['upload_conflict', 'release_manager_required', 'gateway', 'constructor']) {
+    assert.equal(core.failedCheck(code), null, code);
+  }
+});
+
+test('an update that ended short says what to do next, and whether offering it again makes sense', () => {
+  const rolledBack = describe('rolled_back');
+  assert.match(rolledBack.next, /upload a newer version/);
+  assert.equal(rolledBack.retry, false, 'the same image would only roll back again');
+  for (const [phase, extra] of [
+    ['declined', {}], ['refused', { reason: 'too_large' }], ['failed', { reason: 'download_failed' }],
+    ['failed', { reason: 'something_new' }], ['cancelled', {}], ['timed_out', {}],
+  ]) {
+    const ended = describe(phase, extra);
+    assert.equal(ended.retry, true, phase);
+    assert.match(ended.next, /new deployment/, phase);
+  }
+  for (const phase of ['waiting_for_device', 'waiting_for_button', 'downloading', 'succeeded']) {
+    assert.equal(describe(phase).next, null, phase);
+    assert.equal(describe(phase).retry, false, phase);
+  }
+});
+
+test('the newest entry of a board\'s history uses the board\'s own word for how it ended', () => {
+  const label = (status, last) => core.describeHistory(status, last).label;
+  assert.equal(label('FAILED', 'rolled_back'), 'Rolled back');
+  assert.equal(label('REJECTED', 'declined'), 'Declined on the board');
+  assert.equal(label('REJECTED', 'refused'), 'Refused by the board');
+  // Only where the status leaves it open, and where the board's word fits the status.
+  assert.equal(label('FAILED', 'declined'), 'Failed');
+  assert.equal(label('SUCCEEDED', 'rolled_back'), 'Installed');
+  assert.equal(label('REJECTED', null), 'Refused or declined');
+  assert.equal(label('FAILED', 'constructor'), 'Failed');
+});
+
+test('what the server says in the terms of the file format is said in plain words', () => {
+  const said = (code, message = 'Its own words.') => core.plainMessage(new core.ApiError(422, code, message));
+  assert.match(said('unexpected_tlv'), /not signed the way this project requires/);
+  assert.match(said('malformed_tlv'), /cannot be read/);
+  assert.equal(said('wrong_key'), 'Its own words.');
+  assert.equal(said('constructor'), 'Its own words.');
+});
+
+test('what a cancellation did is told by what the boards were doing, and as asked for', () => {
+  const said = (changes) => core.cancelNotice({ force: false, withdrawn: false, started: 0, ...changes });
+  assert.match(said({}), /no longer offered/);
+  assert.match(said({ started: 1 }), /^Cancelled\. 1 board that had started carries on\.$/);
+  assert.match(said({ started: 2 }), /^Cancelled\. 2 boards that had started carry on\.$/);
+  assert.match(said({ force: true }), /no longer offered/);
+  assert.match(said({ force: true, started: 1 }), /have been asked to stop/);
+  assert.match(said({ force: true, withdrawn: true, started: 1 }), /^Stop requested\./);
+  assert.doesNotMatch(said({ force: true, started: 1 }), /being stopped/);
+});
+
+test('the time of day is said for today, and with the day for another day', () => {
+  const now = Date.parse('2026-10-10T12:00:00');
+  assert.doesNotMatch(core.clockTime('2026-10-10T09:30:00', now), /Oct/);
+  assert.match(core.clockTime('2026-10-10T09:30:00', now), /09|9/);
+  assert.match(core.clockTime('2026-10-08T09:30:00', now), /Oct/);
+  assert.equal(core.clockTime('not a time', now), '');
 });
 
 test('a failure is pinned to the step the board names, and only then', () => {
@@ -1744,20 +2067,42 @@ test('a deployment as a whole is summed up from its boards', () => {
   };
   const summary = (status, counts) =>
     core.describeDeployment({ status, things: [THING, THING], counts: { ...none, ...counts } }).label;
-  assert.equal(summary('IN_PROGRESS', { inProgress: 1, queued: 1 }), 'Installing');
+  assert.equal(summary('IN_PROGRESS', { inProgress: 1, queued: 1 }), 'Updating');
   assert.equal(summary('IN_PROGRESS', { queued: 2 }), 'Waiting for boards');
   assert.equal(summary('COMPLETED', { succeeded: 2 }), 'Succeeded');
   assert.equal(summary('COMPLETED', { succeeded: 1, failed: 1 }), 'Partly succeeded');
   assert.equal(summary('COMPLETED', { failed: 1, timedOut: 1 }), 'Failed');
   assert.equal(summary('COMPLETED', { rejected: 2 }), 'Not installed');
   assert.equal(summary('CANCELED', { canceled: 2 }), 'Cancelled');
+  // Cancelling leaves boards that had started alone, and the badge does not hide them.
+  assert.equal(summary('CANCELED', { inProgress: 1, canceled: 1 }), 'Cancelled, 1 board still working');
+  assert.equal(summary('CANCELED', { succeeded: 2 }), 'Cancelled, 2 boards finished');
+  // A deployment that is over and went wrong has a sentence of its own, for the overview.
+  const said = (status, counts) =>
+    core.describeDeployment({ status, things: [THING, THING], counts: { ...none, ...counts } }).said ?? null;
+  assert.equal(said('COMPLETED', { failed: 2 }), 'The last deployment failed.');
+  assert.equal(said('COMPLETED', { succeeded: 1, failed: 1 }), 'The last deployment partly succeeded.');
+  assert.equal(said('CANCELED', { succeeded: 1 }), 'The last deployment was cancelled, but 1 board finished it.');
+  // One that went through has its own, so that it is not the quietest outcome.
+  assert.equal(said('COMPLETED', { succeeded: 2 }), 'The update is installed and confirmed on 2 boards.');
+  assert.equal(core.describeDeployment({
+    status: 'COMPLETED', version: '1.1.0+7', things: [THING], counts: { ...none, succeeded: 1 },
+  }).said, '1.1.0+7 is installed and confirmed.');
+  assert.equal(said('CANCELED', { canceled: 2 }), null);
   assert.equal(summary('SCHEDULED', {}), 'Scheduled');
   assert.equal(summary('DELETION_IN_PROGRESS', {}), 'Being deleted');
   assert.equal(summary('SOMETHING_NEW', {}), 'Unknown');
 
   const counted = core.describeCounts({ ...none, queued: 2, inProgress: 1, failed: 1 });
   assert.deepEqual(counted.map((entry) => `${entry.count} ${entry.label}`),
-    ['1 installing', '2 waiting', '1 failed']);
+    ['1 updating', '2 waiting', '1 failed']);
+  // A board that waits for a person is told apart from one that only has yet to come online.
+  const words = (counts, atButton) =>
+    core.describeCounts({ ...none, ...counts }, atButton).map((entry) => `${entry.count} ${entry.label}`);
+  assert.deepEqual(words({ queued: 3 }, 1), ['1 waiting for Button\u00a01', '2 waiting']);
+  assert.deepEqual(words({ queued: 1 }, 1), ['1 waiting for Button\u00a01']);
+  assert.deepEqual(words({ queued: 1 }, 5), ['1 waiting for Button\u00a01'], 'never more than are waiting');
+  assert.equal(core.describeCounts({ ...none, queued: 1 }, 1)[0].tone, 'act');
 });
 
 test('an entry of the activity log reads as a sentence and links only to what exists', () => {
@@ -1766,8 +2111,11 @@ test('an entry of the activity log reads as a sentence and links only to what ex
   const said = (line) => `${line.verb} ${line.label}`.trim();
 
   assert.deepEqual(entry('firmware.upload', '1.1.0+7'), {
-    icon: 'upload', verb: 'uploaded firmware', label: '1.1.0+7', outcome: null, href: '#/firmware', facts: [],
+    icon: 'upload', verb: 'uploaded firmware', label: '1.1.0+7', outcome: null, href: '#/firmware', facts: [], scripted: false,
   });
+  // What a script sent past the gateway is told apart. A request through the gateway cannot carry this id.
+  assert.equal(core.describeAudit({ action: 'firmware.revoke', target: '1.1.0+7', outcome: 'ok', detail: [], requestId: 'bench-0123' }).scripted, true);
+  assert.equal(core.describeAudit({ action: 'firmware.revoke', target: '1.1.0+7', outcome: 'ok', detail: [], requestId: 'LvC5hbench-=' }).scripted, false);
   assert.equal(said(entry('firmware.revoke', '1.1.0+7')), 'revoked firmware 1.1.0+7');
 
   // A deployment is called by the version it installs. Its id is one of the details,
@@ -1810,23 +2158,31 @@ test('the details of an entry are put in the words of the console, not in the AP
   const upload = facts('firmware.upload', 'rejected',
     [['sha256', digest], ['size', '1264'], ['filename', 'zephyr.signed.bin'], ['code', 'wrong_key']]);
   assert.deepEqual(said(upload),
-    ['Refused with wrong_key', 'File: zephyr.signed.bin', 'Size: 1,264 bytes', `SHA-256: ${digest}`]);
+    ['Refused with wrong_key', 'File zephyr.signed.bin', 'Size 1,264 bytes', `SHA-256 ${digest}`]);
   // Identifiers are marked as such; a size or a count is not one.
   assert.deepEqual(upload.map((fact) => fact.code), [true, true, false, true]);
+  // A refusal is said in words where there are words for it, and only there.
+  assert.equal(upload[0].words, 'Signed with a different key than this project’s');
+  assert.equal(facts('firmware.upload', 'rejected', [['code', 'something_new']])[0].words, null);
+  // The name of the file is not said twice, when it is what the entry is about.
+  const named = core.describeAudit({
+    action: 'firmware.upload', target: 'x.bin', outcome: 'rejected', detail: [['filename', 'x.bin']],
+  });
+  assert.deepEqual(named.facts, []);
 
   // A reason is prose, kept whole, and a revocation counts the deployments it cancelled.
   const reason = 'Pads stop responding after a few minutes of use.';
   const revoke = facts('firmware.revoke', 'ok', [['reason', reason], ['cancelled', '1']]);
-  assert.deepEqual(said(revoke), [`Reason: ${reason}`, 'Deployments cancelled: 1']);
+  assert.deepEqual(said(revoke), [`Reason: ${reason}`, 'Deployments cancelled 1']);
   assert.equal(revoke[0].code, false);
 
-  assert.deepEqual(said(facts('deployment.cancel', 'ok', [['force', 'true']])), ['Forced: yes']);
+  assert.deepEqual(said(facts('deployment.cancel', 'ok', [['force', 'true']])), ['Forced yes']);
   assert.deepEqual(said(facts('deployment.cancel', 'error', [['force', 'false'], ['cancelled', 'true'],
-    ['code', 'internal']])), ['Failed with internal', 'Forced: no', 'Cancelled: yes']);
+    ['code', 'internal']])), ['Failed with internal', 'Forced no', 'Cancelled yes']);
   assert.deepEqual(said(facts('deployment.create', 'rejected', [['version', '1.1.0+7'], ['things', '2'],
-    ['code', 'device_busy']])), ['Refused with device_busy', 'Boards: 2']);
+    ['code', 'device_busy']])), ['Refused with device_busy', 'Boards 2']);
   // A version that is not the target is said.
-  assert.deepEqual(said(facts('deployment.create', 'ok', [['version', '9.9.9+9']])), ['Version: 9.9.9+9']);
+  assert.deepEqual(said(facts('deployment.create', 'ok', [['version', '9.9.9+9']])), ['Version 9.9.9+9']);
 
   // A revocation that could not be completed says which steps are left. One that
   // completes what an earlier request began says so in its sentence.
@@ -1834,7 +2190,7 @@ test('the details of an entry are put in the words of the console, not in the AP
     ['incomplete', 'tag cancel record'], ['code', 'revoke_incomplete']])), [
     'Failed with revoke_incomplete',
     'Left undone: refusing the image, cancelling the deployments, recording that it is done',
-    'Reason: A fault.', 'Deployments cancelled: 0',
+    'Reason: A fault.', 'Deployments cancelled 0',
   ]);
   assert.deepEqual(said(facts('firmware.revoke', 'error', [['incomplete', 'a_new_step']])),
     ['Left undone: a_new_step']);
@@ -1845,11 +2201,11 @@ test('the details of an entry are put in the words of the console, not in the AP
     detail: [['cancelled', '1'], ['resumed', 'true']],
   });
   assert.equal(finished.verb, 'finished revoking firmware');
-  assert.deepEqual(said(finished.facts), ['Deployments cancelled: 1']);
+  assert.deepEqual(said(finished.facts), ['Deployments cancelled 1']);
 
   // What the console has no word for is shown as the API named it, last.
   assert.deepEqual(said(facts('firmware.upload', 'ok', [['somethingNew', 'x'], ['size', 'unknown'],
-    ['constructor', 'y']])), ['Size: unknown', 'somethingNew: x', 'constructor: y']);
+    ['constructor', 'y']])), ['Size unknown', 'somethingNew: x', 'constructor: y']);
 });
 
 test('a detail of the activity log is kept as long as the API stores it', async () => {

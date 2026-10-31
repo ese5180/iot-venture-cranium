@@ -4,7 +4,8 @@
 #
 #   cloud/users.sh add <email> <viewer|release-manager>   create the account, or change its role
 #   cloud/users.sh resend <email>      send the invitation again, with a new temporary password
-#   cloud/users.sh reset-mfa <email>   forget the authenticator app, for example after a lost phone
+#   cloud/users.sh reset-mfa <email>   replace the account, with the same role: a new password
+#                                      and a new authenticator app, for a lost phone or password
 #   cloud/users.sh remove <email>      sign the user out and delete the account
 #   cloud/users.sh list                everybody, with role and state
 #
@@ -12,6 +13,7 @@
 # A viewer may only look. Cognito e-mails a temporary password to a new user; this
 # script never sets or sees a password. E-mail addresses are arguments only and are
 # not written anywhere. An address is always used in lower case, however it is typed.
+# Only an administrator can change an address: the app client does not let users do so.
 #
 # The profile and the Region come from AWS_PROFILE and AWS_REGION (default us-east-1).
 
@@ -116,6 +118,21 @@ group_members() {
     --query 'Users[].Username' --output text | tr '\t\n' '  '
 }
 
+# create_account <email>: Cognito e-mails the temporary password.
+create_account() {
+  aws cognito-idp admin-create-user --user-pool-id "$POOL" --username "$1" \
+    --user-attributes "Name=email,Value=$1" Name=email_verified,Value=true \
+    --desired-delivery-mediums EMAIL > /dev/null
+}
+
+# no_such_account <email>: stop, and show who does have an account. A person being
+# removed may be listed under another address; this must not look like a success.
+no_such_account() {
+  echo "There is no account for $1. These are the accounts:" >&2
+  cmd_list >&2
+  die "nothing was changed"
+}
+
 cmd_add() {
   local email="$1" role="$2" group other status memberships before="" changed
   case "$role" in
@@ -134,10 +151,10 @@ cmd_add() {
 
   status="$(user_status "$email")"
   if [ "$status" = NONE ]; then
-    aws cognito-idp admin-create-user --user-pool-id "$POOL" --username "$email" \
-      --user-attributes "Name=email,Value=$email" Name=email_verified,Value=true \
-      --desired-delivery-mediums EMAIL > /dev/null
+    create_account "$email"
     echo "Created an account for $email."
+    echo "There was none at this address. If this person has one at another address, it"
+    echo "keeps its role: see cloud/users.sh list."
     echo "Cognito e-mails a temporary password that is valid for 3 days. At the first"
     echo "sign-in the user chooses a password and registers an authenticator app."
     echo "Console: $(stack_output ConsoleUrl)"
@@ -186,7 +203,7 @@ cmd_resend() {
       ;;
     *)
       die "$email has already chosen a password, so there is no invitation to send again." \
-        "For a forgotten password, remove the account and add it again."
+        "For a forgotten password or a lost phone: cloud/users.sh reset-mfa $email"
       ;;
   esac
   aws cognito-idp admin-create-user --user-pool-id "$POOL" --username "$email" \
@@ -194,39 +211,70 @@ cmd_resend() {
   echo "Sent a new invitation to $email. The earlier temporary password no longer works."
 }
 
+# Replace the account instead of only forgetting its authenticator app. Without the app
+# the password alone would do for the next sign-in, and whoever signs in first registers
+# an app of their own and keeps the account. Somebody who has lost a phone may well have
+# lost the password that is stored on it. So the old password goes too, and the new one
+# goes to the mailbox. A new account also has a new sub: tokens of the old one can change
+# nothing from this moment on and can read for at most another minute.
 cmd_reset_mfa() {
-  local email="$1" status out
+  local email="$1" status enabled groups role group
   status="$(user_status "$email")"
-  [ "$status" != NONE ] || die "there is no account for $email"
-  # Cognito does not report whether an authenticator registered through the sign-in
-  # page exists (the user's MFA settings stay empty while the pool requires MFA), so
-  # the token is removed without asking first.
-  if ! out="$(aws cognito-idp admin-delete-software-token --user-pool-id "$POOL" \
-      --username "$email" 2>&1)"; then
-    case "$out" in
-      *"nvalid choice"*) die "this AWS CLI does not know admin-delete-software-token; update the AWS CLI v2" ;;
-      *) die "$out" ;;
-    esac
-  fi
-  # A lost phone may be in somebody else's hands: end the sessions as well.
-  aws cognito-idp admin-user-global-sign-out --user-pool-id "$POOL" --username "$email"
-  echo "Removed the authenticator app of $email and signed the user out."
-  echo "At the next sign-in the user registers a new one."
+  case "$status" in
+    NONE)
+      no_such_account "$email"
+      ;;
+    FORCE_CHANGE_PASSWORD)
+      die "$email has not finished a first sign-in, so there is no authenticator app yet." \
+        "To send the invitation again: cloud/users.sh resend $email"
+      ;;
+  esac
+  enabled="$(aws cognito-idp admin-get-user --user-pool-id "$POOL" --username "$email" \
+    --query Enabled --output text)"
+  # A new account would be enabled, which is nothing to do without being asked.
+  [ "$enabled" = True ] || die "$email is disabled, and this would enable it." \
+    "If it should work again: cloud/users.sh remove $email, then cloud/users.sh add."
+  groups="$(user_groups "$email")"
+  case " $groups " in
+    *" release-managers "*)
+      role=release-manager
+      group=release-managers
+      ;;
+    *" viewers "*)
+      role=viewer
+      group=viewers
+      ;;
+    *)
+      die "$email has no role, so this account has no use for a new authenticator app." \
+        "To give it one: cloud/users.sh add $email <viewer|release-manager>"
+      ;;
+  esac
+
+  echo "$email has the role $role. Replacing the account, password included."
+  echo "If this stops before it says Done, finish it with:"
+  echo "  cloud/users.sh add $email $role"
+  aws cognito-idp admin-user-global-sign-out --user-pool-id "$POOL" --username "$email" ||
+    echo "Could not sign $email out first; deleting the account anyway." >&2
+  aws cognito-idp admin-delete-user --user-pool-id "$POOL" --username "$email"
+  create_account "$email"
+  aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL" --username "$email" \
+    --group-name "$group"
+  echo "Done. Cognito e-mails a temporary password that is valid for 3 days. At the next"
+  echo "sign-in the user chooses a password and registers an authenticator app."
+  echo "The console refuses every change with the old sessions from now on, and reading"
+  echo "stops within a minute. Earlier entries in the activity log keep the old account id."
 }
 
 cmd_remove() {
   local email="$1" status
   status="$(user_status "$email")"
-  if [ "$status" = NONE ]; then
-    echo "There is no account for $email; nothing to remove."
-    return 0
-  fi
+  [ "$status" != NONE ] || no_such_account "$email"
   aws cognito-idp admin-user-global-sign-out --user-pool-id "$POOL" --username "$email" ||
     echo "Could not sign $email out first; deleting the account anyway." >&2
   aws cognito-idp admin-delete-user --user-pool-id "$POOL" --username "$email"
   echo "Removed $email."
-  echo "The console refuses every change by this user from now on. A browser that is"
-  echo "still signed in can keep reading until its session ends, at most 60 minutes."
+  echo "The console refuses every change by this user from now on, and reading stops"
+  echo "within a minute."
 }
 
 cmd_list() {

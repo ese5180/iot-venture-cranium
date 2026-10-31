@@ -1,9 +1,12 @@
 /*
  * Cranium firmware console.
  *
- * One stylesheet, no images and no fonts to fetch: system typefaces on a paper
- * background, ink, and a single rust accent. Colours are named for what they do and
- * are defined twice, for light and for dark. A state is never shown by colour alone;
+ * One stylesheet, no images and no fonts to fetch: system typefaces on paper, ink, and
+ * a single rust accent. The page is set like a piece of print: heavy rules and open
+ * columns rather than boxes, with one ink panel per page that holds what matters most.
+ *
+ * Colours are named for what they do and are defined for light and for dark; an ink
+ * panel redefines them for what lies inside it. A state is never shown by colour alone;
  * there is always an icon or a word next to it.
  *
  * Order: colours and type, the page frame, the pieces every page uses, then each page.
@@ -18,6 +21,7 @@
   --line: #e7dfd3;
   --line-strong: #d1c6b6;
   --line-field: #94887a;
+  --rule: #1c1814;
   --ink: #1c1814;
   --ink-2: #574e45;
   --ink-3: #72675b;
@@ -31,23 +35,43 @@
   --good-wash: #e4efe2;
   --warn: #8f5b00;
   --warn-wash: #f8ecd0;
-  --bad: #a4262c;
-  --bad-wash: #f9e2df;
-  --on-bad: #fffaf7;
+  --bad: #9c1c3f;
+  --bad-wash: #f9e3e6;
+  /* The system at work: downloading, checking, restarting, on trial. Rust is never this:
+     rust is the brand and "your move". */
+  --work: #1c5c94;
+  --work-wash: #e2ecf4;
   /* The fill of a button or message that destroys something: a red that carries light
      lettering in both themes, where --bad itself turns into a text colour in the dark. */
-  --bad-fill: #a4262c;
+  --bad-fill: #9c1c3f;
   --on-bad-fill: #fffaf7;
 
+  /* Marks in charts, checked with the palette validator for colour-blind separation. */
+  --bar-good: #3f9a68;
+  --bar-live: #2a6fa8;
+  --bar-act: #b7410e;
+  --bar-wait: #8f8478;
+  --bar-bad: #a3173d;
+  --bar-warn: #b8800f;
+  --bar-idle: #9a8d7e;
+  --on-bar: #17110c;
+  --on-bar-live: #ffffff;
+  --on-bar-good: #0e1a12;
+  --on-bar-bad: #fff7f4;
+  /* Graphics that must be seen: the ring of a step that has not started, 3:1 or better. */
+  --line-mark: #8a7e70;
+
   --shade: rgb(28 24 20 / 0.5);
-  --lift: 0 18px 40px -18px rgb(28 24 20 / 0.35);
+  --lift: 0 24px 60px -24px rgb(28 24 20 / 0.45);
 
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 
-  --radius: 14px;
-  --radius-small: 9px;
-  --gutter: 32px;
+  --radius: 6px;
+  --radius-small: 5px;
+  --gutter: clamp(16px, 3.4vw, 48px);
+  --page: 1720px;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -58,6 +82,7 @@
     --line: #342e28;
     --line-strong: #4a4239;
     --line-field: #7d7166;
+    --rule: #6d6257;
     --ink: #f3eee7;
     --ink-2: #c2b8ac;
     --ink-3: #9c9185;
@@ -71,20 +96,121 @@
     --good-wash: #1f2c21;
     --warn: #e2b455;
     --warn-wash: #33290f;
-    --bad: #f08a86;
-    --bad-wash: #3a1e1c;
-    --on-bad: #2a0d0c;
-    --bad-fill: #c2413c;
-    --on-bad-fill: #fff6f3;
+    --bad: #ff9d96;
+    --bad-wash: #3a1b20;
+    --work: #8abcea;
+    --work-wash: #1c2a37;
+    --bad-fill: #b92f52;
+    --on-bad-fill: #fff6f5;
+
+    --bar-good: #7fcb99;
+    --bar-live: #6faee6;
+    --bar-act: #e2703a;
+    --bar-wait: #d9cfc2;
+    --bar-bad: #d0324a;
+    --bar-warn: #e9c468;
+    --bar-idle: #8a8074;
+    --on-bar-live: #101a24;
+    --on-bar-good: #0e1a12;
+    --on-bar-bad: #fff7f4;
+    --line-mark: #8a7f72;
 
     --shade: rgb(0 0 0 / 0.6);
-    --lift: 0 18px 40px -18px rgb(0 0 0 / 0.7);
+    --lift: 0 24px 60px -24px rgb(0 0 0 / 0.8);
   }
 }
 
-@media (max-width: 720px) {
-  :root {
-    --gutter: 16px;
+/*
+ * An ink panel: the colours of the dark theme, on ink. It is the same panel in both
+ * themes; on a dark page it stands one step above the page instead of far below it.
+ */
+.on-ink,
+.execution:not(.is-idle, .is-compact) {
+  color-scheme: dark;
+
+  --paper: #1c1814;
+  --surface: #1c1814;
+  --well: #2b2520;
+  --line: #3a332c;
+  --line-strong: #574e44;
+  --line-field: #8a7f72;
+  --line-mark: #8a7f72;
+  --rule: #f7f2ea;
+  --ink: #f7f2ea;
+  --ink-2: #d2c8bb;
+  --ink-3: #ab9f92;
+
+  --accent: #ef7a41;
+  --accent-strong: #f6955f;
+  --accent-wash: #3e2415;
+  --on-accent: #1a120c;
+
+  --good: #8fd4a0;
+  --good-wash: #1f2e23;
+  --warn: #ecbf62;
+  --warn-wash: #372c10;
+  --bad: #ff9d96;
+  --bad-wash: #431c22;
+  --work: #93c3ef;
+  --work-wash: #1c2a37;
+
+  --bar-good: #7fcb99;
+  --bar-live: #6faee6;
+  --bar-act: #ef7a41;
+  --bar-wait: #d9cfc2;
+  --bar-bad: #d0324a;
+  --bar-warn: #e9c468;
+  --bar-idle: #8a7f72;
+  --on-bar-live: #101a24;
+  --on-bar-good: #0e1a12;
+  --on-bar-bad: #fff7f4;
+
+  --seg-newest: #f7f2ea;
+  --seg-1: #b5aa9c;
+  --seg-2: #8a7f72;
+  --seg-3: #776c60;
+
+  background: var(--surface);
+  color: var(--ink);
+}
+
+/* Inside the panel links are the panel's ink: rust there would read as "your move". */
+.on-ink a:not(.btn),
+.execution:not(.is-idle, .is-compact) a:not(.btn) {
+  color: var(--ink);
+  text-decoration-color: var(--ink-3);
+}
+
+.on-ink a:not(.btn):hover,
+.execution:not(.is-idle, .is-compact) a:not(.btn):hover {
+  color: var(--ink);
+  text-decoration-color: var(--ink);
+}
+
+@media (prefers-color-scheme: dark) {
+  .on-ink,
+  .execution:not(.is-idle, .is-compact) {
+    --paper: #28241f;
+    --surface: #28241f;
+    --well: #332e28;
+    --line: #443e36;
+    --line-strong: #61574c;
+    --line-mark: #938779;
+    --ink-2: #d6ccc0;
+    --ink-3: #b5a99c;
+    --good: #97dba8;
+    --warn: #efc46c;
+    --bad: #ffa79c;
+    --work: #9ccaf2;
+    --bar-bad: #d0324a;
+    --accent-wash: #46291a;
+    --good-wash: #243428;
+    --warn-wash: #3d3214;
+    --bad-wash: #4a2126;
+    --work-wash: #22313f;
+
+    /* A step above the page is not much on its own: the heaviest rule on the page says it. */
+    box-shadow: inset 0 3px 0 var(--ink);
   }
 }
 
@@ -104,12 +230,14 @@ body {
   min-width: 320px;
   background: var(--paper);
   color: var(--ink);
-  font: 0.9375rem/1.55 var(--sans);
+  font: 0.9375rem/1.5 var(--sans);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 h1,
 h2,
+h3,
 p,
 ul,
 ol,
@@ -131,24 +259,29 @@ fieldset {
   border: 0;
 }
 
+/*
+ * A link in running text or in a list is ink and underlined, wherever it stands; the
+ * accent is left for what asks for action. A link that makes its whole row or card the
+ * target carries an arrow instead (see .cover-link).
+ */
 a {
-  color: var(--accent);
+  color: var(--ink);
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
 }
 
 a:hover {
-  color: var(--accent-strong);
+  color: var(--accent);
 }
 
 strong {
-  font-weight: 620;
+  font-weight: 600;
 }
 
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: 5px;
+  border-radius: 3px;
 }
 
 [hidden] {
@@ -159,14 +292,14 @@ strong {
 .code {
   font-family: var(--mono);
   font-size: 0.92em;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
 }
 
 .code {
   display: inline-block;
   padding: 2px 8px;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 4px;
   background: var(--well);
   overflow-wrap: anywhere;
 }
@@ -184,11 +317,17 @@ strong {
   white-space: nowrap;
 }
 
+/* Last in the page and one pixel tall: where it stands, it would make the page scroll by one pixel. */
+#announcer {
+  position: fixed;
+  top: 0;
+}
+
 .eyebrow {
   color: var(--ink-3);
-  font-size: 0.75rem;
-  font-weight: 620;
-  letter-spacing: 0.08em;
+  font-size: 0.71875rem;
+  font-weight: 600;
+  letter-spacing: 0.085em;
   line-height: 1.4;
   text-transform: uppercase;
 }
@@ -243,27 +382,35 @@ strong {
 
 .masthead-inner {
   display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
-  gap: 40px;
-  max-width: 1224px;
-  min-height: 64px;
+  gap: 0 clamp(28px, 3.6vw, 56px);
+  max-width: var(--page);
+  min-height: 68px;
   margin: 0 auto;
   padding: 0 var(--gutter);
 }
 
 /*
  * One row where there is room for it; "Narrower screens" below has the rest. The
- * sections are never squeezed. If a row gets tight all the same, with a wider typeface
- * or larger text, the account block gives way and its texts end in an ellipsis, so
- * that nothing can come to lie on top of a link.
+ * sections are never squeezed. If a row gets too tight all the same, with a wider
+ * typeface or larger text, what does not fit moves down to a row of its own, so that
+ * nothing can come to lie on top of a link.
  */
 .brand {
   display: flex;
   flex: none;
   align-items: center;
   gap: 11px;
+  margin-inline: -6px;
+  padding-inline: 6px;
   color: var(--ink);
   text-decoration: none;
+}
+
+/* The link is as tall as the masthead: its ring stays inside, or its top would be off-screen. */
+.brand:focus-visible {
+  outline-offset: -3px;
 }
 
 .brand:hover {
@@ -271,6 +418,8 @@ strong {
 }
 
 .brand-mark {
+  display: block;
+  flex: none;
   width: 30px;
   height: 30px;
 }
@@ -279,27 +428,27 @@ strong {
   fill: var(--accent);
 }
 
-.brand-bars {
+.brand-grooves {
   fill: none;
   stroke: var(--paper);
-  stroke-width: 2.6;
-  stroke-linecap: round;
+  stroke-width: 1.8;
 }
 
 .brand-text {
   display: grid;
-  line-height: 1.2;
+  line-height: 1.12;
 }
 
 .brand-name {
-  font-size: 1.0625rem;
+  font-size: 1.1875rem;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.028em;
 }
 
 .brand-sub {
   color: var(--ink-3);
-  font-size: 0.75rem;
+  font-size: 0.71875rem;
+  letter-spacing: 0.002em;
 }
 
 .nav {
@@ -309,22 +458,38 @@ strong {
 
 .nav-list {
   display: flex;
-  gap: 26px;
+  gap: clamp(18px, 2vw, 30px);
 }
 
 .nav-list li {
   display: flex;
 }
 
+/* Room left and right of the word for the focus ring, taken back by the margins. */
 .nav-link {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  border-bottom: 2px solid transparent;
-  border-top: 2px solid transparent;
+  justify-content: center;
+  margin-inline: -6px;
+  padding-inline: 6px;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
   color: var(--ink-2);
-  font-weight: 520;
+  font-weight: 500;
+  letter-spacing: -0.005em;
   text-decoration: none;
   white-space: nowrap;
+}
+
+/* An invisible copy of the name in bold keeps the width of the link the same when it is the current one. */
+.nav-link::after {
+  content: attr(data-label);
+  height: 0;
+  overflow: hidden;
+  font-weight: 600;
+  pointer-events: none;
+  visibility: hidden;
 }
 
 .nav-link:hover {
@@ -334,11 +499,11 @@ strong {
 .nav-link[aria-current="page"] {
   border-bottom-color: var(--accent);
   color: var(--ink);
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .nav-link:focus-visible {
-  outline-offset: -4px;
+  outline-offset: -3px;
 }
 
 .account {
@@ -346,6 +511,7 @@ strong {
   flex: 0 1 auto;
   align-items: center;
   min-width: 0;
+  margin-left: auto;
 }
 
 .account-box {
@@ -372,8 +538,8 @@ strong {
   max-width: 260px;
   margin-left: auto;
   overflow: hidden;
-  font-size: 0.875rem;
-  font-weight: 560;
+  font-size: 0.84375rem;
+  font-weight: 600;
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -385,7 +551,7 @@ strong {
   gap: 6px;
   min-width: 0;
   color: var(--ink-3);
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   white-space: nowrap;
 }
 
@@ -410,9 +576,9 @@ strong {
 }
 
 .main {
-  max-width: 1224px;
+  max-width: var(--page);
   margin: 0 auto;
-  padding: 40px var(--gutter) 112px;
+  padding: clamp(20px, 2.2vw, 32px) var(--gutter) 96px;
 }
 
 .main:focus {
@@ -426,16 +592,45 @@ strong {
   text-align: center;
 }
 
-.page-head {
-  margin-bottom: 28px;
+body:has(.boot) .masthead {
+  display: none;
 }
 
+.boot {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 24px;
+  min-height: 80vh;
+  padding: 0;
+}
+
+.boot-mark {
+  width: 72px;
+  height: 72px;
+}
+
+.boot-mark .brand-grooves {
+  animation: breathe-soft 1.6s ease-in-out infinite;
+}
+
+.page {
+  container: page / inline-size;
+  animation: settle 0.5s var(--ease) backwards;
+}
+
+.page-head {
+  margin-bottom: clamp(18px, 1.8vw, 26px);
+}
+
+/* What stands to the right of the heading reads on the same line as the last line of the text. */
 .page-head-row {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
+  align-items: last baseline;
   justify-content: space-between;
-  gap: 16px 24px;
+  gap: 16px 32px;
 }
 
 .page-head-text {
@@ -445,18 +640,18 @@ strong {
 /* The eyebrow of a title is part of the heading and takes a row of its own above it. */
 .page-title .eyebrow {
   flex-basis: 100%;
-  margin-bottom: -4px;
+  margin-bottom: -2px;
 }
 
 .page-title {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 14px;
-  font-size: 2rem;
-  font-weight: 660;
-  letter-spacing: -0.028em;
-  line-height: 1.15;
+  gap: 10px 18px;
+  font-size: clamp(2rem, 1.7rem + 1.2vw, 2.75rem);
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  line-height: 1.05;
   overflow-wrap: anywhere;
 }
 
@@ -464,9 +659,31 @@ strong {
   outline: none;
 }
 
+/*
+ * A version at display size is set in the sans with tabular figures: a monospaced face
+ * leaves holes around the dots at this size. Below 20px versions stay monospaced.
+ */
+.page-title .mono,
+.run-version.mono,
+.release-figure .mono,
+.flash-version .mono,
+.station-version.mono,
+.release-version.mono,
+.device-version.mono {
+  font-family: var(--sans);
+  font-feature-settings: "tnum" 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.018em;
+}
+
 .page-title .mono {
-  font-size: 0.86em;
-  letter-spacing: -0.04em;
+  font-weight: 700;
+}
+
+.page.is-board .page-title .mono {
+  font-family: var(--mono);
+  font-size: 0.68em;
+  letter-spacing: -0.03em;
 }
 
 .page-title .badge {
@@ -474,14 +691,17 @@ strong {
 }
 
 .page-lede {
-  max-width: 66ch;
+  max-width: 62ch;
+  overflow-wrap: anywhere;
   margin-top: 8px;
   color: var(--ink-2);
   font-size: 1rem;
+  letter-spacing: -0.008em;
+  text-wrap: pretty;
 }
 
 .page-meta {
-  margin-top: 10px;
+  margin-top: 6px;
   color: var(--ink-2);
   font-size: 0.875rem;
 }
@@ -492,21 +712,23 @@ strong {
   text-wrap: balance;
 }
 
+/* To the right of the heading, and still to the right when a long text pushes it to a line below. */
 .page-tools {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px 14px;
+  margin-left: auto;
 }
 
 .back {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 16px;
+  margin-bottom: 18px;
   color: var(--ink-2);
   font-size: 0.875rem;
-  font-weight: 520;
+  font-weight: 500;
   text-decoration: none;
 }
 
@@ -519,18 +741,25 @@ strong {
 }
 
 .section-title {
-  margin: 36px 0 14px;
-  font-size: 1.1875rem;
-  font-weight: 650;
-  letter-spacing: -0.015em;
+  margin: clamp(36px, 4vw, 56px) 0 0;
+  padding-top: 12px;
+  border-top: 2px solid var(--rule);
+  font-size: 1.0625rem;
+  font-weight: 700;
+  letter-spacing: -0.018em;
+}
+
+.section-title + .card {
+  border-top: 0;
 }
 
 .freshness {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   color: var(--ink-3);
   font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -539,14 +768,14 @@ strong {
   align-items: center;
   gap: 8px;
   color: var(--ink-2);
-  font-weight: 560;
+  font-weight: 600;
 }
 
 .live-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--bar-live);
   animation: breathe 1.8s ease-in-out infinite;
 }
 
@@ -561,25 +790,23 @@ strong {
   padding: 0 15px;
   border: 1px solid var(--line-field);
   border-radius: var(--radius-small);
-  background: var(--surface);
+  background: transparent;
   color: var(--ink);
   cursor: pointer;
   font: inherit;
-  font-size: 0.9rem;
-  font-weight: 560;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: -0.006em;
   text-decoration: none;
   white-space: nowrap;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   -webkit-appearance: none;
   appearance: none;
 }
 
 .btn:hover {
   border-color: var(--ink);
-}
-
-.btn:disabled {
-  cursor: default;
-  opacity: 0.5;
+  color: var(--ink);
 }
 
 .btn.is-primary {
@@ -588,9 +815,10 @@ strong {
   color: var(--on-accent);
 }
 
-.btn.is-primary:hover:not(:disabled) {
+.btn.is-primary:hover:not(:disabled, [aria-disabled="true"]) {
   border-color: var(--accent-strong);
   background: var(--accent-strong);
+  color: var(--on-accent);
 }
 
 .btn.is-danger {
@@ -629,10 +857,36 @@ strong {
   height: 15px;
 }
 
+.btn.is-large {
+  min-height: 48px;
+  padding: 0 26px;
+  font-size: 1rem;
+}
+
 .btn.is-icon {
+  flex: none;
   width: 34px;
   min-height: 34px;
   padding: 0;
+}
+
+/*
+ * What cannot be used now. Its words stay readable: it is often the main action of a
+ * dialog, and there is a hint next to it that says what it waits for. After every other
+ * look of a button, so that it wins over them. A button whose request is on its way
+ * keeps the keyboard's focus, and is only held back (aria-disabled).
+ */
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  border-color: var(--line-strong);
+  background: var(--well);
+  color: var(--ink-3);
+  cursor: default;
+}
+
+.btn.is-quiet:disabled {
+  border-color: transparent;
+  background: none;
 }
 
 .button-row {
@@ -645,14 +899,15 @@ strong {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 2px 10px 2px 7px;
+  padding: 2px 9px 2px 6px;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: 4px;
   background: var(--well);
   color: var(--ink);
   font-family: var(--sans);
-  font-size: 0.8125rem;
-  font-weight: 560;
+  font-size: 0.78125rem;
+  font-weight: 600;
+  letter-spacing: -0.003em;
   line-height: 1.5;
   white-space: nowrap;
 }
@@ -676,7 +931,10 @@ strong {
   background: var(--bad-wash);
 }
 
-.badge.is-live,
+.badge.is-live {
+  background: var(--work-wash);
+}
+
 .badge.is-act {
   background: var(--accent-wash);
 }
@@ -699,7 +957,10 @@ strong {
   color: var(--bad);
 }
 
-.is-live > .icon,
+.is-live > .icon {
+  color: var(--work);
+}
+
 .is-act > .icon {
   color: var(--accent);
 }
@@ -713,18 +974,38 @@ strong {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-weight: 560;
+  max-width: 100%;
+  font-weight: 600;
+}
+
+/* A word wider than the room, at large text, breaks rather than leaving its panel. */
+.status > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+}
+
+/* No news: said, but not with the weight of news. */
+.status.is-quiet {
+  color: var(--ink-3);
+  font-weight: 400;
+}
+
+.status.is-quiet > .icon {
+  color: var(--ink-3);
 }
 
 .status-value {
   color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
   font-weight: 500;
 }
 
 /*
  * A run of short facts with a dot between them. Each item carries its dot on the left;
  * the list is shifted left by the same amount and clipped there, so a dot that lands at
- * the start of a line after wrapping is never seen.
+ * the start of a line after wrapping is never seen. Only there: on the other sides the
+ * focus ring of a button in the list stays whole.
  */
 .dotted {
   display: flex;
@@ -732,27 +1013,32 @@ strong {
   align-items: center;
   row-gap: 2px;
   margin-left: -18px;
-  clip-path: inset(0 0 0 18px);
+  clip-path: inset(-6px -6px -6px 18px);
 }
 
 .dotted > * {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
   padding-left: 18px;
+  overflow-wrap: anywhere;
 }
 
+/* A separator for the eye: not read out. */
 .dotted > *::before {
   content: "\00b7";
+  content: "\00b7" / "";
   position: absolute;
   left: 7px;
 }
 
 .tag {
-  padding: 1px 9px;
+  padding: 1px 8px;
   border: 1px solid var(--line-strong);
-  border-radius: 999px;
+  border-radius: 4px;
   color: var(--ink-2);
-  font-size: 0.75rem;
-  font-weight: 540;
+  font-size: 0.71875rem;
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -762,13 +1048,18 @@ strong {
   color: var(--ink);
 }
 
+.tag.is-bad {
+  border-color: transparent;
+  background: var(--bad-wash);
+  color: var(--ink);
+}
+
+/* A section of a page: a heavy rule and a heading, no box. */
 .card {
   position: relative;
   min-width: 0;
-  padding: 24px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
+  padding: 12px 0 0;
+  border-top: 2px solid var(--rule);
 }
 
 .card.is-flush {
@@ -777,11 +1068,34 @@ strong {
 
 .card-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   min-height: 20px;
   margin-bottom: 16px;
+}
+
+.card > .card-head > .eyebrow {
+  color: var(--ink);
+  font-size: 1.0625rem;
+  font-weight: 700;
+  letter-spacing: -0.018em;
+  text-transform: none;
+}
+
+/* A section inside a panel carries no rule of its own; the panel holds it together. */
+.card.is-zone {
+  padding: 0;
+  border-top: 0;
+}
+
+.card.is-zone > .card-head > .eyebrow {
+  color: var(--ink-3);
+  font-size: 0.71875rem;
+  font-weight: 600;
+  letter-spacing: 0.085em;
+  text-transform: uppercase;
 }
 
 .card-more {
@@ -790,7 +1104,7 @@ strong {
   gap: 4px;
   color: var(--ink-2);
   font-size: 0.8125rem;
-  font-weight: 520;
+  font-weight: 500;
   text-decoration: none;
   white-space: nowrap;
 }
@@ -798,15 +1112,47 @@ strong {
 .card-more .icon {
   width: 14px;
   height: 14px;
+  transition: transform 0.2s var(--ease);
 }
 
 .card-more:hover {
   color: var(--accent);
 }
 
+.card-more:hover .icon {
+  transform: translateX(2px);
+}
+
 .card-note {
   color: var(--ink-2);
   font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+/* The ink panel: what matters most on this page. */
+.panel {
+  position: relative;
+  isolation: isolate;
+  margin-bottom: clamp(28px, 3.4vw, 48px);
+  padding: clamp(20px, 2.9vw, 40px);
+  border-radius: var(--radius);
+}
+
+.arch-watermark {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: -1;
+  width: min(30%, 420px);
+  height: 86%;
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.panel .quiet {
+  color: var(--ink-3);
 }
 
 .facts {
@@ -820,7 +1166,7 @@ strong {
  */
 .fact {
   display: grid;
-  grid-template-columns: 104px minmax(0, 1fr);
+  grid-template-columns: 96px minmax(0, 1fr);
   align-items: start;
   gap: 4px 16px;
   padding: 12px 0;
@@ -834,7 +1180,7 @@ strong {
 .fact dt {
   color: var(--ink-3);
   font-size: 0.8125rem;
-  line-height: 1.5rem;
+  line-height: 1.625rem;
 }
 
 .fact dd {
@@ -843,12 +1189,13 @@ strong {
   align-items: center;
   gap: 6px 10px;
   min-width: 0;
-  min-height: 1.5rem;
+  /* The height of a badge: a row with one is as tall as the same row in the card next to it. */
+  min-height: 1.625rem;
 }
 
 .fact-strong {
   font-size: 1rem;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .fact-stack {
@@ -860,6 +1207,8 @@ strong {
 
 .fact-note {
   flex-basis: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--ink-2);
   font-size: 0.8125rem;
 }
@@ -882,6 +1231,7 @@ strong {
 
 .digest-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
   min-width: 0;
@@ -890,10 +1240,11 @@ strong {
 .meter {
   width: 100%;
   max-width: 440px;
-  height: 6px;
+  height: 8px;
   overflow: hidden;
-  border-radius: 999px;
-  background: var(--accent-wash);
+  border: 1px solid var(--line-field);
+  border-radius: 2px;
+  background: var(--work-wash);
 }
 
 .meter-fill {
@@ -901,8 +1252,8 @@ strong {
   width: var(--progress, 0%);
   height: 100%;
   border-radius: inherit;
-  background: var(--accent);
-  transition: width 0.6s ease;
+  background: var(--bar-live);
+  transition: width 0.6s var(--ease);
 }
 
 .meter.is-busy .meter-fill {
@@ -911,12 +1262,14 @@ strong {
 }
 
 .signal {
-  width: 20px;
+  display: block;
+  flex: none;
+  width: 22px;
   height: 16px;
 }
 
 .signal rect {
-  fill: var(--line-strong);
+  fill: var(--line-field);
 }
 
 .signal .is-on {
@@ -927,15 +1280,282 @@ strong {
   display: inline-flex;
   align-items: center;
   gap: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A reading on a scale: four bands, a needle at the board's level. */
+.signal-scale {
+  flex-basis: 100%;
+  max-width: 420px;
+  margin-top: 10px;
+}
+
+.signal-track {
+  display: flex;
+  position: relative;
+  gap: 2px;
+}
+
+.signal-band {
+  flex: var(--span) 1 0;
+  min-width: 0;
+  padding-top: 12px;
+  border-top: 4px solid var(--line-strong);
+  color: var(--ink-3);
+  font-size: 0.71875rem;
+}
+
+.signal-band.is-here {
+  border-top-color: var(--ink);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.signal-band-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.signal-needle {
+  position: absolute;
+  top: -6px;
+  left: var(--at);
+  width: 2px;
+  height: 16px;
+  margin-left: -1px;
+  background: var(--ink);
+}
+
+.signal-needle::before {
+  content: "";
+  position: absolute;
+  top: -2px;
+  left: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+
+/* Parts of a whole. */
+
+.segments {
+  display: flex;
+  gap: 2px;
+  width: 100%;
+}
+
+.segment {
+  display: flex;
+  flex: var(--share, 1) 1 0;
+  align-items: center;
+  min-width: 6px;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 4px;
+  color: var(--on-bar);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  transform-origin: left center;
+  animation: grow 0.7s var(--ease) backwards;
+}
+
+.segments.is-thin .segment {
+  height: 8px;
+  padding: 0;
+  border-radius: 1px;
+}
+
+.segments.is-thin .segment:first-child {
+  border-radius: 4px 1px 1px 4px;
+}
+
+.segments.is-thin .segment:last-child {
+  border-radius: 1px 4px 4px 1px;
+}
+
+.segments.is-thin .segment:only-child {
+  border-radius: 4px;
+}
+
+.segment.is-good,
+.swatch.is-good {
+  background: var(--bar-good);
+}
+
+.segment.is-live,
+.swatch.is-live {
+  background: var(--bar-live);
+}
+
+.segment.is-act,
+.swatch.is-act {
+  background: var(--bar-act);
+}
+
+.segment.is-wait,
+.swatch.is-wait {
+  background: var(--bar-wait);
+}
+
+.segment.is-bad,
+.swatch.is-bad {
+  background: var(--bar-bad);
+}
+
+.segment.is-warn,
+.swatch.is-warn {
+  background: var(--bar-warn);
+}
+
+.segment.is-idle,
+.swatch.is-idle {
+  background: var(--bar-idle);
+}
+
+.segment.is-idle {
+  color: var(--on-bar);
+}
+
+.segment.is-bad {
+  color: var(--on-bar-bad);
+}
+
+.segment.is-live {
+  color: var(--on-bar-live);
+}
+
+.swatch {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin-top: 12px;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* Big numbers. Proportional figures: tabular ones look loose at this size. */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 20px 0;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 18px;
+  border-left: 1px solid var(--line);
+}
+
+/* A row of numbers that opens a panel starts at the panel's edge. */
+.deployments-panel .stat:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.stat-value {
+  order: -1;
+  font-size: clamp(2.25rem, 2rem + 1vw, 3rem);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 1;
+}
+
+.stat-label {
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.stat-note {
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+/* One tile per board. */
+.tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tile {
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--ink-3);
+  border-radius: 3px;
+}
+
+.tile.is-on {
+  border-color: var(--bar-good);
+  background: var(--bar-good);
+}
+
+.tile.is-never {
+  border-style: dashed;
+  border-color: var(--line-field);
+}
+
+.tile.is-newest {
+  border-color: var(--seg-newest);
+  background: var(--seg-newest);
+}
+
+.tile.is-older-1 {
+  border-color: var(--seg-1);
+  background: var(--seg-1);
+}
+
+.tile.is-older-2 {
+  border-color: var(--seg-2);
+  background: var(--seg-2);
+}
+
+.tile.is-older-3 {
+  border-color: var(--seg-3);
+  background: var(--seg-3);
+}
+
+/* Boards that have not said what they run are not a version: an outline, hatched. */
+.tile.is-none {
+  border-color: var(--line-field);
+  background: repeating-linear-gradient(135deg, var(--line-field) 0 1.5px, transparent 1.5px 4px);
+}
+
+.tile-words {
+  margin-top: 10px;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
 }
 
 .notice {
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 12px 14px;
+  padding: 13px 16px;
   border: 1px solid var(--line);
-  border-radius: 11px;
+  border-radius: var(--radius);
   background: var(--well);
 }
 
@@ -947,11 +1567,6 @@ strong {
 .notice.is-warn {
   border-color: transparent;
   background: var(--warn-wash);
-}
-
-/* The accent on the red wash falls just short of 4.5:1. A link there is ink, and underlined. */
-.notice.is-bad a:not(.btn) {
-  color: var(--ink);
 }
 
 .notice > .icon {
@@ -982,8 +1597,28 @@ strong {
   display: grid;
   justify-items: center;
   gap: 8px;
-  padding: 40px 12px;
+  padding: clamp(32px, 6vw, 72px) 12px;
   text-align: center;
+}
+
+/* A line drawing of what is missing. */
+.drawing {
+  width: 176px;
+  height: 110px;
+  margin-bottom: 14px;
+  fill: none;
+  stroke: var(--ink-3);
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.drawing .is-accent {
+  stroke: var(--accent);
+}
+
+.drawing .is-dashed {
+  stroke-dasharray: 3 4;
 }
 
 .empty-icon {
@@ -1003,13 +1638,15 @@ strong {
 }
 
 .empty-title {
-  font-size: 1.0625rem;
-  font-weight: 620;
+  font-size: 1.375rem;
+  font-weight: 700;
+  letter-spacing: -0.024em;
 }
 
 .empty-text {
   max-width: 54ch;
   color: var(--ink-2);
+  overflow-wrap: anywhere;
 }
 
 .empty .btn {
@@ -1020,9 +1657,9 @@ strong {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
-  gap: 14px 24px;
+  gap: 14px 32px;
   position: relative;
-  padding: 20px 24px;
+  padding: 22px 0;
   border-top: 1px solid var(--line);
 }
 
@@ -1038,17 +1675,20 @@ strong {
 }
 
 .row-title {
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .row-note {
   color: var(--ink-2);
   font-size: 0.875rem;
+  overflow-wrap: anywhere;
 }
 
 .row-chevron {
+  display: flex;
   align-self: center;
   color: var(--ink-3);
+  transition: transform 0.2s var(--ease), color 0.2s ease;
 }
 
 /* A link that makes its whole row or card the target. */
@@ -1061,7 +1701,6 @@ strong {
   content: "";
   position: absolute;
   inset: 0;
-  border-radius: inherit;
 }
 
 .cover-link:focus-visible {
@@ -1070,27 +1709,19 @@ strong {
 
 .cover-link:focus-visible::after {
   outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline-offset: 2px;
 }
 
+/* The tint runs a little past the text on both sides, without moving anything. */
 .row:has(> .row-main .cover-link:hover),
 .row:has(> .cover-link:hover) {
   background: var(--well);
+  box-shadow: -12px 0 0 var(--well), 12px 0 0 var(--well);
 }
 
-.rows > .row:first-child,
-.rows > .row:first-child .cover-link::after {
-  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
-}
-
-.rows > .row:last-child,
-.rows > .row:last-child .cover-link::after {
-  border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
-}
-
-.rows > .row:only-child,
-.rows > .row:only-child .cover-link::after {
-  border-radius: calc(var(--radius) - 1px);
+.row:has(> .row-main .cover-link:hover) .row-chevron {
+  color: var(--accent);
+  transform: translateX(3px);
 }
 
 .plain-list {
@@ -1117,7 +1748,7 @@ strong {
 
 .field-label {
   font-size: 0.875rem;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .field-label .quiet {
@@ -1132,7 +1763,7 @@ strong {
 /* How much of a limited field is used, shown once the limit is in sight. */
 .field-count {
   color: var(--ink-2);
-  font-weight: 560;
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -1157,36 +1788,79 @@ textarea.input {
 
 /* Sign-in and other full-page messages. */
 
+body:has(.gate) .masthead:has(.nav[hidden]) {
+  display: none;
+}
+
+.main:has(> .gate) {
+  max-width: none;
+  padding: 0;
+}
+
 .gate {
   display: grid;
-  justify-items: center;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.gate-copy {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 48px;
+  padding: clamp(24px, 4vw, 56px) clamp(20px, 5vw, 88px);
+}
+
+.gate-brand {
+  display: flex;
+  align-items: center;
   gap: 12px;
-  max-width: 480px;
-  margin: 11vh auto 0;
-  text-align: center;
+}
+
+.gate-brand .brand-mark {
+  width: 36px;
+  height: 36px;
+}
+
+.gate-brand-text {
+  display: grid;
+  line-height: 1.12;
+}
+
+.gate-brand-name {
+  font-size: 1.375rem;
+  font-weight: 700;
+  letter-spacing: -0.028em;
+}
+
+.gate-brand-sub {
+  color: var(--ink-3);
+  font-size: 0.78125rem;
+}
+
+.gate-message {
+  display: grid;
+  justify-items: start;
+  gap: 16px;
+  max-width: 34rem;
 }
 
 .gate-icon {
-  display: grid;
-  place-items: center;
-  width: 56px;
-  height: 56px;
-  margin-bottom: 4px;
-  border-radius: 50%;
-  background: var(--well);
-  color: var(--ink-2);
+  color: var(--accent);
 }
 
 .gate-icon .icon {
-  width: 24px;
-  height: 24px;
+  width: 30px;
+  height: 30px;
 }
 
 .gate-title {
-  font-size: 1.5rem;
-  font-weight: 660;
-  letter-spacing: -0.02em;
-  line-height: 1.25;
+  font-size: clamp(2.5rem, 1.75rem + 3vw, 4.75rem);
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  line-height: 1;
+  text-wrap: balance;
 }
 
 .gate-title:focus {
@@ -1195,121 +1869,312 @@ textarea.input {
 
 .gate-text {
   color: var(--ink-2);
+  font-size: clamp(1rem, 0.95rem + 0.3vw, 1.1875rem);
+  letter-spacing: -0.008em;
+  text-wrap: pretty;
 }
 
 .gate .btn {
-  margin-top: 8px;
+  margin-top: 12px;
+}
+
+.gate-foot {
+  max-width: 34rem;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+.gate-art {
+  position: relative;
+  min-height: 240px;
+  overflow: hidden;
+  background: var(--well);
+}
+
+.dome-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.art-dome {
+  fill: var(--accent);
+}
+
+.art-groove {
+  fill: none;
+  stroke: var(--well);
+  stroke-width: 2.5;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: draw 1.6s var(--ease) calc(var(--step) * 70ms + 100ms) forwards;
+}
+
+/* On the way somewhere: the grooves light up from the middle outwards, over and over. */
+.gate.is-moving .art-groove {
+  stroke-dashoffset: 0;
+  animation: groove-wave 2.2s ease-in-out calc(var(--step) * 120ms) infinite;
 }
 
 /* Overview. */
 
+.overview-panel {
+  display: grid;
+  gap: clamp(24px, 2.6vw, 36px);
+}
+
+.card.updates {
+  padding-bottom: clamp(22px, 2.6vw, 34px);
+  border-bottom: 1px solid var(--line);
+}
+
+.fleet {
+  display: grid;
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.5fr) minmax(0, 1fr);
+  gap: clamp(24px, 3vw, 48px);
+}
+
+.fleet > .card + .card {
+  padding-left: clamp(24px, 3vw, 48px);
+  border-left: 1px solid var(--line);
+}
+
 .overview {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
   align-items: start;
-  gap: 20px;
-}
-
-.overview-main,
-.overview-side,
-.overview-pair {
-  display: grid;
-  gap: 20px;
-  min-width: 0;
-}
-
-.overview-pair {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(32px, 4.4vw, 72px);
 }
 
 .figure {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 4px 10px;
+  gap: 2px 12px;
   margin-bottom: 18px;
 }
 
 .figure-value {
-  font-size: 3.25rem;
-  font-weight: 640;
-  letter-spacing: -0.04em;
-  line-height: 1;
+  color: var(--ink);
+  font-size: clamp(2.75rem, 2.4rem + 1.2vw, 3.5rem);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 0.95;
 }
 
 .figure-unit {
   color: var(--ink-2);
+  font-size: 1rem;
+  letter-spacing: -0.008em;
 }
 
-.board-list,
+.fleet-headline {
+  margin-bottom: 18px;
+  color: var(--ink-2);
+}
+
+/* The fleet by firmware: a row per version, one tile per board. */
 .fleet-list {
   display: grid;
+  gap: 2px;
 }
 
-.board-line,
 .fleet-line {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 4px 10px;
-  min-width: 0;
-  padding: 9px 0;
+  gap: 4px 14px;
+  min-height: 34px;
+  padding: 4px 0;
   border-top: 1px solid var(--line);
 }
 
-.fleet-line:first-child {
-  border-top: 0;
-  padding-top: 0;
+.fleet-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 9px;
+  min-width: 0;
 }
 
-.board-line:last-child,
-.fleet-line:last-child {
-  padding-bottom: 0;
-}
-
-.board-line .mono {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.board-line a {
-  color: var(--ink);
-  text-decoration: none;
-}
-
-.board-line a:hover {
-  color: var(--accent);
-  text-decoration: underline;
-}
-
-.board-line-note {
-  margin-left: auto;
+.fleet-count {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px 9px;
   color: var(--ink-3);
   font-size: 0.8125rem;
   white-space: nowrap;
 }
 
-/*
- * Where the list is too narrow for a board and its state on one line (a phone, the side
- * column), every board takes two lines, its state under its name. Left to wrap by
- * itself, only the boards with a longer state would, and the list would be ragged.
- */
-.board-list {
-  container-type: inline-size;
+.fleet-line .tiles {
+  justify-content: flex-end;
+  max-width: 220px;
 }
 
-@container (max-width: 360px) {
-  .board-line-note {
-    flex-basis: 100%;
-    margin-left: 19px;
+.fleet-version {
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.fleet-version.quiet {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+/* A table of boards, as far as a list of lines can be one. */
+.board-list {
+  display: grid;
+  container: board-list / inline-size;
+}
+
+.board-more {
+  margin-top: 12px;
+}
+
+.board-line,
+.board-head {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1.75fr) minmax(0, 0.8fr) minmax(0, 0.75fr) minmax(0, 1.25fr);
+  align-items: center;
+  gap: 4px 14px;
+  min-width: 0;
+  padding: 13px 0;
+  border-top: 1px solid var(--line);
+}
+
+
+/* The names of the columns, where they stand as columns. */
+.board-head {
+  padding: 0 0 8px;
+  border-top: 0;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.board-head > :first-child {
+  grid-column: 2;
+}
+
+.board-head + .board-line {
+  border-top: 1px solid var(--line-strong);
+}
+
+.board-line-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 500;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-line-name:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.board-line-who {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.board-line-fw {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 7px;
+  font-weight: 500;
+}
+
+.board-line-fw .quiet,
+.board-line-signal .quiet {
+  font-size: 0.8125rem;
+  font-weight: 400;
+}
+
+.board-line-mark {
+  display: inline-flex;
+  color: var(--good);
+}
+
+.board-line-update {
+  min-width: 0;
+  font-size: 0.8125rem;
+}
+
+.board-line-update .status {
+  align-items: flex-start;
+  font-weight: 500;
+}
+
+.board-line-update .icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+}
+
+.board-line-signal {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.board-line-note {
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+@container board-list (max-width: 38.75rem) {
+  .board-head {
+    display: none;
+  }
+
+  .board-head + .board-line {
+    padding-top: 2px;
+    border-top: 0;
+  }
+
+  .board-line {
+    grid-template-columns: 12px minmax(0, 1fr);
+  }
+
+  .presence-dot {
+    align-self: start;
+    margin-top: 6px;
+  }
+
+  .board-line-fw,
+  .board-line-signal,
+  .board-line-update {
+    grid-column: 2;
+  }
+
+  .board-line-fw {
+    font-size: 0.875rem;
+  }
+}
+
+/* Too narrow for a whole name on one line: it wraps, and every fact stands under it. */
+@container board-list (max-width: 26.25rem) {
+  .board-line-name {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 }
 
 .presence-dot {
   flex: none;
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
   border: 1.5px solid var(--ink-3);
   border-radius: 50%;
 }
@@ -1319,43 +2184,21 @@ textarea.input {
   background: var(--good);
 }
 
-/* In rem, not ch: the versions are monospace and "Not reported" is not, and both start the same column. */
-.fleet-version {
-  min-width: 7.25rem;
-  font-size: 1rem;
-  font-weight: 620;
-}
-
-.pips {
-  display: inline-flex;
-  gap: 3px;
-}
-
-.pip {
-  width: 10px;
-  height: 10px;
-  border-radius: 3px;
-  background: var(--ink);
-}
-
-.fleet-count {
-  color: var(--ink-2);
-  font-size: 0.875rem;
-}
-
 .release-figure {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 12px;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .release-figure .mono {
-  font-size: 1.75rem;
-  font-weight: 640;
-  letter-spacing: -0.04em;
-  line-height: 1.1;
+  min-width: 0;
+  font-size: clamp(2rem, 1.5rem + 1.4vw, 3rem);
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  line-height: 1;
+  overflow-wrap: anywhere;
 }
 
 .card-note + .card-note {
@@ -1364,24 +2207,85 @@ textarea.input {
 
 .calm {
   display: grid;
-  gap: 6px;
+  gap: 8px;
 }
 
 .calm-title {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 1.0625rem;
-  font-weight: 620;
+  gap: 12px;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+  font-size: clamp(1.375rem, 1.2rem + 0.7vw, 1.875rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.calm-title .icon {
+  flex: none;
+  width: 1.05em;
+  height: 1.05em;
+}
+
+.calm-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.calm-outcome {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.calm.is-bad,
+.calm.is-warn {
+  padding: clamp(14px, 1.6vw, 22px) clamp(14px, 1.8vw, 24px);
+  border-left: 4px solid var(--bar-bad);
+  border-radius: 0 var(--radius-small) var(--radius-small) 0;
+  background: var(--bad-wash);
+}
+
+.calm.is-warn {
+  border-left-color: var(--bar-warn);
+  background: var(--warn-wash);
+}
+
+/* The end of a demonstration: an update that went through is not the quietest outcome. */
+.calm.is-good {
+  padding: clamp(18px, 2vw, 28px) clamp(16px, 2vw, 28px);
+  border-left: 4px solid var(--bar-good);
+  border-radius: 0 var(--radius-small) var(--radius-small) 0;
+  background: var(--good-wash);
+}
+
+.calm.is-good .calm-title {
+  font-size: clamp(1.75rem, 1.3rem + 1.7vw, 2.875rem);
+  letter-spacing: -0.022em;
+}
+
+/* On a wash, the mark takes the colour that stands out from it. */
+.calm .segment.is-bad {
+  background: var(--bad);
 }
 
 .run-list {
   display: grid;
-  gap: 20px;
+  gap: 28px;
+}
+
+.board-run-state .status .icon {
+  width: 0.92em;
+  height: 0.92em;
 }
 
 .run + .run {
-  padding-top: 20px;
+  padding-top: 24px;
   border-top: 1px solid var(--line);
 }
 
@@ -1389,41 +2293,83 @@ textarea.input {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 4px 14px;
-  margin-bottom: 6px;
+  gap: 4px 16px;
+  margin-bottom: 20px;
 }
 
 .run-version {
   color: var(--ink);
-  font-size: 1.25rem;
-  font-weight: 640;
-  letter-spacing: -0.03em;
+  font-size: clamp(1.25rem, 1.15rem + 0.5vw, 1.625rem);
+  font-weight: 600;
+  line-height: 1.1;
+  text-decoration: none;
+}
+
+.run-version:hover {
+  text-decoration: underline;
 }
 
 .run-note {
-  margin-bottom: 6px;
+  margin-bottom: 10px;
 }
 
 .board-runs {
   display: grid;
+  gap: 22px;
 }
 
 .board-run {
   display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
-  align-items: start;
-  gap: 4px 20px;
-  padding: 11px 0;
-  border-top: 1px solid var(--line);
+  gap: 18px;
 }
 
-.board-run:last-child {
-  padding-bottom: 0;
+.board-run-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 4px 28px;
+}
+
+.board-run-who {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* On the overview too, the moment that waits for a person has a look of its own. */
+.board-run.is-act .board-run-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 16px 20px;
+  border-radius: var(--radius-small);
+  background: var(--accent-wash);
+}
+
+.board-run.is-act .board-run-note {
+  color: var(--ink);
+}
+
+.board-run-figure {
+  font-size: clamp(4rem, 2.6rem + 3.4vw, 6.5rem);
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  line-height: 0.85;
+}
+
+/* With several boards under way no single one is the largest thing. */
+.board-runs:has(> .board-run:nth-child(3)) .board-run-figure {
+  font-size: clamp(2.5rem, 2rem + 1.4vw, 3.5rem);
+}
+
+.board-run-figure .execution-percent {
+  font-size: 0.55em;
+  vertical-align: 0.55em;
 }
 
 .board-run-name {
   overflow: hidden;
   color: var(--ink);
+  font-weight: 500;
   text-decoration: none;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1439,39 +2385,73 @@ textarea.input {
   min-width: 0;
 }
 
+.board-run-state .status {
+  font-size: clamp(1.5rem, 1.25rem + 1vw, 2.25rem);
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  line-height: 1.1;
+}
+
 .board-run-note {
-  color: var(--ink-3);
+  color: var(--ink-2);
   font-size: 0.8125rem;
 }
 
-.guide {
-  margin-bottom: 20px;
+.welcome {
+  margin-bottom: 28px;
+}
+
+.welcome.panel {
+  padding-bottom: clamp(32px, 4.4vw, 64px);
+}
+
+.guide .card-head {
+  margin-bottom: clamp(20px, 3vw, 36px);
+}
+
+.welcome.panel .guide {
+  padding: 0;
+  border-top: 0;
+}
+
+.welcome.panel .guide > .card-head > .eyebrow {
+  font-size: clamp(2rem, 1.5rem + 1.6vw, 3rem);
+  font-weight: 700;
+  letter-spacing: -0.028em;
+  line-height: 1.05;
 }
 
 .guide-steps {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 20px 28px;
+  gap: 24px clamp(24px, 3.4vw, 56px);
   counter-reset: guide;
 }
 
 .guide-step {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 12px;
+  align-content: start;
+  min-width: 0;
+  gap: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-strong);
   counter-increment: guide;
 }
 
+.guide-step.is-next {
+  border-top: 2px solid var(--accent);
+  padding-top: 13px;
+}
+
 .guide-mark {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 1.5px solid var(--line-strong);
-  border-radius: 50%;
-  color: var(--ink-2);
-  font-size: 0.8125rem;
-  font-weight: 620;
+  display: flex;
+  align-items: center;
+  height: 52px;
+  color: var(--ink-3);
+  font-size: 3.25rem;
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  line-height: 1;
 }
 
 .guide-mark:empty::before {
@@ -1479,25 +2459,25 @@ textarea.input {
 }
 
 .guide-mark .icon {
-  width: 14px;
-  height: 14px;
-  stroke-width: 2.4;
+  width: 32px;
+  height: 32px;
+  stroke-width: 2;
 }
 
 .guide-step.is-done .guide-mark {
-  border-color: transparent;
-  background: var(--good-wash);
   color: var(--good);
 }
 
 /* The next thing to do stands out; what is done steps back. */
 .guide-step.is-next .guide-mark {
-  border-color: var(--accent);
   color: var(--accent);
 }
 
 .guide-title {
-  font-weight: 620;
+  overflow-wrap: anywhere;
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.018em;
 }
 
 .guide-step.is-done .guide-title {
@@ -1505,38 +2485,88 @@ textarea.input {
 }
 
 .guide-text {
-  margin-top: 2px;
+  overflow-wrap: anywhere;
+  margin-top: 4px;
   color: var(--ink-2);
-  font-size: 0.9rem;
+  font-size: 0.9375rem;
+  text-wrap: pretty;
 }
 
 .guide-text .code {
-  margin-top: 6px;
+  margin-top: 8px;
+}
+
+/* A console that has not seen an update: what one looks like. */
+.journey {
+  margin-bottom: 28px;
+  padding-top: 12px;
+  border-top: 2px solid var(--rule);
+}
+
+.journey-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 8px clamp(24px, 4vw, 64px);
+  margin-bottom: clamp(22px, 2.6vw, 32px);
+}
+
+.journey-title {
+  font-size: 1.0625rem;
+  font-weight: 700;
+  letter-spacing: -0.018em;
+}
+
+.journey-text {
+  max-width: 68ch;
+  color: var(--ink-2);
+  text-wrap: pretty;
 }
 
 /* The activity log, here and on its own page. */
+
+.log {
+  position: relative;
+}
+
+/* The line that the entries of a day hang from, from each entry to the next. */
+.log-line:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  top: 47px;
+  bottom: -14px;
+  left: 16px;
+  width: 1px;
+  background: var(--line-strong);
+}
 
 .log-line {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
-  gap: 4px 14px;
-  padding: 15px 24px;
-  border-top: 1px solid var(--line);
-}
-
-.log-line:first-child {
-  border-top: 0;
+  gap: 4px 16px;
+  position: relative;
+  padding: 14px 0;
 }
 
 .log-icon {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 33px;
+  height: 33px;
+  border: 1px solid var(--line-strong);
   border-radius: 50%;
-  background: var(--well);
+  background: var(--paper);
   color: var(--ink-2);
+}
+
+.log-icon.is-bad {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.log-icon.is-warn {
+  border-color: var(--warn);
+  color: var(--warn);
 }
 
 .log-icon .icon {
@@ -1548,24 +2578,28 @@ textarea.input {
   display: grid;
   gap: 3px;
   min-width: 0;
-  padding-top: 3px;
+  padding-top: 5px;
 }
 
 .log-what {
   overflow-wrap: anywhere;
 }
 
+/* Slim enough to leave the height of its line alone, so that the time next to it stays level. */
 .log-what .badge {
   margin-left: 2px;
+  padding-block: 0;
+  line-height: 1.35;
   vertical-align: 1px;
 }
 
 .log-actor {
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .log-target {
   color: var(--ink);
+  font-weight: 500;
 }
 
 .log-detail {
@@ -1578,20 +2612,32 @@ textarea.input {
   color: var(--ink-3);
 }
 
+/* Its button reaches into the space between the lines, so that a line with one is as tall as one without. */
+.log-detail .btn.is-icon {
+  margin-block: -7px;
+}
+
 .log-when {
-  padding-top: 5px;
+  padding-top: 6px;
   color: var(--ink-3);
   font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.log.is-compact .log-line::before {
+  display: none;
 }
 
 .log.is-compact .log-line {
   grid-template-columns: minmax(0, 1fr) auto;
-  padding: 10px 0;
+  padding: 11px 0;
+  border-top: 1px solid var(--line);
 }
 
 .log.is-compact .log-line:first-child {
-  padding-top: 0;
+  padding-top: 2px;
+  border-top: 0;
 }
 
 .log.is-compact .log-line:last-child {
@@ -1611,27 +2657,72 @@ textarea.input {
   font-size: 0.875rem;
 }
 
-.log-day + .log-day {
-  margin-top: 28px;
+.log-summary {
+  margin-bottom: 18px;
+  color: var(--ink-2);
+  font-size: 0.875rem;
 }
 
-.log-day > .eyebrow {
-  margin-bottom: 10px;
+.log-scope {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.log-summary .status {
+  font-weight: 600;
+}
+
+.log-day {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.26fr) minmax(0, 1fr);
+  gap: 12px clamp(24px, 3vw, 48px);
+  padding: 14px 0 clamp(24px, 3vw, 40px);
+  border-top: 2px solid var(--rule);
+}
+
+.log-day-title {
+  align-self: start;
+  position: sticky;
+  top: 88px;
+  font-size: clamp(1.375rem, 1.2rem + 0.8vw, 2rem);
+  font-weight: 700;
+  letter-spacing: -0.028em;
+  line-height: 1.1;
 }
 
 .log-more {
   display: grid;
   justify-items: center;
   gap: 12px;
-  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
 }
 
 /* Devices. */
 
+.devices-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.4fr);
+  align-items: start;
+  gap: 20px clamp(32px, 4vw, 64px);
+}
+
+.devices-panel .eyebrow {
+  margin-bottom: 14px;
+}
+
+.devices-figure .figure {
+  margin-bottom: 14px;
+}
+
+.device-columns {
+  display: none;
+}
+
 .device-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 440px), 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  gap: clamp(32px, 3.6vw, 56px) clamp(24px, 3vw, 48px);
 }
 
 .device-head {
@@ -1659,9 +2750,35 @@ textarea.input {
   }
 }
 
+/* Side by side, the first rows of the cards line up even when one has more to say. */
+@media (min-width: 861px) {
+  .device-grid .device-head {
+    min-height: 72px;
+  }
+}
+
+.card.device {
+  container: device / inline-size;
+}
+
+/* A single board has the whole width: its facts stand side by side, like the numbers above them. */
+@container device (min-width: 860px) {
+  .device .facts {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-top: 1px solid var(--line);
+  }
+
+  .device .fact {
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    padding: 12px 20px 0 0;
+    border-top: 0;
+  }
+}
+
 .device-name {
-  font-size: 1.0625rem;
-  font-weight: 620;
+  font-size: 1rem;
+  font-weight: 600;
   letter-spacing: -0.01em;
   overflow-wrap: anywhere;
 }
@@ -1676,52 +2793,545 @@ textarea.input {
   color: var(--accent);
 }
 
-/* The focus ring of a card follows the corners of the card. */
-.device .cover-link::after {
-  border-radius: calc(var(--radius) - 1px);
-}
-
-.device:has(.cover-link:hover) {
-  border-color: var(--line-strong);
-}
-
 .device .fact-link,
 .device .badge {
   position: relative;
   z-index: 1;
 }
 
+/* The whole card is a link; the arrow says so before the pointer gets there. */
+.device-name .icon {
+  margin-left: 6px;
+  color: var(--ink-3);
+  vertical-align: -2px;
+}
+
+.device:has(.cover-link:hover) .device-name .icon {
+  color: var(--accent);
+}
+
+.device-help {
+  margin-top: 8px;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.device-version {
+  font-size: clamp(1.5rem, 1.3rem + 0.5vw, 1.875rem);
+  font-weight: 600;
+  line-height: 1.1;
+}
+
 .device-presence {
   margin-bottom: 16px;
+}
+
+/*
+ * A table once there is room for one: the same markup, so a phone keeps its stacked
+ * boards. The columns live here and on every row.
+ */
+@container page (min-width: 64rem) {
+  .device-grid {
+    /* A board's name with its arrow, and the longest badge, "Never connected", have their columns at every width. */
+    --device-columns: minmax(14.5rem, 1.5fr) minmax(8.5rem, 0.7fr) minmax(0, 1.1fr) minmax(0, 1.25fr) minmax(0, 0.9fr) minmax(0, 0.7fr);
+    display: block;
+    border-top: 2px solid var(--rule);
+  }
+
+  .device-columns,
+  .device-grid .device {
+    display: grid;
+    grid-template-columns: var(--device-columns);
+    align-items: start;
+    gap: 4px clamp(14px, 1.6vw, 24px);
+  }
+
+  .device-columns {
+    padding: 10px 0 8px;
+    color: var(--ink-3);
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .device-grid .device {
+    padding: 14px 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .device-grid .device-head {
+    display: contents;
+  }
+
+  .device-grid .device-head > div {
+    min-width: 0;
+  }
+
+  .device-grid .device-head > .badge {
+    justify-self: start;
+  }
+
+  .device-grid .device .facts {
+    display: contents;
+    border-top: 0;
+  }
+
+  .device-grid .device .fact {
+    display: block;
+    padding: 0;
+    border-top: 0;
+  }
+
+  .device-grid .fact dt {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .device-grid .device-version.mono {
+    font-family: var(--mono);
+    font-size: 0.9375rem;
+    letter-spacing: 0;
+  }
+
+  .device-grid .fact dd {
+    font-size: 0.875rem;
+  }
+
+  .device-grid .status {
+    align-items: flex-start;
+  }
+
+  .device-grid .status .icon {
+    flex: none;
+    margin-top: 2px;
+  }
+}
+
+/* What a board is doing, above what its flash holds. Old news is said smaller than news. */
+.board-now {
+  margin-bottom: clamp(18px, 1.9vw, 26px);
+}
+
+.board-now.is-idle .status {
+  font-size: clamp(1.125rem, 1rem + 0.4vw, 1.375rem);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.board-silent {
+  display: grid;
+  gap: 6px;
+}
+
+.board-silent-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: clamp(1.25rem, 1.1rem + 0.5vw, 1.5rem);
+  font-weight: 700;
+  letter-spacing: -0.018em;
+}
+
+.board-silent-title .icon {
+  flex: none;
+  color: var(--ink-3);
+}
+
+.board-silent-text {
+  max-width: 68ch;
+  color: var(--ink-2);
 }
 
 .split {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   align-items: start;
-  gap: 20px;
+  gap: clamp(32px, 4vw, 64px);
 }
 
 .stack {
   display: grid;
-  gap: 20px;
+  gap: clamp(28px, 3vw, 44px);
   min-width: 0;
 }
 
 .card:not(.is-flush) > .rows {
-  margin: -8px -24px -24px;
+  margin-top: -8px;
 }
 
-.history-row {
+.card:not(.is-flush) > .rows > .row {
+  padding: 16px 0;
+}
+
+.rows > .history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
+}
+
+/* At large text on a phone a state takes the whole row: side by side it would lie on the words. */
+@container page (max-width: 20rem) {
+  .page .rows > .history-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* What a board's flash holds: a map, read like a memory diagram. */
+
+.flash {
+  container: flash / inline-size;
+  min-width: 0;
+}
+
+.flash-title {
+  margin-bottom: 10px;
+}
+
+.flash-rows {
+  position: relative;
+  display: grid;
+  gap: 2px;
+}
+
+.flash-row {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 0.9fr) minmax(0, 1.5fr);
+  align-items: center;
+  gap: 2px 14px;
+  min-height: 46px;
+  padding: 7px 14px 7px 12px;
+  overflow: hidden;
+  border-left: 3px solid var(--line-mark);
+  border-radius: 0 var(--radius-small) var(--radius-small) 0;
+  background: var(--well);
+}
+
+/* The only fill on the map: bytes that are really arriving. */
+.flash-row.is-receiving::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: -1;
+  width: var(--fill, 0%);
+  background: var(--work-wash);
+  transition: width 0.6s var(--ease);
+}
+
+.flash-row.is-run {
+  border-left-color: var(--ink);
+}
+
+.flash-row.is-good {
+  border-left-color: var(--bar-good);
+}
+
+.flash-row.is-live {
+  border-left-color: var(--bar-live);
+}
+
+.flash-row.is-bad {
+  border-left-color: var(--bad);
+  background: var(--bad-wash);
+}
+
+.flash-row.is-boot {
+  min-height: 34px;
+  border-left-color: var(--line-strong);
+  background: none;
+}
+
+.flash-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.flash-version {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: clamp(1.125rem, 1.05rem + 0.3vw, 1.3125rem);
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.flash-version .mono {
+  font-size: 1em;
+}
+
+.flash-none {
+  color: var(--ink-2);
+  font-size: 0.9375rem;
+  font-weight: 500;
+}
+
+.flash-state {
+  display: inline-flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 7px;
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-align: right;
+}
+
+.flash-state .icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+}
+
+.flash-state > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Measured in text, not in pixels: at large text the columns run out of room sooner. */
+@container flash (max-width: 34rem) {
+  .flash-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .flash-state {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .flash-version {
+    text-align: right;
+  }
+}
+
+@container flash (max-width: 16rem) {
+  .flash-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .flash-version {
+    text-align: left;
+  }
+}
+
+.flash-row.is-good .flash-state .icon {
+  color: var(--good);
+}
+
+.flash-row.is-live .flash-state .icon {
+  color: var(--work);
+}
+
+.flash-row.is-bad .flash-state .icon {
+  color: var(--bad);
+}
+
+.flash-row.is-boot .flash-version,
+.flash-row.is-boot .flash-version .mono,
+.flash-row.is-boot .flash-state {
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  font-weight: 400;
+}
+
+.flash-row.is-boot .flash-state {
+  font-family: var(--sans);
+}
+
+/* While the board restarts, the two slots trade places: the glyph sits on their seam. */
+.flash-swap {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  height: 0;
+  color: var(--work);
+}
+
+.flash-swap .icon {
+  width: 26px;
+  height: 26px;
+  padding: 4px;
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.flash-note {
+  margin-top: 8px;
+  color: var(--ink-3);
+  font-size: 0.75rem;
 }
 
 /* Firmware. */
 
+/* The same heading as the releases under it. The rule above it belongs to the panel. */
+.timeline-head .timeline-title {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.timeline-panel.is-on-paper {
+  margin-bottom: clamp(28px, 3.4vw, 48px);
+  padding-top: 12px;
+  border-top: 2px solid var(--rule);
+}
+
+.timeline-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+  margin-bottom: clamp(22px, 2.6vw, 34px);
+}
+
+.timeline-count {
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+.timeline {
+  display: grid;
+  grid-template-columns: repeat(var(--stations, 3), minmax(0, 1fr)) 56px;
+}
+
+.station {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  position: relative;
+  min-width: 0;
+  padding: 44px 16px 0 0;
+}
+
+/* The line to the next station. */
+.station::before {
+  content: "";
+  position: absolute;
+  top: 14px;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: var(--line-strong);
+}
+
+.station.is-now::before {
+  display: none;
+}
+
+.station-mark {
+  display: grid;
+  place-items: center;
+  position: absolute;
+  top: 4px;
+  left: 0;
+  z-index: 1;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--ink);
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--surface);
+}
+
+.station.is-newest .station-mark {
+  top: 0;
+  width: 30px;
+  height: 30px;
+  border-color: var(--ink);
+  background: var(--ink);
+  box-shadow: inset 0 0 0 3px var(--surface);
+}
+
+.station.is-revoked .station-mark {
+  border-color: var(--bad);
+  background: var(--surface);
+  color: var(--bad);
+}
+
+.station-mark .icon {
+  width: 12px;
+  height: 12px;
+  stroke-width: 3;
+}
+
+.station.is-now .station-mark {
+  top: 8px;
+  width: 14px;
+  height: 14px;
+  border-color: var(--ink-3);
+  background: var(--surface);
+}
+
+.station.is-now .station-state {
+  margin-top: 0;
+  color: var(--ink-3);
+}
+
+/* How long this release stayed the latest: written on the line. */
+.station-gap {
+  position: absolute;
+  top: -6px;
+  left: 42px;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.station-version {
+  font-size: clamp(1.25rem, 1rem + 0.9vw, 1.875rem);
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.station.is-revoked .station-version {
+  color: var(--ink-2);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+
+.station-state {
+  margin-top: 2px;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.station.is-newest .station-state {
+  color: var(--ink);
+}
+
+.station.is-revoked .station-state {
+  color: var(--bad);
+}
+
+.station-when,
+.station-boards {
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+/* A file on its way to the boards: what a release manager comes to this page to do. */
 .upload {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
-  gap: 32px;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+  gap: clamp(32px, 4vw, 64px);
+}
+
+.upload.panel .trust {
+  padding-left: clamp(24px, 3vw, 48px);
+  border-left: 1px solid var(--line);
 }
 
 .upload.is-readonly {
@@ -1730,32 +3340,184 @@ textarea.input {
 
 .upload-main {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
-  gap: 14px;
+  gap: 18px;
   min-width: 0;
+}
+
+/* From a file to the boards. A mark and a word for each stage, so that it reads without its colour. */
+.upload-stages {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 clamp(10px, 1.4vw, 20px);
+}
+
+.upload-stage {
+  --stage: var(--line-mark);
+  --stage-on: var(--ink-2);
+
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 3px solid var(--stage);
+}
+
+.upload-stage-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 1.625rem;
+  height: 1.625rem;
+  border: 1.5px solid var(--stage);
+  border-radius: 50%;
+  color: var(--stage-on);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.upload-stage-mark .icon {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.6;
+}
+
+.upload-stage-words {
+  display: grid;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.upload-stage-label {
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.upload-stage-word {
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+}
+
+/* Finished is ink, as it is on the steps of an update. Green is for what was proved. */
+.upload-stage.is-done {
+  --stage: var(--ink);
+  --stage-on: var(--surface);
+}
+
+.upload-stage.is-good {
+  --stage: var(--bar-good);
+  --stage-on: var(--on-bar-good);
+}
+
+.upload-stage.is-act {
+  --stage: var(--accent);
+  --stage-on: var(--on-accent);
+}
+
+.upload-stage.is-live {
+  --stage: var(--bar-live);
+  --stage-on: var(--on-bar-live);
+}
+
+.upload-stage.is-failed {
+  --stage: var(--bar-bad);
+  --stage-on: var(--on-bar-bad);
+}
+
+.upload-stage:is(.is-done, .is-good, .is-act, .is-live, .is-failed) .upload-stage-mark {
+  background: var(--stage);
+}
+
+.upload-stage:is(.is-done, .is-good, .is-act, .is-live, .is-failed) .upload-stage-label {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.upload-stage:is(.is-done, .is-good, .is-act, .is-live, .is-failed) .upload-stage-word {
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+/* What the server answered: the moment this panel is for. */
+.verified-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: clamp(1.75rem, 1.35rem + 1.5vw, 2.75rem);
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  line-height: 1.05;
+  text-wrap: balance;
+}
+
+.verified-title .icon {
+  width: 1em;
+  height: 1em;
+  stroke-width: 1.5;
+  color: var(--good);
+}
+
+.verified-text {
+  max-width: 62ch;
+  color: var(--ink-2);
+}
+
+.verified-checks .check {
+  font-size: 0.875rem;
+}
+
+.verified-after {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 0.875rem;
+}
+
+.upload-state.is-verified .facts {
+  padding-top: 2px;
+}
+
+.upload-state.is-verified .fact:last-child {
+  padding-bottom: 12px;
+}
+
+.upload-verifying {
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.upload-refusal {
+  color: var(--ink);
+}
+
+/* Takes the focus when the control that had it goes away with the stage it belonged to. */
+.upload-main:focus {
+  outline: none;
+}
+
+.upload-main > .eyebrow,
+.trust-title {
+  color: var(--ink);
+  font-size: 1.0625rem;
+  font-weight: 700;
+  letter-spacing: -0.018em;
+  text-transform: none;
 }
 
 .trust {
   display: grid;
   align-content: start;
-  gap: 12px;
+  gap: 14px;
   min-width: 0;
   color: var(--ink-2);
-}
-
-.upload:not(.is-readonly) .trust {
-  padding-left: 32px;
-  border-left: 1px solid var(--line);
 }
 
 .trust-title {
   display: flex;
   align-items: center;
   gap: 9px;
-  color: var(--ink);
-  font-size: 1.0625rem;
-  font-weight: 640;
-  letter-spacing: -0.01em;
 }
 
 .trust-title .icon {
@@ -1766,11 +3528,59 @@ textarea.input {
   max-width: 76ch;
 }
 
+/* The three places a signature is made and checked. */
+.chain {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 4px 0 6px;
+}
+
+.chain-link {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  position: relative;
+  padding-right: 14px;
+}
+
+.chain-link:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 17px;
+  right: 0;
+  left: 42px;
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.chain-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--ink);
+}
+
+.chain-title {
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+}
+
+.chain-text {
+  font-size: 0.8125rem;
+  line-height: 1.35;
+}
+
 .fingerprint {
   display: grid;
-  gap: 4px;
+  gap: 10px;
   margin-top: 4px;
-  padding-top: 14px;
+  padding-top: 16px;
   border-top: 1px solid var(--line);
   color: var(--ink);
 }
@@ -1783,13 +3593,15 @@ textarea.input {
 
 .drop {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   justify-items: center;
+  align-content: center;
   gap: 5px;
   position: relative;
+  min-height: 300px;
   padding: 38px 24px;
-  border: 1.5px dashed var(--line-strong);
-  border-radius: 12px;
-  background: var(--paper);
+  border: 1.5px dashed var(--line-field);
+  border-radius: var(--radius);
   cursor: pointer;
   text-align: center;
   transition: border-color 0.15s ease, background-color 0.15s ease;
@@ -1816,23 +3628,34 @@ textarea.input {
 .drop-icon {
   display: grid;
   place-items: center;
-  width: 46px;
-  height: 46px;
+  width: 44px;
+  height: 44px;
   margin-bottom: 8px;
-  border: 1px solid var(--line);
+  border: 1.5px solid var(--line-mark);
   border-radius: 50%;
-  background: var(--surface);
-  color: var(--accent);
+  color: var(--ink);
+  transition: transform 0.25s var(--ease);
+}
+
+.drop:hover .drop-icon,
+.drop.is-over .drop-icon {
+  transform: translateY(-3px);
 }
 
 .drop-icon .icon {
-  width: 21px;
-  height: 21px;
+  width: 20px;
+  height: 20px;
 }
 
 .drop-title {
-  font-size: 1.0625rem;
-  font-weight: 620;
+  overflow-wrap: anywhere;
+  font-size: clamp(1.25rem, 1.1rem + 0.5vw, 1.5rem);
+  font-weight: 700;
+  letter-spacing: -0.028em;
+}
+
+.drop-title .mono {
+  letter-spacing: -0.028em;
 }
 
 .drop-or {
@@ -1840,18 +3663,24 @@ textarea.input {
 }
 
 .drop-pick {
-  color: var(--accent);
-  font-weight: 560;
+  color: var(--ink);
+  font-weight: 600;
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
 }
 
 .drop-note {
-  max-width: 44ch;
+  max-width: 50ch;
+  overflow-wrap: anywhere;
   margin-top: 8px;
   color: var(--ink-3);
   font-size: 0.8125rem;
+}
+
+.drop-where {
+  margin-top: 2px;
+  color: var(--ink-2);
 }
 
 .upload-state {
@@ -1874,7 +3703,7 @@ textarea.input {
   gap: 8px;
   min-width: 0;
   font-size: 1.0625rem;
-  font-weight: 620;
+  font-weight: 600;
   overflow-wrap: anywhere;
 }
 
@@ -1902,30 +3731,50 @@ textarea.input {
   gap: 8px;
 }
 
+/* The column for the buttons is kept on every row, so that the columns before it line up. */
+.rows:has(.release-actions) > .row.release {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 190px;
+}
+
 .release-main {
   display: grid;
   flex: 1 1 380px;
-  gap: 4px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 6px clamp(24px, 3vw, 48px);
   min-width: 0;
+}
+
+.release-story,
+.release-numbers {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.release-numbers {
+  padding-top: 6px;
 }
 
 .release-title {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 12px;
+  gap: 6px 14px;
 }
 
 .release-version {
-  font-size: 1.1875rem;
-  font-weight: 640;
-  letter-spacing: -0.03em;
+  font-size: clamp(1.375rem, 1.2rem + 0.6vw, 1.75rem);
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  line-height: 1.15;
 }
 
 .release.is-revoked .release-version {
   color: var(--ink-2);
   text-decoration: line-through;
-  text-decoration-thickness: 1px;
+  text-decoration-thickness: 1.5px;
 }
 
 .release-notes {
@@ -1933,12 +3782,11 @@ textarea.input {
   overflow-wrap: anywhere;
 }
 
-
 .release-revoked {
   display: flex;
   align-items: flex-start;
   gap: 7px;
-  margin-top: 4px;
+  margin-top: 2px;
   overflow-wrap: anywhere;
 }
 
@@ -1954,11 +3802,43 @@ textarea.input {
 
 .release-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 
+.slot-fit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.slot-fit-bar {
+  flex: none;
+  width: 96px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.slot-fit-fill {
+  display: block;
+  width: var(--fit, 0%);
+  min-width: 2px;
+  height: 100%;
+  background: var(--ink-2);
+}
+
+/* Below the buttons and across the whole row, so that the tables of all releases line up. */
 .more {
-  margin-top: 6px;
+  grid-column: 1 / -1;
+  flex: 1 1 100%;
+  min-width: 0;
+  margin-top: -6px;
 }
 
 .more summary {
@@ -1978,15 +3858,47 @@ textarea.input {
 
 /* Deployments. */
 
-.deployment-row .release-version {
-  color: var(--ink);
+.deployments-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 2fr);
+  align-items: end;
+  gap: 20px clamp(24px, 3vw, 48px);
+}
+
+.outcomes {
+  display: grid;
+  gap: 10px;
+  padding-left: clamp(24px, 3vw, 48px);
+  border-left: 1px solid var(--line);
+}
+
+.outcomes .legend {
+  margin-top: 2px;
+}
+
+/*
+ * The text, what the boards are doing, and the arrow, in columns: rows of the same list
+ * keep to the same layout whatever their counts come to.
+ */
+.rows > .deployment-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px clamp(24px, 3vw, 48px);
+}
+
+.row-outcome {
+  display: grid;
+  align-self: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 .counts {
   display: flex;
   flex-wrap: wrap;
   align-self: center;
-  gap: 6px 18px;
+  gap: 4px 18px;
   font-size: 0.875rem;
 }
 
@@ -1995,14 +3907,38 @@ textarea.input {
   font-weight: 500;
 }
 
-.executions {
-  display: grid;
-  gap: 16px;
+.counts .status.is-act {
+  font-weight: 600;
 }
 
+.executions {
+  display: grid;
+  gap: clamp(20px, 2.8vw, 36px);
+}
+
+/* Boards of the same deployment, counted, above the boards themselves. */
+.deployment-summary {
+  display: grid;
+  gap: 10px;
+  margin-bottom: clamp(20px, 2.8vw, 36px);
+}
+
+/*
+ * One board's update: the piece of the page that everything else serves. On ink while
+ * there is anything to say about it, on paper when it was called off.
+ */
 .execution {
   display: grid;
-  gap: 20px;
+  gap: clamp(18px, 1.9vw, 26px);
+  padding: clamp(20px, 2.3vw, 32px);
+  border-top: 0;
+  border-radius: var(--radius);
+}
+
+.execution.is-idle {
+  padding: 16px 0 0;
+  border-top: 2px solid var(--rule);
+  border-radius: 0;
 }
 
 .execution-head {
@@ -2015,30 +3951,41 @@ textarea.input {
 
 .execution-name {
   font-size: 0.9375rem;
-  font-weight: 520;
+  font-weight: 500;
   overflow-wrap: anywhere;
-}
-
-.execution-name a {
-  color: var(--ink);
 }
 
 .execution-state {
   display: grid;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 16px 32px;
+}
+
+.execution-words {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
 }
 
 .execution-title {
-  gap: 10px;
-  font-size: 1.3125rem;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-  line-height: 1.25;
+  align-items: flex-start;
+  gap: 14px;
+  font-size: clamp(1.75rem, 1.35rem + 1.7vw, 3rem);
+  font-weight: 700;
+  letter-spacing: -0.018em;
+  line-height: 1.05;
+}
+
+.execution.is-idle .execution-title {
+  font-size: clamp(1.5rem, 1.25rem + 1vw, 2.125rem);
 }
 
 .execution-title .icon {
-  width: 22px;
-  height: 22px;
+  width: 0.92em;
+  height: 0.92em;
+  margin-top: 0.08em;
+  stroke-width: 1.5;
 }
 
 /* A title that takes two lines on a phone breaks into lines of similar length. */
@@ -2047,8 +3994,16 @@ textarea.input {
 }
 
 .execution-text {
-  max-width: 74ch;
+  max-width: 68ch;
   color: var(--ink-2);
+  font-size: 1rem;
+  text-wrap: pretty;
+}
+
+/* What to do about an update that ended short. */
+.execution-next {
+  max-width: 74ch;
+  font-weight: 600;
 }
 
 .execution-code {
@@ -2061,17 +4016,52 @@ textarea.input {
   margin-top: 4px;
 }
 
+/* Where the big numerals stand, they say it for the words. */
+@media (min-width: 801px) {
+  /* The steps under it stay at one height through an update, however much a phase has to say. */
+  .execution:not(.is-compact) .execution-state {
+    min-height: 9.625rem;
+  }
+
+  .said-big {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+/* The number that is moving, for across the room. */
+.execution-figure {
+  font-size: clamp(4.5rem, 2.5rem + 7vw, 8.5rem);
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  line-height: 0.82;
+}
+
+.execution-percent {
+  margin-left: 0.04em;
+  color: var(--work);
+  font-size: 0.5em;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  vertical-align: 0.62em;
+}
+
 /*
  * The one state in which an update waits for a person. It is the only card on the page
  * with a tinted panel, so that the eye goes to what somebody has to do.
  */
 .execution.is-act {
-  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .execution.is-act .execution-state {
-  padding: 16px 18px;
-  border-radius: 11px;
+  padding: 18px 22px;
+  border-radius: var(--radius-small);
   background: var(--accent-wash);
 }
 
@@ -2079,35 +4069,206 @@ textarea.input {
   color: var(--ink);
 }
 
+/* The two buttons on the board. Button 1 is lit, as LED1 is; the words say which does what. */
+.keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.key {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px 9px 10px;
+  border: 1px solid var(--line-mark);
+  border-radius: var(--radius-small);
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  line-height: 1.25;
+}
+
+.key strong {
+  display: block;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.key-cap {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border: 1.5px solid var(--line-mark);
+  border-radius: 50%;
+}
+
+.key.is-lit {
+  border-color: var(--accent);
+}
+
+.key.is-lit .key-cap {
+  border-color: var(--accent);
+  background: var(--accent);
+  animation: key-blink 1.1s ease-in-out infinite;
+}
+
+/* Below the steps: what the flash holds, and when things happened. */
+.execution-lower {
+  display: grid;
+  grid-template-columns: minmax(0, 2.3fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 18px clamp(24px, 3vw, 48px);
+}
+
+.execution-lower > :only-child {
+  grid-column: 1 / -1;
+}
+
+.moments .eyebrow {
+  margin-bottom: 10px;
+}
+
 .execution-foot {
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
-  color: var(--ink-3);
+  display: grid;
+  gap: 6px;
+  color: var(--ink-2);
   font-size: 0.8125rem;
 }
 
-.steps {
-  display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+.moment {
+  display: block;
+  position: relative;
+  padding-left: 16px;
 }
 
+.moment::before {
+  content: "";
+  position: absolute;
+  top: 0.5em;
+  left: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+
+.moment + .moment::after {
+  content: "";
+  position: absolute;
+  top: -0.65em;
+  left: 2.5px;
+  width: 1px;
+  height: 0.95em;
+  background: var(--line-strong);
+}
+
+/* A board that is not moving, among several: one line of words and its marks, on paper. */
+.execution.is-compact {
+  gap: 12px;
+  padding: 16px 0 18px;
+  border-top: 1px solid var(--line-strong);
+  border-radius: 0;
+}
+
+.execution.is-compact .execution-title {
+  font-size: 1.375rem;
+}
+
+.execution.is-compact .execution-text {
+  font-size: 0.875rem;
+}
+
+.execution.is-compact .execution-foot {
+  grid-auto-flow: column;
+  justify-content: start;
+  gap: 16px;
+}
+
+.execution.is-compact .moment::before,
+.execution.is-compact .moment::after {
+  display: none;
+}
+
+.execution.is-compact .moment {
+  padding-left: 0;
+}
+
+.pipeline {
+  min-width: 0;
+}
+
+/*
+ * The steps of an update: a rail with a mark for each. The colour of the current step and
+ * of a step that stopped comes from the state above them: blue while the system works,
+ * rust when it is someone's move, amber when it was turned down, red when it failed.
+ */
+.steps {
+  --now-fill: var(--bar-live);
+  --now-on: var(--on-bar-live);
+  --now-text: var(--work);
+  --stop-fill: var(--bar-bad);
+  --stop-on: var(--on-bar-bad);
+  --stop-text: var(--bad);
+
+  display: flex;
+}
+
+.steps.is-act {
+  --now-fill: var(--accent);
+  --now-on: var(--on-accent);
+  --now-text: var(--accent);
+}
+
+.steps.is-wait {
+  --now-fill: var(--ink-3);
+  --now-on: var(--surface);
+  --now-text: var(--ink-2);
+}
+
+.steps.is-warn,
+.return-path.is-warn {
+  --stop-fill: var(--bar-warn);
+  --stop-on: var(--on-bar);
+  --stop-text: var(--warn);
+}
+
+.steps.is-idle,
+.return-path.is-idle {
+  --stop-fill: var(--ink-3);
+  --stop-on: var(--surface);
+  --stop-text: var(--ink-2);
+}
+
+.return-path {
+  --stop-fill: var(--bar-bad);
+  --stop-text: var(--bad);
+}
+
+/* Seven equal columns: the marks stay where they are from one phase to the next. */
 .step {
   position: relative;
-  padding: 30px 10px 0 0;
-  color: var(--ink-3);
-  font-size: 0.8125rem;
-  line-height: 1.35;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 50px 12px 0 0;
+  color: var(--ink-2);
+  font-size: 0.9375rem;
+  line-height: 1.3;
 }
 
 /* The rail from this step's mark to the next one. */
 .step::before {
   content: "";
   position: absolute;
-  top: 10px;
+  top: 19px;
   right: 0;
-  left: 22px;
+  left: 40px;
   height: 2px;
-  background: var(--line);
+  background: var(--line-mark);
+}
+
+/* The last step has no next one, and so no rail. */
+.step:last-child {
+  padding-right: 0;
 }
 
 .step:last-child::before {
@@ -2120,21 +4281,38 @@ textarea.input {
   position: absolute;
   top: 0;
   left: 0;
-  width: 22px;
-  height: 22px;
-  border: 2px solid var(--line-field);
+  z-index: 1;
+  width: 40px;
+  height: 40px;
+  border: 1.5px solid var(--line-mark);
   border-radius: 50%;
   background: var(--surface);
+  color: var(--ink-2);
 }
 
 .step-mark .icon {
-  width: 12px;
-  height: 12px;
-  stroke-width: 3;
+  width: 18px;
+  height: 18px;
+}
+
+.step-label {
+  display: block;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+  font-weight: 500;
+}
+
+.step-state {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-top: 1px;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+  font-weight: 400;
 }
 
 .step.is-done {
-  color: var(--ink-2);
+  color: var(--ink);
 }
 
 .step.is-done .step-mark {
@@ -2143,60 +4321,285 @@ textarea.input {
   color: var(--surface);
 }
 
+.step.is-done .step-mark .icon {
+  stroke-width: 2.6;
+}
+
 .step.is-done::before {
   background: var(--ink);
 }
 
+/* The payoff: only a confirmed update turns the whole line green. */
+.steps.is-good .step.is-done .step-mark {
+  border-color: var(--bar-good);
+  background: var(--bar-good);
+  color: var(--on-bar-good);
+}
+
+.steps.is-good .step.is-done::before {
+  background: var(--bar-good);
+}
+
+.step.is-done:has(+ .is-failed)::before {
+  background: var(--stop-fill);
+}
+
 .step.is-done:has(+ .is-skipped)::before {
-  background: var(--line);
+  background: var(--ink);
 }
 
 .step.is-current {
   color: var(--ink);
-  font-weight: 620;
+}
+
+/* Same size as its neighbours: a step that is current is heavier, not lower. */
+.step.is-current .step-label,
+.step.is-failed .step-label {
+  font-weight: 700;
+}
+
+.step.is-current .step-state {
+  color: var(--now-text);
+  font-weight: 600;
 }
 
 .step.is-current .step-mark {
-  border-color: var(--accent);
+  border: 2px solid var(--now-fill);
+  background: var(--now-fill);
+  color: var(--now-on);
 }
 
-.step.is-current .step-mark::after {
+.steps.is-act .step.is-current .step-mark {
+  animation: beacon 2.2s ease-out infinite;
+}
+
+/* While the image comes in, the rail to the next step becomes a meter that fills with it. */
+.step.has-progress::before {
+  top: 15px;
+  height: 10px;
+  border-radius: 2px;
+  transition: background 0.4s ease;
+}
+
+.step.has-progress::after {
   content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: breathe 1.8s ease-in-out infinite;
+  position: absolute;
+  top: 15px;
+  right: 0;
+  left: 40px;
+  height: 10px;
+  background: repeating-linear-gradient(to right, transparent 0 calc(10% - 2px), var(--surface) calc(10% - 2px) 10%);
 }
 
 /*
- * While the image comes in, the rail from "Downloading" to the next step fills with
- * it, and the separate bar above the steps is left out: one rail tells the story.
- * Where the steps stand in a column (see "Narrower screens") the bar stays.
+ * While the image comes in, the rail from "Downloading" to the next step fills with it,
+ * and the separate bar above the steps is hidden from the eye: one rail tells the story.
+ * It stays for a screen reader, where it is what says how far the download is. Where the
+ * steps stand in a column (see "Narrower screens") the bar stays in view.
  */
-@media (min-width: 721px) {
+@media (min-width: 801px) {
   .step.has-progress::before {
-    background: linear-gradient(to right, var(--accent) var(--progress, 0%), var(--line) var(--progress, 0%));
+    background: linear-gradient(to right, var(--bar-live) var(--progress, 0%), var(--line) var(--progress, 0%));
   }
 
-  .execution-state .meter {
-    display: none;
+  .execution-state .meter,
+  .board-run-state .meter {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    clip-path: inset(50%);
   }
 }
 
 .step.is-failed {
   color: var(--ink);
-  font-weight: 620;
+}
+
+.step.is-failed .step-state {
+  color: var(--stop-text);
+  font-weight: 600;
 }
 
 .step.is-failed .step-mark {
-  border-color: var(--bad);
-  background: var(--bad);
-  color: var(--on-bad);
+  border-color: var(--stop-fill);
+  background: var(--stop-fill);
+  color: var(--stop-on);
+}
+
+.step.is-failed .step-mark .icon {
+  stroke-width: 2.4;
+}
+
+.step.is-failed::before,
+.step.is-skipped::before {
+  background: repeating-linear-gradient(to right, var(--line-mark) 0 4px, transparent 4px 9px);
 }
 
 .step.is-skipped .step-mark {
-  border-color: var(--line-strong);
+  border-style: dashed;
+  background: var(--surface);
+}
+
+/* Nobody can tell from here. Not a place the update reached, and not one it did not. */
+.step.is-unknown::before {
+  background: repeating-linear-gradient(to right, var(--line-mark) 0 4px, transparent 4px 9px);
+}
+
+.step.is-unknown .step-mark {
+  border-style: dashed;
+  background: var(--surface);
+  color: var(--ink-3);
+}
+
+.step.is-done:has(+ .is-unknown)::before {
+  background: var(--ink);
+}
+
+/* Where a board that was stopped, or went quiet, had got to. Nothing went wrong there: no red. */
+.step.is-stopped {
+  color: var(--ink);
+}
+
+.step.is-stopped .step-label {
+  font-weight: 700;
+}
+
+.step.is-stopped .step-state {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.step.is-stopped .step-mark {
+  border-color: var(--ink-3);
+  background: var(--ink-3);
+  color: var(--surface);
+}
+
+.step.is-stopped .step-mark .icon {
+  stroke-width: 2.4;
+}
+
+.step.is-stopped::before {
+  background: repeating-linear-gradient(to right, var(--line-mark) 0 4px, transparent 4px 9px);
+}
+
+.steps.is-preview .step-mark {
+  color: var(--ink);
+}
+
+.steps.is-preview .step {
+  color: var(--ink);
+}
+
+/* Fewer words and smaller marks, for the overview. */
+.steps.is-compact .step {
+  padding-top: 38px;
+  padding-right: 14px;
+  font-size: 0.875rem;
+}
+
+.steps.is-compact .step::before {
+  top: 13px;
+  left: 28px;
+}
+
+.steps.is-compact .step:last-child {
+  padding-right: 0;
+}
+
+.steps.is-compact .step-mark {
+  width: 28px;
+  height: 28px;
+}
+
+.steps.is-compact .step-mark .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* The marks say it for the eye. A screen reader still gets the word for each step. */
+.steps.is-compact .step-state {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.steps.is-compact .step.has-progress::before,
+.steps.is-compact .step.has-progress::after {
+  top: 10px;
+  left: 28px;
+  height: 8px;
+}
+
+/*
+ * The way back: an arc over the steps, from the step where the update stopped to the one
+ * where it began. Its left end is an arrowhead coming down into the first mark.
+ */
+.return-path {
+  position: relative;
+  height: 46px;
+  margin-bottom: 2px;
+}
+
+.return-arc {
+  display: block;
+  position: absolute;
+  top: 12px;
+  bottom: 0;
+  left: 19px;
+  width: calc(100% / 7 * var(--at));
+  border: 2px solid var(--stop-fill);
+  border-bottom: 0;
+  border-radius: 14px 14px 0 0;
+}
+
+.return-arc::before {
+  content: "";
+  position: absolute;
+  bottom: -3px;
+  left: -8px;
+  border: 7px solid transparent;
+  border-top: 9px solid var(--stop-fill);
+  border-bottom: 0;
+}
+
+/* The words interrupt the line, half way along it. */
+.return-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  position: absolute;
+  top: 0;
+  left: calc(19px + 100% / 14 * var(--at));
+  padding: 0 12px;
+  transform: translateX(-50%);
+  border-radius: var(--radius-small);
+  background: var(--bad-wash);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.625rem;
+  white-space: nowrap;
+}
+
+.return-path.is-warn .return-label {
+  background: var(--warn-wash);
+}
+
+.return-path.is-idle .return-label {
+  background: var(--well);
+}
+
+.return-label .icon {
+  color: var(--stop-text);
+}
+
+.return-path.is-short .return-label {
+  left: calc(100% / 7 * var(--at) + 34px);
+  transform: none;
 }
 
 /* Dialogs. */
@@ -2207,14 +4610,14 @@ textarea.input {
  */
 .dialog {
   --dialog-top: max(16px, 9vh);
-  width: min(620px, calc(100vw - 2 * var(--gutter)));
+  width: min(640px, calc(100vw - 2 * var(--gutter)));
   max-height: min(780px, calc(100vh - var(--dialog-top) - 16px));
   max-height: min(780px, calc(100dvh - var(--dialog-top) - 16px));
   margin-top: var(--dialog-top);
   padding: 0;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: 8px;
   background: var(--surface);
   box-shadow: var(--lift);
   color: var(--ink);
@@ -2222,6 +4625,7 @@ textarea.input {
 
 .dialog[open] {
   display: flex;
+  animation: rise 0.28s var(--ease) backwards;
 }
 
 .dialog::backdrop {
@@ -2236,21 +4640,27 @@ textarea.input {
   min-height: 0;
 }
 
+/* Takes the focus when the control that had it goes away with what changed. */
+.dialog-form:focus {
+  outline: none;
+}
+
 .dialog-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  padding: 22px 16px 4px 24px;
+  padding: 24px 16px 4px 28px;
 }
 
 .dialog-title {
   padding-top: 3px;
-  font-size: 1.3125rem;
-  font-weight: 660;
-  letter-spacing: -0.02em;
-  line-height: 1.3;
-  overflow-wrap: anywhere;
+  font-size: 1.625rem;
+  font-weight: 700;
+  letter-spacing: -0.028em;
+  line-height: 1.15;
+  overflow-wrap: break-word;
+  hyphens: auto;
 }
 
 .dialog-body {
@@ -2258,7 +4668,7 @@ textarea.input {
   align-content: start;
   gap: 16px;
   min-height: 0;
-  padding: 12px 24px 24px;
+  padding: 12px 28px 24px;
   overflow-y: auto;
 }
 
@@ -2271,7 +4681,7 @@ textarea.input {
 .dialog-error {
   flex: none;
   max-height: 45vh;
-  padding: 10px 24px 20px;
+  padding: 10px 28px 20px;
   overflow-y: auto;
 }
 
@@ -2283,7 +4693,7 @@ textarea.input {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  padding: 16px 24px;
+  padding: 16px 28px;
   border-top: 1px solid var(--line);
   background: var(--paper);
 }
@@ -2306,7 +4716,7 @@ textarea.input {
 
 .choices legend {
   margin-bottom: 10px;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .choice {
@@ -2316,7 +4726,7 @@ textarea.input {
   gap: 12px;
   padding: 12px 14px;
   border: 1px solid var(--line-strong);
-  border-radius: 11px;
+  border-radius: var(--radius);
   cursor: pointer;
 }
 
@@ -2362,7 +4772,7 @@ textarea.input {
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 10px;
-  font-weight: 620;
+  font-weight: 600;
   overflow-wrap: anywhere;
 }
 
@@ -2403,13 +4813,14 @@ textarea.input {
 
 .wizard-number {
   display: grid;
+  flex: none;
   place-items: center;
-  width: 22px;
-  height: 22px;
+  width: 1.375rem;
+  height: 1.375rem;
   border: 1.5px solid var(--line-strong);
   border-radius: 50%;
   font-size: 0.75rem;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .wizard-number .icon {
@@ -2420,7 +4831,7 @@ textarea.input {
 
 .wizard-steps .is-current {
   color: var(--ink);
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .wizard-steps .is-current .wizard-number {
@@ -2454,13 +4865,13 @@ textarea.input {
 
 .callout {
   padding: 14px 16px;
-  border-radius: 11px;
+  border-radius: var(--radius);
   background: var(--well);
 }
 
 .callout-title {
   margin-bottom: 8px;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .consequences {
@@ -2496,11 +4907,12 @@ textarea.input {
   transform: translateX(-50%);
 }
 
+/* The hairline in the colour of the page keeps it apart from an ink panel behind it. */
 .toast {
   padding: 11px 16px;
-  border-radius: 11px;
+  border-radius: var(--radius);
   background: var(--ink);
-  box-shadow: var(--lift);
+  box-shadow: 0 0 0 1px var(--paper), var(--lift);
   color: var(--paper);
   font-size: 0.9rem;
   pointer-events: auto;
@@ -2511,7 +4923,59 @@ textarea.input {
   color: var(--on-bad-fill);
 }
 
+.toast-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.toast-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.toast-close {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: -1px -6px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.toast-close:focus-visible {
+  outline-color: currentColor;
+}
+
 /* Narrower screens. */
+
+/* While the masthead stays at the top of the window, it must not cover what the keyboard moves to. */
+@media (min-width: 1141px) {
+  html {
+    /* In rem: at large text the masthead takes more rows. */
+    scroll-padding-top: 5rem;
+  }
+}
+
+/* Below this the tools of a page do not fit next to its heading on every page. They take a row of their own: how fresh it is on the left, its action on the right. */
+@media (max-width: 1120px) {
+  .page-tools {
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+
+  /* Where it does not fit next to the freshness either, it stays on the right below it. */
+  .page-tools > .btn {
+    margin-left: auto;
+  }
+}
 
 /*
  * With the longest address and session text it can hold, the masthead needs about
@@ -2543,18 +5007,96 @@ textarea.input {
   }
 
   .nav-link {
-    padding: 9px 0 10px;
+    padding-block: 9px 10px;
+  }
+}
+
+@media (max-width: 1180px) {
+  /* Beside the upload, the three places of a signature stand one below the other. */
+  .upload.panel .chain {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .upload.panel .chain-link {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0 12px;
+    padding-right: 0;
+  }
+
+  .upload.panel .chain-link::after {
+    display: none;
+  }
+
+  .upload.panel .chain-mark {
+    grid-row: span 2;
+    margin-bottom: 0;
+  }
+
+  /* The three parts of the fleet stop sharing a row before their contents get cramped. */
+  .fleet {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.4fr);
+  }
+
+  .fleet > .card:nth-child(3) {
+    grid-column: 1 / -1;
+    padding-top: 24px;
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
 }
 
 @media (max-width: 1000px) {
   /*
    * One column, in the order of the document, which is the order in which the Tab key
-   * and a screen reader go through the cards: updates, versions and release, boards,
-   * activity.
+   * and a screen reader go through the sections.
    */
   .overview {
+    grid-template-areas:
+      "updates"
+      "pair"
+      "boards"
+      "activity";
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+  }
+
+  .devices-panel,
+  .deployments-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .outcomes {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .gate {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(200px, 1fr);
+  }
+
+  .gate-copy {
+    gap: 40px;
+  }
+
+  .gate-foot {
+    display: none;
+  }
+
+  .rows > .deployment-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .row-outcome {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .row-chevron {
+    grid-column: 2;
+    grid-row: 1 / span 2;
   }
 }
 
@@ -2573,8 +5115,10 @@ textarea.input {
     padding: 12px 0;
   }
 
+  /* At large text the sections take more rows: none of them is pushed out of sight. */
   .nav-list {
-    gap: 20px;
+    flex-wrap: wrap;
+    gap: 0 20px;
   }
 
   /*
@@ -2619,106 +5163,198 @@ textarea.input {
   .nav {
     flex-basis: 100%;
     order: 3;
-    margin: 0 calc(-1 * var(--gutter));
-    padding: 0 var(--gutter);
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-
-  .nav::-webkit-scrollbar {
-    display: none;
   }
 
   .nav-link {
-    padding: 9px 0 10px;
+    padding-block: 9px 10px;
   }
 
   .split,
-  .upload {
+  .upload,
+  .release-main,
+  .rows:has(.release-actions) > .row.release {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .upload:not(.is-readonly) .trust {
-    padding: 24px 0 0;
-    border-top: 1px solid var(--line);
-    border-left: 0;
+  .release-actions {
+    justify-content: flex-start;
+  }
+
+  .release-numbers {
+    padding-top: 0;
   }
 
   .guide-steps {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .journey-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .log-day {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .log-day-title {
+    position: static;
+  }
+
+  .upload.panel .trust {
+    padding-top: clamp(24px, 3vw, 32px);
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
 }
 
 @media (max-width: 720px) {
   .main {
-    padding-top: 28px;
+    padding-top: 26px;
     padding-bottom: 96px;
   }
 
-  .page-title {
-    font-size: 1.625rem;
+  .arch-watermark {
+    display: none;
   }
 
-  /* The tools of a page share one row: how fresh it is on the left, its action on the right. */
-  .page-tools {
-    flex: 1 1 100%;
-    justify-content: space-between;
-  }
-
-  .overview-pair {
+  .fleet {
     grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
   }
 
-  .card {
-    padding: 20px;
-  }
-
-  .card:not(.is-flush) > .rows {
-    margin: -6px -20px -20px;
-  }
-
-  .rows > .row,
-  .log-line {
-    padding-right: 20px;
-    padding-left: 20px;
-  }
-
-  .board-run {
-    grid-template-columns: minmax(0, 1fr);
+  .fleet > .card + .card,
+  .fleet > .card:nth-child(3) {
+    grid-column: auto;
+    padding-top: 24px;
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
 
   .row-chevron {
     display: none;
   }
 
-  .steps {
+  /* What the boards are doing goes under the text of its row, in every row of the list. */
+  .rows > .deployment-row {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .step {
-    min-height: 36px;
-    padding: 0 0 14px 34px;
-    line-height: 22px;
+  .rows > .history-row {
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
-  .step:last-child {
-    min-height: 22px;
-    padding-bottom: 0;
+  .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .step::before {
-    top: 22px;
+  .stat {
+    padding: 0 12px;
+  }
+
+  .stat:nth-child(odd) {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .stat:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+
+  .fleet-line {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .fleet-line .tiles {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+    max-width: none;
+  }
+
+  .timeline {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .station {
+    padding: 0 0 22px 44px;
+  }
+
+  .station::before {
+    top: 8px;
     right: auto;
-    bottom: 0;
+    bottom: -8px;
     left: 10px;
     width: 2px;
     height: auto;
   }
 
-  /* A sheet in the middle of the screen, as tall as the screen allows. */
+  .station.is-newest::before {
+    left: 14px;
+  }
+
+  .station-gap {
+    position: static;
+    margin-top: 2px;
+  }
+
+  .station-gap:empty {
+    display: none;
+  }
+
+  .station.is-now {
+    padding-bottom: 0;
+  }
+
+  .station.is-now .station-mark {
+    top: 3px;
+    left: 4px;
+  }
+
+  .chain {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .chain-link {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0 12px;
+    padding-right: 0;
+  }
+
+  .chain-link::after {
+    display: none;
+  }
+
+  .chain-mark {
+    grid-row: span 2;
+    margin-bottom: 0;
+  }
+
+  .drop {
+    min-height: 240px;
+  }
+
+  .upload-stages {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .upload-stage {
+    padding-top: 0;
+    padding-left: 10px;
+    border-top: 0;
+    border-left: 3px solid var(--stage);
+  }
+
+  /* As tall as the screen allows, from the same line at every step of a dialog. */
   .dialog {
     --dialog-top: 16px;
-    margin-top: auto;
+  }
+
+  /* The title stays a title at large text, and does not take the room of what it asks about. */
+  .dialog-title {
+    font-size: 1.25rem;
   }
 
   .dialog-head {
@@ -2742,12 +5378,218 @@ textarea.input {
   }
 }
 
+/*
+ * The steps of an update stand in a column up to here, not only on a phone: side by side
+ * at this width their names run into one another. The words carry the percent here, and
+ * the bar stands in view: the big figures and the rail have no room.
+ */
+@media (max-width: 800px) {
+  .board-run-figure,
+  .execution-figure {
+    display: none;
+  }
+
+  .board-run-head,
+  .execution-state {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .steps {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* On a phone the marks alone tell the way; the status line above says where it is. */
+  .steps.is-compact {
+    display: flex;
+  }
+
+  .steps:not(.is-compact) .step {
+    min-height: 62px;
+    padding: 0 0 16px 54px;
+  }
+
+  .steps:not(.is-compact) .step:last-child {
+    min-height: 40px;
+    padding-bottom: 0;
+  }
+
+  /* The way back, drawn on the steps themselves so that it survives a label that wraps. */
+  .steps:not(.is-compact):has(.is-on-return) {
+    padding-left: 18px;
+  }
+
+  .step.is-on-return::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -18px;
+    width: 2px;
+    background: var(--stop-fill);
+  }
+
+  .step.is-return-start::after {
+    top: 19px;
+    width: 18px;
+    border-top: 2px solid var(--stop-fill);
+    border-left: 2px solid var(--stop-fill);
+    border-top-left-radius: 8px;
+    background: none;
+  }
+
+  .step.is-return-end::after {
+    bottom: auto;
+    height: 21px;
+    width: 18px;
+    border-bottom: 2px solid var(--stop-fill);
+    border-left: 2px solid var(--stop-fill);
+    border-bottom-left-radius: 8px;
+    background: none;
+  }
+
+  .step.is-return-start .step-mark::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: -9px;
+    border: 6px solid transparent;
+    border-right: 0;
+    border-left: 8px solid var(--stop-fill);
+    transform: translateY(-50%);
+  }
+
+  .steps:not(.is-compact) .step::before,
+  .steps:not(.is-compact) .step.has-progress::before {
+    top: 40px;
+    right: auto;
+    bottom: 0;
+    left: 19px;
+    width: 2px;
+    height: auto;
+    border-radius: 0;
+  }
+
+  .steps:not(.is-compact) .step:last-child::before {
+    display: none;
+  }
+
+  .steps:not(.is-compact) .step.has-progress::before {
+    background: linear-gradient(to bottom, var(--bar-live) var(--progress, 0%), var(--line-mark) var(--progress, 0%));
+  }
+
+  .steps:not(.is-compact) .step.has-progress::after {
+    display: none;
+  }
+
+  .steps:not(.is-compact) .step.is-failed::before,
+  .steps:not(.is-compact) .step.is-skipped::before,
+  .steps:not(.is-compact) .step.is-unknown::before,
+  .steps:not(.is-compact) .step.is-stopped::before {
+    background: repeating-linear-gradient(to bottom, var(--line-mark) 0 4px, transparent 4px 9px);
+  }
+
+  .step-label,
+  .step.is-current .step-label,
+  .step.is-failed .step-label {
+    padding-top: 2px;
+  }
+
+  .steps.is-compact .step {
+    padding-top: 28px;
+    padding-right: 0;
+  }
+
+  /* As wide as its mark, so that the rails between the marks all have the same length. */
+  .steps.is-compact .step:last-child {
+    flex: 0 0 26px;
+  }
+
+  .steps.is-compact .step-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .steps.is-compact .step-mark {
+    width: 26px;
+    height: 26px;
+  }
+
+  .steps.is-compact .step::before,
+  .steps.is-compact .step.has-progress::before {
+    top: 12px;
+    left: 26px;
+    height: 2px;
+    border-radius: 0;
+  }
+
+  .steps.is-compact .step.has-progress::after {
+    display: none;
+  }
+
+  /* With the steps in a column the arc is drawn beside them, and its words stand above. */
+  .return-path {
+    height: auto;
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    border-left: 3px solid var(--stop-fill);
+    background: var(--bad-wash);
+  }
+
+  .return-path.is-warn {
+    background: var(--warn-wash);
+  }
+
+  .return-path.is-idle {
+    background: var(--well);
+  }
+
+  .return-arc {
+    display: none;
+  }
+
+  .return-label,
+  .return-path.is-short .return-label {
+    align-items: flex-start;
+    position: static;
+    padding: 0;
+    transform: none;
+    background: none;
+    line-height: 1.35;
+    white-space: normal;
+  }
+
+  .execution-lower {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .execution.is-act .execution-state,
+  .board-run.is-act .board-run-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .execution.is-compact .execution-foot {
+    grid-auto-flow: row;
+    gap: 2px;
+  }
+}
+
 @media (max-width: 460px) {
-  /* The five sections share the width of a phone, so none is cut off. */
-  .nav-list {
-    flex: 1;
-    justify-content: space-between;
-    gap: 8px;
+  /* The message takes the width of the phone, and what can be done about it goes below it. */
+  .notice {
+    flex-wrap: wrap;
+  }
+
+  .notice-text {
+    flex: 1 1 calc(100% - 30px);
+  }
+
+  .notice > .btn {
+    margin-left: 30px;
   }
 
   .nav-link {
@@ -2772,12 +5614,27 @@ textarea.input {
     min-height: 0;
   }
 
+  .log-line:not(:last-child)::before {
+    display: none;
+  }
+
   .log-line {
     grid-template-columns: minmax(0, 1fr) auto;
+    border-top: 1px solid var(--line);
+  }
+
+  .log-line:first-child {
+    padding-top: 0;
+    border-top: 0;
   }
 
   .log-line .log-icon {
     display: none;
+  }
+
+  .log-body,
+  .log-when {
+    padding-top: 0;
   }
 
   .release-actions,
@@ -2799,6 +5656,32 @@ textarea.input {
 @media (max-width: 380px) {
   .nav-link {
     font-size: 0.8125rem;
+  }
+
+  /* The setup command stays on one line, where it reads as one command. */
+  .code {
+    padding-inline: 5px;
+    font-size: 0.8em;
+    letter-spacing: -0.02em;
+  }
+}
+
+/* A window this low has no room for a fixed head and foot: the whole dialog scrolls. */
+@media (max-height: 480px) {
+  .dialog {
+    overflow-y: auto;
+  }
+
+  .dialog-form {
+    display: block;
+    flex: none;
+    width: 100%;
+  }
+
+  .dialog-body,
+  .dialog-error {
+    max-height: none;
+    overflow-y: visible;
   }
 }
 
@@ -2828,7 +5711,7 @@ textarea.input {
 
   .back {
     margin-top: -11px;
-    margin-bottom: 5px;
+    margin-bottom: 7px;
   }
 
   .card-more {
@@ -2849,10 +5732,18 @@ textarea.input {
     margin-bottom: -7px;
   }
 
+  .log-detail .btn.is-icon {
+    margin-block: -12px;
+  }
+
   .execution-name a,
   .board-line a,
   .board-run-name,
-  .run-version {
+  .run-version,
+  .log-target,
+  .card-note a,
+  .guide-text a,
+  .empty-text a {
     display: inline-block;
     margin-block: -12px;
     padding-block: 12px;
@@ -2861,10 +5752,72 @@ textarea.input {
 
 /* Motion is decoration here; nothing depends on it. */
 
+@keyframes settle {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+
+@keyframes grow {
+  from {
+    opacity: 0.2;
+    transform: scaleX(0.6);
+  }
+}
+
+@keyframes draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes groove-wave {
+  0%,
+  100% {
+    stroke-opacity: 1;
+  }
+
+  50% {
+    stroke-opacity: 0.15;
+  }
+}
+
+/* A ring that leaves the mark of the step in progress and fades as it goes. */
+@keyframes key-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes beacon {
+  0% {
+    box-shadow: 0 0 0 0 var(--now-fill);
+  }
+
+  70%,
+  100% {
+    box-shadow: 0 0 0 12px transparent;
+  }
+}
+
 @keyframes breathe {
   50% {
     opacity: 0.35;
     transform: scale(0.8);
+  }
+}
+
+@keyframes breathe-soft {
+  50% {
+    stroke-opacity: 0.3;
   }
 }
 
@@ -2892,6 +5845,11 @@ textarea.input {
     transition: none !important;
   }
 
+  /* Without its animation a groove would stay undrawn. */
+  .art-groove {
+    stroke-dashoffset: 0;
+  }
+
   /* Standing still, a bar that is a third full would read as a third done. */
   .meter.is-busy .meter-fill {
     width: 100%;
@@ -2902,25 +5860,683 @@ textarea.input {
 @media (forced-colors: active) {
   .badge,
   .tag,
-  .toast {
+  .toast,
+  .segment,
+  .swatch,
+  .tile {
     border: 1px solid CanvasText;
   }
 
-  .meter {
+  .meter,
+  .flash-row {
     border: 1px solid CanvasText;
   }
 
   .meter-fill,
+  .slot-fit-fill,
   .live-dot,
   .presence-dot.is-on,
-  .step.is-current .step-mark::after {
+  .tile.is-on,
+  .step.is-current .step-mark {
     background: Highlight;
   }
 
-  .pip,
   .step.is-done .step-mark,
   .signal .is-on {
     background: CanvasText;
     fill: CanvasText;
+  }
+
+  .tile.is-newest {
+    background: Highlight;
+  }
+
+  /* Borders that are transparent otherwise would mark every section alike. */
+  .nav-link {
+    border-color: Canvas;
+  }
+
+  .nav-link[aria-current="page"] {
+    border-bottom-color: Highlight;
+  }
+
+  /* The rail of the steps and the tick on a filled mark, drawn as backgrounds and in the text colour. */
+  .step::before,
+  .step.is-done::before,
+  .step.is-done:has(+ .is-skipped)::before,
+  .step.has-progress::before {
+    background: CanvasText;
+  }
+
+  .step.is-done .step-mark .icon {
+    color: Canvas;
+  }
+
+  /* The word for a fill in this colour goes with the fill, or the icon on it can hardly be seen. */
+  .step.is-current .step-mark {
+    color: HighlightText;
+  }
+
+  .step.is-current .step-mark .icon {
+    color: HighlightText;
+  }
+
+  .step.is-on-return::after,
+  .station::before {
+    background: CanvasText;
+  }
+
+  /* The two ends of the way back are drawn with borders. */
+  .step.is-return-start::after,
+  .step.is-return-end::after {
+    border-color: CanvasText;
+    background: none;
+  }
+
+  .slot-fit-bar {
+    border: 1px solid CanvasText;
+  }
+
+  .key.is-lit .key-cap {
+    background: Highlight;
+  }
+}
+
+/* Where the rail cannot show the download, the bar does. */
+@media (forced-colors: active) and (min-width: 801px) {
+  .execution-state .meter,
+  .board-run-state .meter {
+    position: static;
+    width: 100%;
+    height: 8px;
+    margin-top: 4px;
+    clip-path: none;
+  }
+}
+
+/*
+ * The Developer section: the serial console and the history. Six sections in the masthead,
+ * so on a phone they take two rows of three, and none is cut off or scrolled out of sight.
+ */
+@media (max-width: 620px) {
+  .nav-list {
+    display: grid;
+    flex: 1;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0 8px;
+  }
+
+  .nav-list li {
+    justify-content: flex-start;
+  }
+
+  .nav-link {
+    margin-inline: 0;
+    padding-inline: 0;
+  }
+
+  .nav-link:focus-visible {
+    outline-offset: 0;
+  }
+}
+
+/* The address gives way before the masthead has to take a second row. */
+@media (min-width: 1141px) and (max-width: 1320px) {
+  .account-email {
+    max-width: 150px;
+  }
+
+  .masthead-inner {
+    gap: 0 24px;
+  }
+}
+
+.dev-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0 22px;
+  margin-bottom: clamp(16px, 1.6vw, 22px);
+  border-bottom: 1px solid var(--line);
+}
+
+.dev-tabs .eyebrow {
+  align-self: center;
+}
+
+.dev-tabs .nav-link {
+  margin-inline: -6px;
+  padding: 5px 6px 6px;
+  font-size: 0.875rem;
+}
+
+/* The serial console. */
+
+.serial-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: clamp(24px, 3vw, 40px);
+}
+
+.serial-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 0;
+  padding: clamp(16px, 1.9vw, 26px);
+}
+
+.serial-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 20px;
+}
+
+.serial-state {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.serial-board {
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
+.serial-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.serial-transcript {
+  flex: none;
+  height: clamp(280px, 48vh, 520px);
+  padding: 10px 2px 10px 0;
+  overflow: auto;
+  border-block: 1px solid var(--line-strong);
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  overscroll-behavior: contain;
+}
+
+.serial-transcript:focus-visible {
+  outline-offset: 2px;
+}
+
+.serial-blank {
+  padding-top: 6px;
+  color: var(--ink-3);
+  font-family: var(--sans);
+  font-size: 0.875rem;
+}
+
+.serial-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 1px 8px;
+}
+
+.serial-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A box keeps its columns; on a phone the transcript scrolls sideways for it, not the page. */
+.serial-text.is-box {
+  flex: none;
+  white-space: pre;
+}
+
+.serial-time {
+  flex: none;
+  margin-left: auto;
+  color: var(--ink-3);
+  font-size: 0.6875rem;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.serial-line.is-sent {
+  margin-top: 10px;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.serial-chevron {
+  flex: none;
+  color: var(--ink-3);
+}
+
+.serial-auto {
+  flex: none;
+  color: var(--ink-3);
+  font-family: var(--sans);
+  font-size: 0.71875rem;
+  font-weight: 400;
+}
+
+.serial-line.is-output {
+  color: var(--ink-2);
+}
+
+.serial-word {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  font-weight: 700;
+}
+
+.serial-word .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.serial-line.is-ok {
+  background: var(--good-wash);
+  color: var(--ink);
+}
+
+.serial-line.is-ok .serial-word {
+  color: var(--good);
+}
+
+.serial-line.is-err {
+  background: var(--bad-wash);
+  color: var(--ink);
+}
+
+.serial-line.is-err .serial-word {
+  color: var(--bad);
+}
+
+/* Logs and events: to the side of the conversation, quieter and smaller. */
+.serial-line.is-tag {
+  margin-block: 1px;
+  margin-left: 10px;
+  padding-left: 10px;
+  border-left: 2px solid var(--line-strong);
+  color: var(--ink-3);
+  font-size: 0.75rem;
+}
+
+.serial-tag {
+  flex: none;
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.serial-level {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  font-weight: 700;
+}
+
+.serial-level .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.serial-level.is-warn {
+  color: var(--warn);
+}
+
+.serial-level.is-bad {
+  color: var(--bad);
+}
+
+/* What the page itself says. */
+.serial-line.is-note {
+  margin-block: 4px;
+  color: var(--ink-3);
+  font-family: var(--sans);
+  font-size: 0.8125rem;
+}
+
+.serial-line.is-note .icon {
+  flex: none;
+  align-self: center;
+  width: 14px;
+  height: 14px;
+}
+
+.serial-line.is-tone-warn {
+  color: var(--warn);
+}
+
+.serial-line.is-tone-bad {
+  color: var(--bad);
+}
+
+.serial-latest {
+  align-self: center;
+  margin-top: -6px;
+}
+
+.serial-prompt {
+  display: grid;
+  gap: 6px;
+}
+
+.serial-prompt-row {
+  display: flex;
+  gap: 8px;
+}
+
+.serial-prompt-row .input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.875rem;
+}
+
+.serial-prompt-row .btn {
+  flex: none;
+}
+
+.serial-error {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--bad);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.serial-error .icon {
+  flex: none;
+  align-self: center;
+}
+
+.serial-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.serial-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+}
+
+.serial-group {
+  margin-bottom: 26px;
+  padding-top: 10px;
+  border-top: 2px solid var(--rule);
+}
+
+.serial-group > .eyebrow {
+  margin-bottom: 4px;
+}
+
+.serial-row {
+  display: grid;
+  gap: 10px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+
+.serial-group > .eyebrow + .serial-row {
+  border-top: 0;
+}
+
+.serial-row.is-plain {
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 14px;
+}
+
+.serial-row.is-plain .serial-does {
+  margin: 0;
+}
+
+.serial-row.is-plain .serial-result,
+.serial-row.is-plain .serial-error {
+  grid-column: 1 / -1;
+}
+
+.serial-row .btn.mono {
+  font-family: var(--mono);
+  font-size: 0.78125rem;
+}
+
+.serial-name {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.serial-does {
+  margin-top: -6px;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+}
+
+.serial-row.is-plain .serial-does {
+  margin-top: 0;
+}
+
+.serial-row .field-hint {
+  overflow-wrap: anywhere;
+}
+
+.serial-result {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
+.serial-result .icon {
+  flex: none;
+  align-self: center;
+}
+
+.serial-result.is-ok {
+  color: var(--good);
+}
+
+.serial-result.is-err {
+  color: var(--bad);
+}
+
+.serial-result.is-none {
+  color: var(--warn);
+}
+
+@media (max-width: 800px) {
+  .serial-time {
+    display: none;
+  }
+}
+
+/* Next to the forms the panel stays in view, so a reply shows beside what asked for it. */
+@media (min-width: 1100px) {
+  .serial-layout {
+    grid-template-columns: minmax(0, 1.5fr) minmax(360px, 1fr);
+  }
+
+  .serial-panel {
+    position: sticky;
+    top: 88px;
+    height: calc(100vh - 112px);
+    min-height: 460px;
+  }
+
+  .serial-transcript {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+  }
+}
+
+@media (forced-colors: active) {
+  .serial-line.is-tag {
+    border-left-color: CanvasText;
+  }
+}
+
+/* The history. */
+
+.history-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px clamp(24px, 3.4vw, 48px);
+}
+
+.history-figure {
+  margin-top: 6px;
+  font-size: clamp(1.75rem, 3vw, 2.625rem);
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+.history-figure .history-hash {
+  font-size: inherit;
+}
+
+.history-built-subject {
+  max-width: 62ch;
+  margin-top: 8px;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.history-state {
+  margin-top: 8px;
+  font-size: 1.1875rem;
+  font-weight: 600;
+}
+
+.history-note {
+  margin-top: 4px;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+}
+
+.history-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.history-count {
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-choice[aria-pressed="true"] {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.history-choice[aria-pressed="true"]:hover {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.history-choice[aria-pressed="true"] .history-count {
+  color: inherit;
+}
+
+.history-summary {
+  margin-block: 12px clamp(18px, 2vw, 26px);
+  color: var(--ink-2);
+  font-size: 0.875rem;
+}
+
+.history-list {
+  min-width: 0;
+}
+
+.history-row {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.history-time {
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-body {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.history-subject {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.history-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.history-hash {
+  font-size: 0.8125rem;
+}
+
+@media (min-width: 900px) {
+  .history-panel {
+    grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .history-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .history-body {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  .history-time,
+  .history-hash {
+    margin-top: 4px;
+  }
+}
+
+@media (forced-colors: active) {
+  .history-choice[aria-pressed="true"] {
+    border-color: Highlight;
+    forced-color-adjust: none;
+    background: Highlight;
+    color: HighlightText;
   }
 }

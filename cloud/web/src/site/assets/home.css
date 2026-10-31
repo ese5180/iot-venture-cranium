@@ -1,0 +1,1525 @@
+/*
+ * Cranium home page.
+ *
+ * The public face of the firmware console, set the same way: paper, ink and rust, heavy
+ * rules and open columns, one ink panel for what matters most, and the arch cut with
+ * record grooves. The page has no script. Colours are the console's (app.css), by the
+ * same names and with the same meanings: rust is the brand and "your move", blue is the
+ * system at work, green is confirmed, amber is caution, red is failed. A test keeps the
+ * values the same as the console's.
+ *
+ * Order: colours and type, the page frame, then each section from the top.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --paper: #faf7f2;
+  --surface: #fffdfa;
+  --well: #f4efe7;
+  --line: #e7dfd3;
+  --line-strong: #d1c6b6;
+  --line-field: #94887a;
+  --rule: #1c1814;
+  --ink: #1c1814;
+  --ink-2: #574e45;
+  --ink-3: #72675b;
+
+  --accent: #b7410e;
+  --accent-strong: #983509;
+  --on-accent: #fffaf5;
+
+  --good: #2d6a3e;
+  --warn: #8f5b00;
+  --bad: #9c1c3f;
+  --bad-wash: #f9e3e6;
+  --work: #1c5c94;
+
+  --bar-good: #3f9a68;
+  --bar-live: #2a6fa8;
+  --bar-act: #b7410e;
+  --bar-bad: #a3173d;
+  --on-bar-live: #ffffff;
+  --on-bar-good: #0e1a12;
+  --line-mark: #8a7e70;
+
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --radius: 6px;
+  --radius-small: 5px;
+  --gutter: clamp(16px, 3.4vw, 48px);
+  --page: 1720px;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* Where the page's content begins, for what runs out to the edge of the window. */
+  --edge: max(var(--gutter), calc((100cqw - var(--page)) / 2 + var(--gutter)));
+  --section: clamp(56px, 7vw, 112px);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #171411;
+    --surface: #211d19;
+    --well: #2a2520;
+    --line: #342e28;
+    --line-strong: #4a4239;
+    --line-field: #7d7166;
+    --rule: #6d6257;
+    --ink: #f3eee7;
+    --ink-2: #c2b8ac;
+    --ink-3: #9c9185;
+
+    --accent: #e2703a;
+    --accent-strong: #ee8855;
+    --on-accent: #1a120c;
+
+    --good: #86c794;
+    --warn: #e2b455;
+    --bad: #ff9d96;
+    --bad-wash: #3a1b20;
+    --work: #8abcea;
+
+    --bar-good: #7fcb99;
+    --bar-live: #6faee6;
+    --bar-act: #e2703a;
+    --bar-bad: #d0324a;
+    --on-bar-live: #101a24;
+    --on-bar-good: #0e1a12;
+    --line-mark: #8a7f72;
+  }
+}
+
+/* An ink panel: the colours of the dark theme, on ink, as in the console. */
+.on-ink {
+  color-scheme: dark;
+
+  --paper: #1c1814;
+  --surface: #1c1814;
+  --line: #3a332c;
+  --line-strong: #574e44;
+  --line-mark: #8a7f72;
+  --rule: #f7f2ea;
+  --ink: #f7f2ea;
+  --ink-2: #d2c8bb;
+  --ink-3: #ab9f92;
+
+  --accent: #ef7a41;
+  --on-accent: #1a120c;
+
+  --good: #8fd4a0;
+  --bad: #ff9d96;
+  --bad-wash: #431c22;
+  --work: #93c3ef;
+
+  --bar-good: #7fcb99;
+  --bar-live: #6faee6;
+  --bar-act: #ef7a41;
+  --bar-bad: #d0324a;
+  --on-bar-live: #101a24;
+  --on-bar-good: #0e1a12;
+
+  background: var(--surface);
+  color: var(--ink);
+}
+
+@media (prefers-color-scheme: dark) {
+  .on-ink {
+    --paper: #28241f;
+    --surface: #28241f;
+    --line: #443e36;
+    --line-strong: #61574c;
+    --line-mark: #938779;
+    --ink-2: #d6ccc0;
+    --ink-3: #b5a99c;
+    --good: #97dba8;
+    --bad: #ffa79c;
+    --work: #9ccaf2;
+    --bad-wash: #4a2126;
+
+    /* A step above the page is not much on its own: the heaviest rule on the page says it. */
+    box-shadow: inset 0 3px 0 var(--ink);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  container-type: inline-size;
+  margin: 0;
+  min-width: 320px;
+  background: var(--paper);
+  color: var(--ink);
+  font: 1rem/1.55 var(--sans);
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+ol,
+dl,
+dd,
+figure {
+  margin: 0;
+  padding: 0;
+}
+
+ul,
+ol {
+  list-style: none;
+}
+
+strong {
+  font-weight: 600;
+}
+
+a {
+  color: var(--ink);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: var(--accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+main:focus {
+  outline: none;
+}
+
+.icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.eyebrow,
+.flow-lane {
+  color: var(--ink-3);
+  font-size: 0.71875rem;
+  font-weight: 600;
+  letter-spacing: 0.085em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.title {
+  font-size: clamp(2rem, 1.55rem + 1.7vw, 2.75rem);
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  line-height: 1.08;
+  text-wrap: balance;
+}
+
+.eyebrow + .title {
+  margin-top: 14px;
+}
+
+.body {
+  max-width: 38rem;
+  margin-top: 16px;
+  color: var(--ink-2);
+  text-wrap: pretty;
+}
+
+.nb {
+  white-space: nowrap;
+}
+
+section[id] {
+  scroll-margin-top: 20px;
+}
+
+.caption {
+  margin-top: 16px;
+  color: var(--ink-3);
+  font-size: 0.8125rem;
+  text-wrap: pretty;
+}
+
+.fig {
+  margin-right: 6px;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid var(--line-field);
+  border-radius: var(--radius-small);
+  color: var(--ink);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.006em;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.btn:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
+.btn.is-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.btn.is-primary:hover {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+  color: var(--on-accent);
+}
+
+/* The frame. */
+
+.skip {
+  position: absolute;
+  top: -80px;
+  left: var(--gutter);
+  z-index: 30;
+  padding: 9px 14px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-small);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.skip:focus {
+  top: 12px;
+}
+
+.masthead-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px clamp(20px, 3.6vw, 56px);
+  max-width: var(--page);
+  min-height: 68px;
+  margin: 0 auto;
+  padding: 12px var(--gutter);
+}
+
+.masthead {
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 11px;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.brand:hover {
+  color: var(--ink);
+}
+
+.brand-mark {
+  display: block;
+  flex: none;
+  width: 30px;
+  height: 30px;
+}
+
+.brand-dome {
+  fill: var(--accent);
+}
+
+.brand-grooves {
+  fill: none;
+  stroke: var(--paper);
+  stroke-width: 1.8;
+}
+
+.brand-name {
+  font-size: 1.1875rem;
+  font-weight: 700;
+  letter-spacing: -0.028em;
+}
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px clamp(16px, 2vw, 30px);
+  font-size: 0.9375rem;
+}
+
+.nav a {
+  color: var(--ink-2);
+  text-decoration: none;
+}
+
+.nav a:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 6px;
+}
+
+.btn.is-console {
+  min-height: 38px;
+  margin-left: auto;
+  padding: 0 15px;
+  font-size: 0.875rem;
+}
+
+.sheet {
+  max-width: var(--page);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+/* The first screen. */
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  border-bottom: 2px solid var(--rule);
+}
+
+.hero-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  padding: clamp(48px, 6vw, 104px) clamp(24px, 4vw, 72px) clamp(48px, 6vw, 104px) var(--edge);
+}
+
+.hero-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: clamp(18px, 2vw, 28px);
+  padding-bottom: 4px;
+  border-bottom: 2px solid var(--ink);
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.hero-state .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.hero-title {
+  font-size: clamp(2.5rem, 0.25rem + 5.25vw, 6rem);
+  font-weight: 700;
+  letter-spacing: -0.026em;
+  line-height: 1;
+}
+
+.hero-lede {
+  max-width: 35rem;
+  margin-top: clamp(20px, 2.2vw, 32px);
+  font-size: clamp(1.0625rem, 0.98rem + 0.36vw, 1.3125rem);
+  letter-spacing: -0.008em;
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
+.hero-note {
+  max-width: 35rem;
+  margin-top: 12px;
+  color: var(--ink-2);
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: clamp(24px, 2.6vw, 36px);
+}
+
+.hero-art {
+  position: relative;
+  min-height: clamp(280px, 44vw, 720px);
+  overflow: hidden;
+  background: var(--well);
+}
+
+.dome-art {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: min(92%, 680px);
+  height: 92%;
+  translate: -50% 0;
+}
+
+.art-dome {
+  fill: var(--accent);
+}
+
+.art-groove {
+  fill: none;
+  stroke: var(--well);
+  stroke-width: 2.5;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: draw 1.6s var(--ease) 100ms forwards;
+}
+
+.art-groove:nth-of-type(3) { animation-delay: 170ms; }
+.art-groove:nth-of-type(4) { animation-delay: 240ms; }
+.art-groove:nth-of-type(5) { animation-delay: 310ms; }
+.art-groove:nth-of-type(6) { animation-delay: 380ms; }
+.art-groove:nth-of-type(7) { animation-delay: 450ms; }
+.art-groove:nth-of-type(8) { animation-delay: 520ms; }
+.art-groove:nth-of-type(9) { animation-delay: 590ms; }
+.art-groove:nth-of-type(10) { animation-delay: 660ms; }
+.art-groove:nth-of-type(11) { animation-delay: 730ms; }
+
+@keyframes draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* What it is. */
+
+.what {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 8fr);
+  align-items: start;
+  gap: clamp(32px, 5vw, 96px);
+  padding-block: var(--section);
+}
+
+.path-diagram {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr);
+  column-gap: clamp(36px, 3.6vw, 56px);
+  align-items: stretch;
+}
+
+.path-side {
+  display: flex;
+  flex-direction: column;
+  padding-top: 12px;
+  border-top: 2px solid var(--rule);
+}
+
+.path-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: space-around;
+  gap: 18px;
+  margin-top: 14px;
+}
+
+.path-list li {
+  position: relative;
+  display: grid;
+  gap: 2px;
+}
+
+.path-list strong {
+  font-size: 1.0625rem;
+  letter-spacing: -0.01em;
+}
+
+.path-list span {
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+/* A wire into the attachment and out of it, with its arrowhead, in the gap between columns. */
+.path-list li::before {
+  content: "";
+  position: absolute;
+  top: 0.8em;
+  width: clamp(26px, 3vw, 46px);
+  height: 2px;
+  background: var(--line-mark);
+}
+
+.path-list li::after {
+  content: "";
+  position: absolute;
+  top: calc(0.8em - 4px);
+  width: 8px;
+  height: 10px;
+  background: var(--line-mark);
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
+
+.is-in .path-list li::before {
+  left: calc(100% + 5px);
+}
+
+.is-in .path-list li::after {
+  left: calc(100% + 5px + clamp(26px, 3vw, 46px) - 8px);
+}
+
+.is-out .path-list li::before {
+  right: calc(100% + 5px);
+}
+
+.is-out .path-list li::after {
+  right: calc(100% + 5px);
+}
+
+.path-unit {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: clamp(14px, 1.5vw, 20px);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.path-unit-name {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 1.3125rem;
+  font-weight: 700;
+  letter-spacing: -0.024em;
+}
+
+.path-unit-name .brand-mark {
+  width: 24px;
+  height: 24px;
+}
+
+.unit-dome {
+  fill: var(--on-accent);
+}
+
+.unit-grooves {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.8;
+}
+
+.path-parts {
+  display: grid;
+  flex: 1;
+  grid-template-rows: 1fr auto 1fr;
+  gap: 0;
+}
+
+.path-parts > li:not(.path-link) {
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  padding: 12px;
+  border: 1.5px solid var(--on-accent);
+  border-radius: var(--radius-small);
+}
+
+.path-parts strong {
+  font-size: 1rem;
+  letter-spacing: -0.01em;
+}
+
+.path-parts span {
+  font-size: 0.8125rem;
+  line-height: 1.35;
+}
+
+.path-link {
+  display: flex;
+  align-items: center;
+  padding: 10px 0 10px 16px;
+  margin-left: 14px;
+  border-left: 1.5px dashed var(--on-accent);
+}
+
+/* The ink panel. */
+
+.panel {
+  padding: clamp(20px, 2.9vw, 40px);
+  border-radius: var(--radius);
+  scroll-margin-top: 16px;
+}
+
+.panel a {
+  color: var(--ink);
+  text-decoration-color: var(--ink-3);
+}
+
+.panel-head .title {
+  max-width: 24em;
+  font-size: clamp(1.875rem, 1.45rem + 1.9vw, 3rem);
+}
+
+.flow-figure {
+  margin-top: clamp(32px, 3.6vw, 56px);
+}
+
+.flow {
+  display: grid;
+}
+
+.flow-lanes,
+.flow-arc,
+.flow-steps {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+}
+
+.flow-lanes {
+  order: 1;
+}
+
+.flow-arc {
+  order: 2;
+  height: 58px;
+  align-items: end;
+}
+
+.flow-steps {
+  order: 3;
+}
+
+.flow-lane {
+  padding-top: 8px;
+  border-top: 1px solid var(--line-strong);
+}
+
+.flow-lane.is-off {
+  grid-column: 1 / 4;
+  margin-right: 24px;
+}
+
+.flow-lane.is-on {
+  grid-column: 4 / 9;
+}
+
+/* The way back: from the step on trial to where the board stood before the button. */
+.flow-return {
+  position: relative;
+  grid-column: 4 / 7;
+  height: 30px;
+  margin-right: -20px;
+  margin-left: 19px;
+  border: 2px solid var(--bar-bad);
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+}
+
+.flow-return::before {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: -7px;
+  width: 12px;
+  height: 9px;
+  background: var(--bar-bad);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+.flow-return-label {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 11px;
+  border-radius: 4px;
+  background: var(--bad-wash);
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 600;
+  white-space: nowrap;
+  translate: -50% -50%;
+}
+
+.flow-return-label .icon {
+  width: 16px;
+  height: 16px;
+  color: var(--bad);
+}
+
+.flow-step {
+  position: relative;
+  padding-right: 14px;
+}
+
+/* The line to the next step. */
+.flow-step::before {
+  content: "";
+  position: absolute;
+  top: 19px;
+  right: 0;
+  left: 40px;
+  height: 2px;
+  background: var(--line-mark);
+}
+
+.flow-step:last-child::before {
+  display: none;
+}
+
+.flow-mark {
+  position: relative;
+  display: grid;
+  width: 40px;
+  height: 40px;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--paper);
+  place-items: center;
+}
+
+.flow-mark .icon {
+  width: 20px;
+  height: 20px;
+}
+
+.flow-step.is-you .flow-mark {
+  background: var(--bar-act);
+  color: var(--on-accent);
+}
+
+.flow-step.is-work .flow-mark {
+  background: var(--bar-live);
+  color: var(--on-bar-live);
+}
+
+.flow-step.is-good .flow-mark {
+  background: var(--bar-good);
+  color: var(--on-bar-good);
+}
+
+.flow-text {
+  display: grid;
+  gap: 2px;
+  margin-top: 12px;
+}
+
+.flow-label {
+  overflow-wrap: anywhere;
+  hyphens: auto;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+  line-height: 1.3;
+}
+
+.flow-word {
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  text-wrap: pretty;
+}
+
+.locks {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0 clamp(20px, 2.6vw, 40px);
+  margin-top: clamp(28px, 3vw, 44px);
+}
+
+.lock {
+  padding-top: 14px;
+  border-top: 1px solid var(--line-strong);
+}
+
+.lock p {
+  margin-top: 8px;
+  color: var(--ink-2);
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.lock-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  line-height: 1.3;
+}
+
+.lock-title .icon {
+  margin-top: 2px;
+}
+
+.lock.is-you .icon {
+  color: var(--accent);
+}
+
+.lock.is-work .icon {
+  color: var(--work);
+}
+
+.lock.is-bad .icon {
+  color: var(--bad);
+}
+
+/* Failures and the specification: a heading beside rows of facts. */
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 8fr);
+  align-items: start;
+  gap: 24px clamp(32px, 5vw, 96px);
+  margin-top: var(--section);
+}
+
+.split-head,
+.spec,
+.split > .rows {
+  padding-top: 20px;
+  border-top: 2px solid var(--rule);
+}
+
+.split-head .ports {
+  margin-top: clamp(24px, 2.6vw, 36px);
+}
+
+.rows {
+  display: grid;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 8fr);
+  gap: 4px clamp(20px, 2.6vw, 40px);
+  padding-block: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.rows > .row:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.row dt {
+  font-weight: 600;
+  letter-spacing: -0.008em;
+  line-height: 1.4;
+  text-wrap: pretty;
+}
+
+.row dd {
+  color: var(--ink-2);
+  text-wrap: pretty;
+}
+
+.figures {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 clamp(20px, 2.6vw, 40px);
+}
+
+.figure {
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.figure dt {
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  line-height: 1.35;
+  text-wrap: balance;
+}
+
+.figure dd {
+  font-size: clamp(2.75rem, 2.2rem + 2vw, 3.5rem);
+  font-weight: 600;
+  font-feature-settings: "tnum" 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.unit {
+  margin-left: 0.08em;
+  color: var(--ink-3);
+  font-size: 0.5em;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.ports {
+  max-width: 38rem;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.ports-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px 8px;
+}
+
+.port {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.25;
+}
+
+.port svg {
+  display: block;
+  width: 48px;
+  height: 48px;
+  margin-left: -4px;
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.port .pin {
+  fill: var(--ink);
+  stroke: none;
+}
+
+.spec .rows {
+  margin-top: clamp(20px, 2.4vw, 32px);
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+/* Where it stands. */
+
+.status {
+  margin-top: var(--section);
+}
+
+.status-head {
+  padding-top: 20px;
+  border-top: 2px solid var(--rule);
+}
+
+.status-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 28px clamp(24px, 4vw, 64px);
+  margin-top: clamp(24px, 3vw, 44px);
+}
+
+.state p,
+.limits {
+  margin-top: 8px;
+  color: var(--ink-2);
+  text-wrap: pretty;
+}
+
+.limits {
+  display: grid;
+  gap: 6px;
+}
+
+.state-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+
+.state .icon {
+  color: var(--ink-3);
+}
+
+.state.is-good .icon {
+  color: var(--good);
+}
+
+.state.is-warn .icon {
+  color: var(--warn);
+}
+
+.measured {
+  margin-top: clamp(28px, 3.4vw, 48px);
+  padding-top: 14px;
+  border-top: 2px solid var(--rule);
+}
+
+.measured .caption {
+  margin-top: 16px;
+}
+
+.exits {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 clamp(24px, 4vw, 64px);
+  margin-top: clamp(40px, 4.6vw, 72px);
+}
+
+.exit {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding-block: 20px 8px;
+  border-top: 2px solid var(--rule);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.exit:hover {
+  color: var(--ink);
+}
+
+.exit-name {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: clamp(1.625rem, 1.4rem + 1vw, 2.25rem);
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  line-height: 1.1;
+}
+
+.exit-name .icon {
+  width: 26px;
+  height: 26px;
+  transition: translate 0.2s var(--ease);
+}
+
+.exit:hover .exit-name {
+  color: var(--accent);
+}
+
+.exit:hover .icon {
+  translate: 5px 0;
+}
+
+.exit-text {
+  max-width: 38rem;
+  color: var(--ink-2);
+  text-wrap: pretty;
+}
+
+.foot {
+  margin-top: var(--section);
+  border-top: 1px solid var(--line);
+}
+
+.foot-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 24px;
+  max-width: var(--page);
+  margin-inline: auto;
+  padding: 20px var(--gutter) 28px;
+}
+
+.foot-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.foot-brand .brand-mark {
+  width: 22px;
+  height: 22px;
+}
+
+.foot-text {
+  color: var(--ink-3);
+  font-size: 0.875rem;
+}
+
+/* Narrower screens. */
+
+/*
+ * The headings go above what they head. Fig. 2 becomes a column, with the steps down the
+ * left and the way back drawn beside them, because the words on the arc need the width
+ * of three steps. Its explanations stand next to it for as long as there is room.
+ */
+@media (max-width: 1180px) {
+  .what,
+  .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .what-copy {
+    max-width: 44rem;
+  }
+
+  .panel {
+    display: grid;
+    grid-template-columns: minmax(0, 0.86fr) minmax(0, 1fr);
+    gap: 32px clamp(28px, 4vw, 56px);
+  }
+
+  .panel-head {
+    grid-column: 1 / -1;
+  }
+
+  .flow-figure,
+  .locks {
+    margin-top: 0;
+  }
+
+  .flow-lanes {
+    display: none;
+  }
+
+  .flow-steps {
+    display: block;
+    order: 1;
+    padding-left: 26px;
+  }
+
+  .flow-arc {
+    display: block;
+    order: 2;
+    height: auto;
+    margin-top: 14px;
+  }
+
+  .flow-step {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr);
+    column-gap: 14px;
+    min-height: 40px;
+    padding: 0 0 20px;
+  }
+
+  .flow-step:last-child {
+    padding-bottom: 0;
+  }
+
+  .flow-step::before {
+    top: 40px;
+    right: auto;
+    bottom: 0;
+    left: 19px;
+    width: 2px;
+    height: auto;
+  }
+
+  .flow-text {
+    align-content: start;
+    margin-top: 0;
+    padding-top: 1px;
+  }
+
+  /* The way back, one piece per step. */
+  .flow-step.is-arc::after,
+  .flow-step.is-arc-end::after,
+  .flow-step.is-arc-start::after {
+    content: "";
+    position: absolute;
+    left: -22px;
+    border-color: var(--bar-bad);
+    border-style: solid;
+    border-width: 0;
+  }
+
+  .flow-step.is-arc::after {
+    top: 0;
+    bottom: 0;
+    border-left-width: 2px;
+  }
+
+  .flow-step.is-arc-end::after {
+    top: 19px;
+    bottom: 0;
+    width: 14px;
+    border-top-width: 2px;
+    border-left-width: 2px;
+    border-top-left-radius: 8px;
+  }
+
+  .flow-step.is-arc-start::after {
+    top: 0;
+    width: 22px;
+    height: 21px;
+    border-bottom-width: 2px;
+    border-left-width: 2px;
+    border-bottom-left-radius: 8px;
+  }
+
+  /* The arrowhead, into the step where the board stood before the button. */
+  .flow-step.is-arc-end .flow-mark::before {
+    content: "";
+    position: absolute;
+    top: 13px;
+    left: -9px;
+    width: 9px;
+    height: 12px;
+    background: var(--bar-bad);
+    clip-path: polygon(0 0, 100% 50%, 0 100%);
+  }
+
+  .flow-return {
+    display: flex;
+    height: auto;
+    margin: 0;
+    padding: 9px 12px;
+    border: 0;
+    border-left: 3px solid var(--bar-bad);
+    border-radius: 4px;
+    background: var(--bad-wash);
+  }
+
+  .flow-return::before {
+    display: none;
+  }
+
+  .flow-return-label {
+    position: static;
+    align-items: flex-start;
+    padding: 0;
+    background: none;
+    white-space: normal;
+    translate: none;
+  }
+
+  .flow-return-label .icon {
+    margin-top: 3px;
+  }
+
+  .locks {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 22px;
+  }
+
+  .ports {
+    max-width: none;
+  }
+
+  .ports-list {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 860px) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hero-copy {
+    padding: 44px var(--gutter) 36px;
+  }
+
+  .hero-title {
+    font-size: clamp(2.25rem, 0.25rem + 9.7vw, 5rem);
+  }
+
+  .hero-art {
+    min-height: clamp(220px, 58vw, 420px);
+  }
+
+  /* Larger than its frame, which cuts it off: on a phone the arch is the picture. */
+  .dome-art {
+    top: clamp(24px, 6vw, 48px);
+    bottom: auto;
+    width: min(84%, 560px);
+    height: auto;
+    aspect-ratio: 1;
+  }
+
+  .status-columns {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+
+  .exits {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 28px;
+  }
+
+  .nav {
+    order: 3;
+    flex-basis: 100%;
+  }
+}
+
+/* Too narrow for two columns of Fig. 2, and for the sideways wires of Fig. 1. */
+@media (max-width: 720px) {
+  .panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .path-diagram {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 34px;
+  }
+
+  .path-list li::before,
+  .path-list li::after {
+    display: none;
+  }
+
+  .path-side.is-in,
+  .path-unit {
+    position: relative;
+  }
+
+  .path-side.is-in::after,
+  .path-unit::after {
+    content: "";
+    position: absolute;
+    bottom: -28px;
+    left: 19px;
+    width: 12px;
+    height: 22px;
+    background: var(--line-mark);
+    clip-path: polygon(40% 0, 60% 0, 60% 60%, 100% 60%, 50% 100%, 0 60%, 40% 60%);
+  }
+
+  .path-parts {
+    grid-template-rows: auto;
+  }
+
+  .row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ports-list {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .figures {
+    gap: 0 14px;
+  }
+}
+
+@media (max-width: 460px) {
+  .nav {
+    display: none;
+  }
+
+  .hero-actions,
+  .hero-actions .btn {
+    width: 100%;
+  }
+
+  /* Larger text must be able to wrap here rather than run off the screen. */
+  .hero-actions .btn {
+    padding-block: 8px;
+    text-align: center;
+    white-space: normal;
+  }
+
+  .figure dt {
+    font-size: 0.8125rem;
+  }
+}
+
+/* A window that has asked for no motion gets everything at rest, the grooves drawn. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .art-groove {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* The system's own colours: fills and marks that are only colour have to be told. */
+@media (forced-colors: active) {
+  .art-dome,
+  .brand-dome,
+  .unit-dome {
+    fill: CanvasText;
+  }
+
+  .art-groove,
+  .brand-grooves,
+  .unit-grooves {
+    stroke: Canvas;
+  }
+
+  .flow-step::before,
+  .flow-return::before,
+  .flow-step.is-arc-end .flow-mark::before,
+  .path-list li::before,
+  .path-list li::after,
+  .path-side.is-in::after,
+  .path-unit::after {
+    background: CanvasText;
+    forced-color-adjust: none;
+  }
+
+  /* Their fills are gone here, so what they held together needs an edge. */
+  .panel,
+  .path-unit {
+    border: 1px solid CanvasText;
+  }
+
+  .path-parts > li:not(.path-link) {
+    border-color: CanvasText;
+  }
+
+  .path-link {
+    border-left-color: CanvasText;
+  }
+
+  .flow-return,
+  .flow-step.is-arc::after,
+  .flow-step.is-arc-end::after,
+  .flow-step.is-arc-start::after {
+    border-color: CanvasText;
+  }
+
+  .port .pin {
+    fill: CanvasText;
+  }
+
+  .port svg {
+    stroke: CanvasText;
+  }
+}

@@ -7,21 +7,29 @@
  */
 
 import { badRequest, describeError, field } from '../http.mjs';
-import { auditItem, decodeCursor, encodeCursor, entryFromItem } from '../lib/audit.mjs';
+import { auditDigest, auditItem, decodeCursor, encodeCursor, entryFromItem } from '../lib/audit.mjs';
 import { requirePageSize } from '../lib/validate.mjs';
 
 export function createAuditHandlers({ aws, log }) {
   return {
     /**
      * Store the entry for one request. Returns false if it could not be stored; the
-     * failure is logged here. Never throws.
+     * failure is logged here. Never throws. A stored entry leaves a digest in the log,
+     * which carries no address, file name or board name: see lib/audit.mjs.
      */
     async record(entry) {
       try {
         // The key is the time and the request id, and entries are never overwritten.
         // A key that is taken means this entry is not in the log.
-        const stored = await aws.putAudit(auditItem(entry));
-        if (stored.ok) return true;
+        const item = auditItem(entry);
+        const stored = await aws.putAudit(item);
+        if (stored.ok) {
+          log({
+            event: 'audit_entry', requestId: item.requestId, sub: item.actor.sub, action: item.action,
+            outcome: item.outcome, digest: auditDigest(item),
+          });
+          return true;
+        }
         log({
           level: 'error', event: 'audit_write_failed', requestId: entry.requestId, action: entry.action,
           outcome: entry.outcome, error: { message: 'an entry with this time and request id exists' },

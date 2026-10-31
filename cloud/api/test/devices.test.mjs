@@ -264,7 +264,8 @@ test('a board that is not in the group does not exist for the console', async ()
     assert.equal(response.body.error.code, 'unknown_device');
   }
   // Membership is checked before anything about the thing is read.
-  assert.deepEqual([...new Set(fake.methodsCalled())], ['listGroupThings']);
+  const asked = fake.methodsCalled().filter((method) => !['getUser', 'listUserGroups'].includes(method));
+  assert.deepEqual([...new Set(asked)], ['listGroupThings']);
 
   for (const text of ['cranium-00', 'CRANIUM-00000000000000AA', 'cranium-00000000000000aa%20', '*', '%2e%2e',
     'cranium-00000000000000aa%2Fshadow', `${BOARD_A}x`]) {

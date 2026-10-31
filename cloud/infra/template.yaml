@@ -29,13 +29,32 @@ Parameters:
     Default: INACTIVE
     AllowedValues: [ACTIVE, INACTIVE]
     Description: >-
-      INACTIVE while the stack is first created, so that a failed creation can roll back.
-      deploy.sh switches it to ACTIVE once the stack exists.
+      Deletion protection of the user pool and of both tables. INACTIVE while the stack
+      is first created, so that a failed creation can roll back. deploy.sh switches it
+      to ACTIVE once the stack exists. The name is older than the tables' protection.
   IotLogLevel:
     Type: String
     Default: INFO
     AllowedValues: [ERROR, WARN, INFO, DEBUG, DISABLED]
     Description: Default level of AWS IoT logging for the whole account in this Region.
+  RestrictIotLoggingTrust:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Whether the role AWS IoT logs with may only be assumed for this account and Region.
+      Off by default: see IotLoggingRole, and "Limits" in cloud/README.md for how to try it.
+  DeployedCommit:
+    Type: String
+    Default: unknown
+    AllowedPattern: '^(unknown|[0-9a-f]{40})$'
+    Description: The git commit this deployment was built from. deploy.sh sets it.
+  DeployedTree:
+    Type: String
+    Default: unknown
+    AllowedValues: [clean, dirty, unknown]
+    Description: >-
+      Whether the files this deployment was built from match that commit. deploy.sh sets it.
   SignInNamesCaseSensitive:
     Type: String
     Default: 'true'
@@ -44,9 +63,46 @@ Parameters:
       Whether sign-in names (e-mail addresses) are compared exactly. This is fixed when
       the user pool is created. deploy.sh sets it to false when it creates the stack; the
       default leaves a pool that was created before this parameter existed as it is.
+  ConsoleDomainName:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+    ConstraintDescription: must be empty, or a host name in lower case
+    Description: >-
+      Host name to serve the console on, such as console.example.com. Empty keeps only
+      the address that API Gateway assigns, which goes on working either way.
+  ConsoleCertificateArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/[0-9a-f-]+$'
+    ConstraintDescription: must be empty, or the ARN of a certificate in AWS Certificate Manager
+    Description: >-
+      Issued certificate for ConsoleDomainName, in this Region. It is requested outside
+      the stack, because a stack that creates one waits for the DNS record and fails if
+      that takes too long. See "A real address" in cloud/README.md.
+  HomeDomainName:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+    ConstraintDescription: must be empty, or a host name in lower case
+    Description: >-
+      Host name of the public home page, such as example.com. It is served there and on
+      www.<this name>. Empty means no home page: every name gets the console.
+  HomeCertificateArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/[0-9a-f-]+$'
+    ConstraintDescription: must be empty, or the ARN of a certificate in AWS Certificate Manager
+    Description: >-
+      Issued certificate for HomeDomainName and www.<that name>, in this Region. See
+      "A real address" in cloud/README.md.
 
 Conditions:
   CaseInsensitiveSignIn: !Equals [!Ref SignInNamesCaseSensitive, 'false']
+  HasConsoleDomain: !Not [!Equals [!Ref ConsoleDomainName, '']]
+  HasHomeDomain: !Not [!Equals [!Ref HomeDomainName, '']]
+  ProtectFromDeletion: !Equals [!Ref UserPoolDeletionProtection, ACTIVE]
+  RestrictedIotLoggingTrust: !Equals [!Ref RestrictIotLoggingTrust, 'true']
 
 Resources:
 
@@ -108,11 +164,38 @@ Resources:
       AuthorizationType: NONE
       Target: !Sub 'integrations/${WebIntegration}'
 
-  ApiRoute:
+  # What no other route claims, HEAD and paths nobody knows among them, goes to the web
+  # function, which answers from its fixed table with all its security headers. Otherwise
+  # API Gateway answers with a 404 of its own that has none. It uses the default limits.
+  DefaultRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref Api
-      RouteKey: 'ANY /api/{proxy+}'
+      RouteKey: $default
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${WebIntegration}'
+
+  # Reads and writes are separate routes only so that each has its own request limit
+  # (Stage, below). Both need the same token and go to the same function, which routes
+  # on the path. An HTTP API has no limit per caller, so this keeps heavy reading from
+  # starving revoke and cancel, and no more than that: see "Limits" in cloud/README.md.
+  # The API has no other methods, so anything else goes to the default route.
+  ApiReadRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: 'GET /api/{proxy+}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref Authorizer
+      AuthorizationScopes:
+        - cranium/console
+      Target: !Sub 'integrations/${ApiIntegration}'
+
+  ApiWriteRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: 'POST /api/{proxy+}'
       AuthorizationType: JWT
       AuthorizerId: !Ref Authorizer
       AuthorizationScopes:
@@ -125,13 +208,73 @@ Resources:
       LogGroupName: !Sub '/aws/vendedlogs/apigateway/${AWS::StackName}-access'
       RetentionInDays: 365
 
+  # The console's own address. The web function takes the address it signs in with from
+  # the request, so the page works on this name and on the one API Gateway assigned.
+  ConsoleDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Condition: HasConsoleDomain
+    Properties:
+      DomainName: !Ref ConsoleDomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref ConsoleCertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  ConsoleDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasConsoleDomain
+    Properties:
+      ApiId: !Ref Api
+      DomainName: !Ref ConsoleDomain
+      Stage: !Ref Stage
+
+  # The public home page, on a name and on www.<name>. It is the same API: the web
+  # function tells the names apart by HOME_HOSTS, below. Cognito is not told about either
+  # name, because the home page signs nobody in.
+  HomeDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Condition: HasHomeDomain
+    Properties:
+      DomainName: !Ref HomeDomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref HomeCertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  HomeDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasHomeDomain
+    Properties:
+      ApiId: !Ref Api
+      DomainName: !Ref HomeDomain
+      Stage: !Ref Stage
+
+  HomeWwwDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Condition: HasHomeDomain
+    Properties:
+      DomainName: !Sub 'www.${HomeDomainName}'
+      DomainNameConfigurations:
+        - CertificateArn: !Ref HomeCertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  HomeWwwDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasHomeDomain
+    Properties:
+      ApiId: !Ref Api
+      DomainName: !Ref HomeWwwDomain
+      Stage: !Ref Stage
+
   Stage:
     Type: AWS::ApiGatewayV2::Stage
     # RouteSettings names route keys, which API Gateway rejects until the routes exist.
     DependsOn:
       - RootRoute
       - AssetsRoute
-      - ApiRoute
+      - ApiReadRoute
+      - ApiWriteRoute
     Properties:
       ApiId: !Ref Api
       StageName: '$default'
@@ -148,6 +291,15 @@ Resources:
         'GET /assets/{proxy+}':
           ThrottlingBurstLimit: 60
           ThrottlingRateLimit: 20
+        # What the API as a whole had before the two routes were separated.
+        'GET /api/{proxy+}':
+          ThrottlingBurstLimit: 20
+          ThrottlingRateLimit: 10
+        # People write, one thing at a time. A refused write still adds an entry to the
+        # activity log, so this number is also the most that a flood can add.
+        'POST /api/{proxy+}':
+          ThrottlingBurstLimit: 10
+          ThrottlingRateLimit: 5
       AccessLogSettings:
         DestinationArn: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${AccessLogGroup}'
         # The route key, never the path: a query string can carry an authorization
@@ -215,6 +367,23 @@ Resources:
         - email
       AdminCreateUserConfig:
         AllowAdminCreateUserOnly: true
+        # The address is in the mail so that nobody has to be told it separately. This is
+        # the only mail the console sends, and the only link in it is the console's own.
+        InviteMessageTemplate:
+          EmailSubject: Your Cranium firmware console account
+          EmailMessage: !Sub
+            - >-
+              <p>You have an account on the Cranium firmware console.</p>
+              <p>Address: <a href="${Url}">${Url}</a><br>
+              User name: {username}<br>
+              Temporary password: {####}</p>
+              <p>The temporary password works for 3 days. When you first sign in, you choose
+              your own password and set up an authenticator app. Type your user name in
+              lower case.</p>
+            - Url: !If
+                - HasConsoleDomain
+                - !Sub 'https://${ConsoleDomainName}/'
+                - !Sub '${Api.ApiEndpoint}/'
       Policies:
         PasswordPolicy:
           MinimumLength: 12
@@ -275,14 +444,26 @@ Resources:
         - cranium/console
       SupportedIdentityProviders:
         - COGNITO
+      # Unset, this lets a user change their own e-mail address through the public
+      # client id. That address is the sign-in name, what an administrator looks an
+      # account up by, and what the activity log shows. Changing it is for an
+      # administrator, whose calls are not limited by this list. The list cannot be
+      # empty, so it names one attribute that nothing here reads. The pool requires no
+      # attribute that a first sign-in has to write.
+      WriteAttributes:
+        - name
       # The console always sends the form with the trailing slash. Both are registered
       # because Cognito compares the redirect URI character by character.
       CallbackURLs:
         - !Sub '${Api.ApiEndpoint}/'
         - !GetAtt Api.ApiEndpoint
+        - !If [HasConsoleDomain, !Sub 'https://${ConsoleDomainName}/', !Ref AWS::NoValue]
+        - !If [HasConsoleDomain, !Sub 'https://${ConsoleDomainName}', !Ref AWS::NoValue]
       LogoutURLs:
         - !Sub '${Api.ApiEndpoint}/'
         - !GetAtt Api.ApiEndpoint
+        - !If [HasConsoleDomain, !Sub 'https://${ConsoleDomainName}/', !Ref AWS::NoValue]
+        - !If [HasConsoleDomain, !Sub 'https://${ConsoleDomainName}', !Ref AWS::NoValue]
       ExplicitAuthFlows:
         - ALLOW_REFRESH_TOKEN_AUTH
         - ALLOW_USER_SRP_AUTH
@@ -391,12 +572,17 @@ Resources:
   # State. Deployments are not stored here: AWS IoT Jobs is their only store.
   # ---------------------------------------------------------------------------------
 
+  # Deletion protection guards against mistakes: anyone who may delete a table may also
+  # switch it off. It follows the same parameter as the user pool, because a protected
+  # table would stop a failed first creation from rolling back. teardown.sh switches it
+  # off before it deletes a table.
   StateTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [ProtectFromDeletion, true, false]
       AttributeDefinitions:
         - AttributeName: pk
           AttributeType: S
@@ -410,13 +596,19 @@ Resources:
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
 
-  # Append-only: the API role may put and query items, nothing else.
+  # The API role may put and query items and nothing else, and it is refused anything
+  # that deletes or updates (ApiRole). Note what IAM cannot do: PutItem also replaces an
+  # item with the same key, and no condition key can require the "only if new" condition
+  # that src/aws.mjs sends. So the code keeps entries from being overwritten, not IAM.
+  # The function log holds a digest of every entry, which that role cannot change or
+  # delete: cloud/api/verify-audit.mjs compares the two.
   AuditTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !If [ProtectFromDeletion, true, false]
       AttributeDefinitions:
         - AttributeName: pk
           AttributeType: S
@@ -509,6 +701,13 @@ Resources:
   # creates the group on first use without a retention period. It may exist already, so
   # it cannot be a resource of this stack: deploy.sh creates it if it is missing and
   # gives it a retention period if it has none.
+  #
+  # Unlike PresignRole, its trust policy has no conditions unless RestrictIotLoggingTrust
+  # says so. This is the policy AWS publishes for the logging role. AWS recommends the
+  # conditions for AWS IoT roles in general, but it does not list logging among the
+  # features they work with and warns that a service may not supply the keys. If AWS IoT
+  # logging does not, the log stops without an error, so this stays a switch to try and
+  # to check, not a default.
   IotLoggingRole:
     Type: AWS::IAM::Role
     Properties:
@@ -519,6 +718,13 @@ Resources:
             Principal:
               Service: iot.amazonaws.com
             Action: sts:AssumeRole
+            Condition: !If
+              - RestrictedIotLoggingTrust
+              - StringEquals:
+                  aws:SourceAccount: !Ref AWS::AccountId
+                ArnLike:
+                  aws:SourceArn: !Sub 'arn:${AWS::Partition}:iot:${AWS::Region}:${AWS::AccountId}:*'
+              - !Ref AWS::NoValue
       Policies:
         - PolicyName: write-iot-log
           PolicyDocument:
@@ -585,14 +791,16 @@ Resources:
                   - logs:PutLogEvents
                 Resource: !GetAtt WebLogGroup.Arn
 
-  # Serves the static console. It holds no secret and may call no AWS API.
+  # Serves the static console and home page. It holds no secret and may call no AWS API.
   WebFn:
     Type: AWS::Lambda::Function
     DependsOn: WebLogGroup
     Properties:
       LoggingConfig:
         LogGroup: !Ref WebLogGroup
-      Description: Cranium firmware console - static web console
+      # Also what makes a new commit a real change to the stack: CloudFormation may not
+      # apply a change that only touches a parameter and an output.
+      Description: !Sub 'Cranium firmware console - static web console - ${DeployedCommit} (${DeployedTree})'
       Runtime: nodejs22.x
       Architectures:
         - arm64
@@ -607,6 +815,10 @@ Resources:
           USER_POOL_CLIENT_ID: !Ref UserPoolClient
           LOGIN_DOMAIN: !Sub '${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com'
           OAUTH_SCOPE: openid cranium/console
+          HOME_HOSTS: !If
+            - HasHomeDomain
+            - !Sub '${HomeDomainName},www.${HomeDomainName}'
+            - !Ref AWS::NoValue
 
   ApiLogGroup:
     Type: AWS::Logs::LogGroup
@@ -635,13 +847,25 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !GetAtt ApiLogGroup.Arn
-              # Store an image and tag it as revoked. No read and no delete.
+              # Store an image. No read and no delete.
               - Sid: StoreFirmware
                 Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:PutObjectTagging
+                Action: s3:PutObject
                 Resource: !Sub '${FirmwareBucket.Arn}/firmware/*'
+              # Mark an image as revoked, which makes the bucket refuse to serve it. The
+              # role can set exactly this tag and nothing else, so it cannot clear the
+              # mark. Both conditions are needed: on its own, the second lets through a
+              # request with no tags at all, which would remove the mark.
+              - Sid: MarkFirmwareRevoked
+                Effect: Allow
+                Action: s3:PutObjectTagging
+                Resource: !Sub '${FirmwareBucket.Arn}/firmware/*'
+                Condition:
+                  StringEquals:
+                    s3:RequestObjectTag/revoked: 'true'
+                  ForAllValues:StringEquals:
+                    s3:RequestObjectTagKeys:
+                      - revoked
               # TransactWriteItems is authorized through PutItem and UpdateItem; IAM
               # has no action of its own for it. No Scan and no DeleteItem.
               - Sid: ReadAndWriteReleases
@@ -652,11 +876,25 @@ Resources:
                   - dynamodb:PutItem
                   - dynamodb:UpdateItem
                 Resource: !GetAtt StateTable.Arn
+              # See AuditTable for what this does and does not guarantee.
               - Sid: AppendAndReadAudit
                 Effect: Allow
                 Action:
                   - dynamodb:PutItem
                   - dynamodb:Query
+                Resource: !GetAtt AuditTable.Arn
+              # Nothing above allows these. Said outright so that no later Allow can.
+              - Sid: NeverChangeAuditEntries
+                Effect: Deny
+                Action:
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:DeleteTable
+                  - dynamodb:PartiQLDelete
+                  - dynamodb:PartiQLInsert
+                  - dynamodb:PartiQLUpdate
+                  - dynamodb:UpdateItem
+                  - dynamodb:UpdateTable
                 Resource: !GetAtt AuditTable.Arn
               - Sid: CreateDeployments
                 Effect: Allow
@@ -701,7 +939,8 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: iot.amazonaws.com
-              # Look up the caller's e-mail and check, live, that they may still write.
+              # Look up the caller's e-mail and check, live, that they may still read and
+              # write.
               - Sid: ReadUsers
                 Effect: Allow
                 Action:
@@ -715,7 +954,7 @@ Resources:
     Properties:
       LoggingConfig:
         LogGroup: !Ref ApiLogGroup
-      Description: Cranium firmware console - API
+      Description: !Sub 'Cranium firmware console - API - ${DeployedCommit} (${DeployedTree})'
       Runtime: nodejs22.x
       Architectures:
         - arm64
@@ -741,7 +980,23 @@ Resources:
 Outputs:
   ConsoleUrl:
     Description: Address of the console. Also the redirect URI the console signs in with.
-    Value: !Sub '${Api.ApiEndpoint}/'
+    Value: !If [HasConsoleDomain, !Sub 'https://${ConsoleDomainName}/', !Sub '${Api.ApiEndpoint}/']
+  ConsoleDomainTarget:
+    Condition: HasConsoleDomain
+    Description: What the DNS record of ConsoleDomainName has to point to.
+    Value: !GetAtt ConsoleDomain.RegionalDomainName
+  HomeUrl:
+    Condition: HasHomeDomain
+    Description: Address of the public home page.
+    Value: !Sub 'https://${HomeDomainName}/'
+  HomeDomainTarget:
+    Condition: HasHomeDomain
+    Description: What the DNS record of HomeDomainName has to point to.
+    Value: !GetAtt HomeDomain.RegionalDomainName
+  HomeWwwDomainTarget:
+    Condition: HasHomeDomain
+    Description: What the DNS record of www.<HomeDomainName> has to point to.
+    Value: !GetAtt HomeWwwDomain.RegionalDomainName
   Region:
     Value: !Ref AWS::Region
   UserPoolId:
@@ -768,3 +1023,9 @@ Outputs:
     Value: !Ref ApiFn
   WebFunctionName:
     Value: !Ref WebFn
+  DeployedCommit:
+    Description: The git commit this deployment was built from.
+    Value: !Ref DeployedCommit
+  DeployedTree:
+    Description: clean if the files this deployment was built from match that commit, dirty if not.
+    Value: !Ref DeployedTree

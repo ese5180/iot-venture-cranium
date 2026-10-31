@@ -169,17 +169,18 @@ test('GET /api/me reports the token\'s groups and the address from Cognito', asy
     sub: viewer.sub, email: viewer.email, groups: ['viewers'], canWrite: false, expiresAt: 4102444800,
   });
 
-  // The address is cached per user for five minutes.
+  // The address comes with the live check on reads, once a minute for each user.
   const lookups = () => console_.fake.calls.filter((entry) => entry.method === 'getUser').length;
   assert.equal(lookups(), 2);
-  console_.advance(4 * 60 * 1000);
+  console_.advance(59 * 1000);
   await console_.call('GET', '/api/me', { as: manager });
   assert.equal(lookups(), 2);
-  console_.advance(61 * 1000);
+  console_.advance(2 * 1000);
   await console_.call('GET', '/api/me', { as: manager });
   assert.equal(lookups(), 3);
 
-  // If Cognito cannot be asked, the answer still comes, without an address.
+  // If Cognito cannot be asked, the answer still comes, without an address that is out
+  // of date.
   console_.advance(6 * 60 * 1000);
   console_.fake.failNext('getUser');
   const degraded = await console_.call('GET', '/api/me', { as: manager });
@@ -248,8 +249,10 @@ test('a write asks Cognito at that moment, whatever the token says', async () =>
   assert.equal(console_.fake.objects.size, 0);
   assert.equal(console_.fake.releases.size, 0);
 
-  // Reads keep working for as long as the token is valid.
-  assert.equal((await console_.call('GET', '/api/firmware', { as: manager })).status, 200);
+  // Reading was not asked about yet, so it is refused as well.
+  response = await console_.call('GET', '/api/firmware', { as: manager });
+  assert.equal(response.status, 403);
+  assert.equal(response.body.error.code, 'account_inactive');
 });
 
 test('Cognito, not the token, says who is a release manager', async () => {
@@ -267,10 +270,16 @@ test('Cognito, not the token, says who is a release manager', async () => {
 
   // A token without either group opens nothing, whatever Cognito would say.
   const outsider = console_.addUser('outsider', ['release-managers'], { tokenGroups: [] });
+  const asks = () => console_.fake.calls.filter((call) => call.method === 'listUserGroups').length;
+  const asked = asks();
   const refused = await console_.call('POST', '/api/firmware', { as: outsider, body: upload() });
   assert.equal(refused.status, 403);
   assert.equal(refused.body.error.code, 'forbidden');
-  assert.equal(console_.fake.calls.filter((call) => call.method === 'listUserGroups').length, 1);
+  assert.equal(asks(), asked);
+  const refusedRead = await console_.call('GET', '/api/firmware', { as: outsider });
+  assert.equal(refusedRead.status, 403);
+  assert.equal(refusedRead.body.error.code, 'forbidden');
+  assert.equal(asks(), asked);
 
   // The token in the forms the gateway sends for a member of both groups.
   for (const groups of [['release-managers'], ['viewers', 'release-managers']]) {
@@ -312,6 +321,136 @@ test('the live check is made again for every write', async () => {
   assert.equal(response.status, 403);
   assert.equal(checks(), 2);
   assert.equal(console_.fake.jobs.size, 0);
+});
+
+test('reading stops within a minute of an account being removed, disabled or left out', async () => {
+  const changes = {
+    removed: { change: (user) => user.remove(), code: 'account_inactive' },
+    disabled: { change: (user) => user.disable(), code: 'account_inactive' },
+    'back on a temporary password': { change: (user) => user.setStatus('FORCE_CHANGE_PASSWORD'), code: 'account_inactive' },
+    'in no group': { change: (user) => user.setGroups([]), code: 'forbidden' },
+  };
+  for (const [name, { change, code }] of Object.entries(changes)) {
+    const console_ = createTestConsole();
+    const viewer = console_.addUser('viewer', ['viewers']);
+    const read = () => console_.call('GET', '/api/devices', { as: viewer });
+    assert.equal((await read()).status, 200, name);
+
+    change(console_.fake.user(viewer.sub));
+    // The last answer stands for up to a minute: this is the limit of the check.
+    console_.advance(59 * 1000);
+    assert.equal((await read()).status, 200, name);
+
+    console_.advance(2 * 1000);
+    const refused = await read();
+    assert.equal(refused.status, 403, name);
+    assert.equal(refused.body.error.code, code, name);
+    assert.equal((await console_.call('GET', '/api/me', { as: viewer })).status, 403, name);
+    // A path that does not exist says nothing to somebody who has been refused.
+    assert.equal((await console_.call('GET', '/api/nothing', { as: viewer })).status, 403, name);
+  }
+});
+
+test('the live check on reads asks once a minute for each user, and grants nothing', async () => {
+  const console_ = createTestConsole();
+  const viewer = console_.addUser('viewer', ['viewers']);
+  const other = console_.addUser('other', ['viewers']);
+  const asks = () => console_.fake.calls.filter((call) => call.method === 'listUserGroups').length;
+
+  for (let poll = 0; poll < 20; poll += 1) {
+    await console_.call('GET', '/api/devices', { as: viewer });
+    console_.advance(2 * 1000);
+  }
+  assert.equal(asks(), 1);
+  await console_.call('GET', '/api/devices', { as: other });
+  assert.equal(asks(), 2);
+  console_.advance(21 * 1000);
+  await console_.call('GET', '/api/devices', { as: viewer });
+  assert.equal(asks(), 3);
+
+  // Membership on the Cognito side does not stand in for a token without a group.
+  const outsider = console_.addUser('outsider', ['viewers'], { tokenGroups: [] });
+  assert.equal((await console_.call('GET', '/api/devices', { as: outsider })).status, 403);
+
+  // And what a viewer is shown does not grow with the group in Cognito.
+  console_.fake.user(viewer.sub).setGroups(['release-managers']);
+  console_.advance(61 * 1000);
+  const me = await console_.call('GET', '/api/me', { as: viewer });
+  assert.equal(me.status, 200);
+  assert.deepEqual([me.body.groups, me.body.canWrite], [['viewers'], false]);
+});
+
+test('when Cognito cannot be asked, reads go on and writes do not', async () => {
+  const console_ = createTestConsole();
+  const manager = console_.addUser('manager', ['release-managers']);
+  const asks = () => console_.fake.calls.filter((call) => call.method === 'listUserGroups').length;
+  const failing = (method) => {
+    console_.fake.failNext(method);
+    console_.logs.length = 0;
+  };
+
+  // With nothing known yet, as after a cold start.
+  failing('getUser');
+  assert.equal((await console_.call('GET', '/api/devices', { as: manager, requestId: 'req-a' })).status, 200);
+  const line = console_.logs.find((entry) => entry.event === 'live_check_failed');
+  assert.equal(line.level, 'warn');
+  assert.equal(line.requestId, 'req-a');
+  assert.equal(line.sub, manager.sub);
+  assert.equal(JSON.stringify(console_.logs).includes(manager.email), false);
+
+  // It does not ask again for half a minute, so that an outage delays few requests.
+  const asked = asks();
+  console_.advance(29 * 1000);
+  assert.equal((await console_.call('GET', '/api/devices', { as: manager })).status, 200);
+  assert.equal(asks(), asked);
+
+  // Writes do not wait for that, and do not take the benefit of the doubt.
+  failing('listUserGroups');
+  const write = await console_.call('POST', '/api/firmware', { as: manager, body: upload() });
+  assert.equal(write.status, 500);
+  assert.equal(console_.fake.objects.size, 0);
+
+  // Then it asks again, and goes by the answer.
+  console_.advance(2 * 1000);
+  assert.equal((await console_.call('GET', '/api/devices', { as: manager })).status, 200);
+  assert.ok(asks() > asked);
+
+  // With a positive answer on record, a failure changes nothing.
+  console_.advance(61 * 1000);
+  failing('listUserGroups');
+  assert.equal((await console_.call('GET', '/api/devices', { as: manager })).status, 200);
+});
+
+test('a refusal stays a refusal while Cognito cannot be asked', async () => {
+  const console_ = createTestConsole();
+  const viewer = console_.addUser('viewer', ['viewers']);
+  const read = () => console_.call('GET', '/api/devices', { as: viewer });
+  console_.fake.user(viewer.sub).disable();
+  assert.equal((await read()).status, 403);
+
+  // An outage is not a way back in, however long it lasts.
+  for (let minute = 0; minute < 5; minute += 1) {
+    console_.advance(61 * 1000);
+    console_.fake.failNext('getUser');
+    assert.equal((await read()).status, 403);
+  }
+  // And the account can come back.
+  console_.fake.user(viewer.sub).enable();
+  console_.advance(61 * 1000);
+  assert.equal((await read()).status, 200);
+});
+
+test('the live check on reads never answers for a write', async () => {
+  const console_ = createTestConsole();
+  const manager = console_.addUser('manager', ['release-managers']);
+  assert.equal((await console_.call('GET', '/api/firmware', { as: manager })).status, 200);
+
+  // Well within the minute that a read would go by the last answer.
+  console_.fake.user(manager.sub).remove();
+  const write = await console_.call('POST', '/api/firmware', { as: manager, body: upload() });
+  assert.equal(write.status, 403);
+  assert.equal(write.body.error.code, 'account_inactive');
+  assert.equal(console_.fake.objects.size, 0);
 });
 
 test('identity never comes from the request body', async () => {

@@ -3,12 +3,23 @@
  *
  * Every request that tries to change something leaves exactly one entry, whatever
  * happened to it: who asked (the token's sub, with the e-mail address as it was at
- * that moment), what they asked for, and how it ended. The table is append-only for
- * the API: its role may put and query items, nothing else.
+ * that moment), what they asked for, and how it ended.
+ *
+ * What protects an entry, and how far. The function's role may put and query items in
+ * the table, and is refused anything that deletes or updates: IAM enforces that. Putting
+ * an item with the key of an existing one would replace it, and IAM cannot require the
+ * condition that prevents this: aws.mjs sends it on every put, so the code enforces that.
+ * To notice it if code in this role, or an administrator, ever rewrote an entry, the
+ * function also logs a digest of each entry when it is stored. The role cannot change or
+ * delete a log line. cloud/api/verify-audit.mjs compares the two, for as long as the log
+ * group keeps its lines (90 days). The role could still add false lines and false
+ * entries: this detects changes to what was recorded, not lies told by the function.
  *
  * Item: pk = "AUD", sk = "<ISO time>#<request id>". Newest first is descending sk.
  * A page cursor is the last sk of the page, base64url encoded.
  */
+
+import { createHash } from 'node:crypto';
 
 export const ACTIONS = Object.freeze(
   ['firmware.upload', 'firmware.revoke', 'deployment.create', 'deployment.cancel']);
@@ -68,6 +79,23 @@ export function auditItem({ at, requestId, actor, action, target, outcome, detai
     outcome,
     detail: cleanDetail(detail),
   };
+}
+
+/** The value with the keys of every object in sorted order, so that JSON text is canonical. */
+function sortedKeys(value) {
+  if (Array.isArray(value)) return value.map(sortedKeys);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortedKeys(value[key])]));
+}
+
+/**
+ * The SHA-256 of an entry as stored, in hex. The partition key is left out: every entry
+ * has the same one, and the item auditItem builds does not carry it yet. Attribute order
+ * does not matter, because DynamoDB does not keep it.
+ */
+export function auditDigest(item) {
+  const { pk: _partition, ...entry } = item;
+  return createHash('sha256').update(JSON.stringify(sortedKeys(entry)), 'utf8').digest('hex');
 }
 
 /** Turn a stored item into an AuditEntry, or null if it is not one. */

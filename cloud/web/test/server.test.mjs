@@ -11,6 +11,8 @@ import { test } from 'node:test';
 import { createWebHandler, handler } from '../src/server.mjs';
 
 const SITE = new URL('../src/site/', import.meta.url);
+// The home page's own stylesheet is not part of the console: see home.test.mjs.
+const ofConsole = (name) => !name.startsWith('.') && !name.startsWith('home.');
 const DOMAIN = 'a1b2c3d4e5.execute-api.region-1.cloud.test';
 const LOGIN = 'https://cranium-0a1b2c3d.auth.region-1.login.test';
 const SETTINGS = { clientId: 'client-id-for-tests', loginOrigin: LOGIN, scope: 'openid cranium/console' };
@@ -59,9 +61,11 @@ function assertSecurityHeaders(response) {
   assert.equal(headers['referrer-policy'], 'no-referrer');
   assert.equal(headers['cross-origin-opener-policy'], 'same-origin');
   assert.equal(headers['cross-origin-resource-policy'], 'same-origin');
-  for (const feature of ['camera', 'microphone', 'geolocation', 'usb', 'serial', 'payment']) {
+  for (const feature of ['camera', 'microphone', 'geolocation', 'usb', 'payment']) {
     assert.match(headers['permissions-policy'], new RegExp(`(^|, )${feature}=\\(\\)(,|$)`));
   }
+  // The serial console's page uses it, and only that page's own origin may.
+  assert.match(headers['permissions-policy'], /(^|, )serial=\(self\)(,|$)/);
 }
 
 test('the page is served at / and is revalidated on every load', async () => {
@@ -164,8 +168,8 @@ test('a login origin that could alter the security policy is refused when the ha
 
 test('every file of the site is served under the build id and may be cached for ever', async () => {
   const build = await currentBuild();
-  const types = { css: 'text/css; charset=utf-8', js: 'text/javascript; charset=utf-8' };
-  const names = readdirSync(new URL('assets/', SITE)).filter((name) => !name.startsWith('.'));
+  const types = { css: 'text/css; charset=utf-8', js: 'text/javascript; charset=utf-8', json: 'application/json; charset=utf-8' };
+  const names = readdirSync(new URL('assets/', SITE)).filter(ofConsole);
   assert.equal(names.length > 0, true);
 
   for (const name of names) {
@@ -181,7 +185,7 @@ test('every file of the site is served under the build id and may be cached for 
 
 test('the build id is the first 12 hex digits of a SHA-256 over the names and contents', async () => {
   const names = ['index.html', ...readdirSync(new URL('assets/', SITE))
-    .filter((name) => !name.startsWith('.'))
+    .filter(ofConsole)
     .map((name) => `assets/${name}`)].sort();
   const hash = createHash('sha256');
   for (const name of names) {

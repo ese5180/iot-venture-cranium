@@ -15,10 +15,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
-  CORE, VIEWS, all, click, controls, createDocument, one, scriptAddress, textOf,
+  CORE, HISTORY, NEIGHBOURS, SERIAL, VIEWS, all, click, controls, createDocument, one, scriptAddress, textOf,
 } from './page.mjs';
 import {
-  INSTALLING, MANAGER, NEVER, NOW, OFFERED, REASON, WAITING, WITHDRAWN, WORLD, ago, deployment,
+  INSTALLING, MANAGER, NEVER, NOW, OFFERED, REASON, WAITING, WITHDRAWN, WORLD, ago, deployment, device,
   execution, release, repliesFor, revoked,
 } from './world.mjs';
 
@@ -58,6 +58,14 @@ const gateway = (status, message) => Response.json({ message }, { status });
 
 let copies = 0;
 
+/** Give the tab's browser Web Serial, with no port to offer. */
+function navigatorSerial() {
+  globalThis.navigator.serial = {
+    requestPort: async () => { throw Object.assign(new Error('none'), { name: 'NotFoundError' }); },
+    addEventListener() {},
+  };
+}
+
 /**
  * A browser tab with the console in it, signed in unless told otherwise.
  *
@@ -73,18 +81,20 @@ let copies = 0;
  * @param {Function} [options.answer]     (method, url, body) => Response, asked first; whatever
  *                                        it leaves unanswered comes from the table of replies
  * @param {Function} [options.upload]     (body) => { status, body } for an upload
+ * @param {Function} [options.BroadcastChannel]  what the tab has for a line to other tabs; by
+ *                                        default nothing, as in a browser without one
  */
 async function openTab(t, options = {}) {
   const {
     world = WORLD, viewer = false, hash = '#/overview', search = '', session = 3600, stored = {},
-    touch = false, answer = () => null, upload = () => ({ status: 500, body: {} }),
+    touch = false, answer = () => null, upload = () => ({ status: 500, body: {} }), BroadcastChannel,
   } = options;
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: NOW });
 
   const replies = repliesFor(world, { viewer });
   const requests = [];
   const navigations = [];
-  const document = createDocument(['skip', 'main', 'nav', 'account', 'toasts']);
+  const document = createDocument(['skip', 'main', 'nav', 'account', 'toasts', 'announcer']);
   document.querySelector = (selector) =>
     (selector === 'meta[name="cranium-config"]' ? { content: JSON.stringify(CONFIG) } : null);
 
@@ -179,6 +189,7 @@ async function openTab(t, options = {}) {
     location,
     history,
     XMLHttpRequest: Upload,
+    BroadcastChannel,
   };
   const navigator = { clipboard: { writeText: async () => {} } };
   for (const [name, value] of Object.entries({ document, window, location, history, navigator })) {
@@ -187,7 +198,9 @@ async function openTab(t, options = {}) {
 
   // A copy of app.js of its own: the script starts the console when it is loaded.
   copies += 1;
-  await import(scriptAddress('app.js', { 'core.js': CORE, 'views.js': VIEWS }, `tab ${copies}`));
+  await import(scriptAddress('app.js', {
+    'core.js': CORE, 'views.js': VIEWS, 'serial.js': SERIAL, 'history.js': HISTORY,
+  }, `tab ${copies}`));
   await settle();
 
   const main = document.getElementById('main');
@@ -247,7 +260,8 @@ const WRITES = new Set([
   'Deploy', 'Revoke', 'Finish revoking', 'Apply the revocation again', 'New deployment',
   'Cancel deployment', 'Upload for verification',
 ]);
-const writes = (root) => controls(root).filter((label) => WRITES.has(label));
+// The buttons of a release are named with its version, as in "Revoke 1.2.3+5".
+const writes = (root) => controls(root).filter((label) => WRITES.has(label.replace(/ \d\S*$/, '')));
 const releaseRow = (tab, version) => one(tab.main, 'li.release', version);
 const badges = (row) => all(one(row, 'div.release-title'), 'span.badge').map(textOf);
 
@@ -274,10 +288,178 @@ test('the console starts on the page in the address and loads what that page sho
   assert.deepEqual(tab.navigations, []);
 });
 
-test('an address that is not a page of the console becomes the overview', async (t) => {
+test('an address that is not a page of the console becomes the overview, and says so', async (t) => {
   const tab = await openTab(t, { hash: '#/https://evil.example/' });
   assert.equal(tab.location.hash, '#/overview');
   assert.equal(textOf(one(tab.main, 'h1')), 'Overview');
+  assert.deepEqual(tab.toasts(), ['That address is not a page of this console. Here is the overview.']);
+});
+
+test('the console opened without an address is not an address that went wrong', async (t) => {
+  const tab = await openTab(t, { hash: '' });
+  assert.equal(tab.location.hash, '#/overview');
+  assert.deepEqual(tab.toasts(), []);
+});
+
+test('the title of the tab tells open tabs apart', async (t) => {
+  const tab = await openTab(t, { hash: `#/devices/${WAITING}` });
+  assert.equal(tab.document.title, 'cranium-0000… · Cranium');
+  await tab.goto(`#/deployments/${OFFERED}`);
+  assert.equal(tab.document.title, 'Deployment of 1.2.3+5 · Cranium');
+  await tab.goto('#/firmware');
+  assert.equal(tab.document.title, 'Firmware · Cranium');
+});
+
+test('a screen reader hears a board change state on every page but the one that says it itself', async (t) => {
+  const waiting = { ...WORLD, devices: [WORLD.devices[0]] };
+  const tab = await openTab(t, { world: waiting });
+  const heard = () => textOf(tab.document.getElementById('announcer'));
+  assert.equal(heard(), '', 'the first look at a board is not news');
+  const moved = { ...WORLD.devices[0], ota: { state: 'downloading', job: OFFERED, progress: 10, last: 'none', error: '' } };
+  tab.becomes({ ...WORLD, devices: [moved] });
+  await tab.wait(3000);
+  assert.equal(heard(), 'cranium-0000…: Downloading 1.2.3+5.');
+});
+
+test('a toast stays until it has been read, and can be closed', async (t) => {
+  const tab = await openTab(t, { hash: '#/firmware' });
+  const copy = async () => {
+    click(all(tab.main, 'button').find((item) => item.getAttribute('aria-label') === 'Copy the key fingerprint'));
+    await settle();
+  };
+  await copy();
+  assert.deepEqual(tab.toasts(), ['Copied the key fingerprint.']);
+  const [toast] = all(tab.document.getElementById('toasts'), 'div.toast');
+  // Held while the pointer is on it.
+  toast.dispatchEvent({ type: 'mouseenter' });
+  await tab.wait(60000);
+  assert.equal(tab.toasts().length, 1);
+  toast.dispatchEvent({ type: 'mouseleave' });
+  await tab.wait(5000);
+  assert.deepEqual(tab.toasts(), []);
+
+  await copy();
+  click(one(tab.document.getElementById('toasts'), 'button'));
+  assert.deepEqual(tab.toasts(), []);
+});
+
+test('closing a toast with the keyboard leaves the keyboard in the page', async (t) => {
+  const tab = await openTab(t, { hash: '#/firmware' });
+  click(all(tab.main, 'button').find((item) => item.getAttribute('aria-label') === 'Copy the key fingerprint'));
+  await settle();
+  const toast = one(tab.document.getElementById('toasts'), 'div.toast');
+  const close = one(toast, 'button');
+  const before = one(tab.main, 'h1');
+  // Where the keyboard came from is where it goes back to.
+  const from = all(tab.main, 'button').find((item) => item.getAttribute('aria-label') === 'Copy the key fingerprint');
+  from.focus();
+  close.focus();
+  toast.dispatchEvent({ type: 'focusin', relatedTarget: from });
+  click(close);
+  assert.deepEqual(tab.toasts(), []);
+  assert.equal(tab.document.activeElement, from);
+
+  // If that is gone, the page's title has it.
+  click(from);
+  await settle();
+  const second = one(tab.document.getElementById('toasts'), 'div.toast');
+  one(second, 'button').focus();
+  second.dispatchEvent({ type: 'focusin', relatedTarget: null });
+  click(one(second, 'button'));
+  assert.equal(tab.document.activeElement.id, 'page-title');
+  assert.equal(before.id, 'page-title');
+});
+
+test('a toast that goes by itself does not move the keyboard', async (t) => {
+  const tab = await openTab(t, { hash: '#/firmware' });
+  const from = all(tab.main, 'button').find((item) => item.getAttribute('aria-label') === 'Copy the key fingerprint');
+  from.focus();
+  click(from);
+  await settle();
+  await tab.wait(5000);
+  assert.deepEqual(tab.toasts(), []);
+  assert.equal(tab.document.activeElement, from);
+});
+
+test('the second press of a double click does not close the dialog that the first one opened', async (t) => {
+  const tab = await openTab(t, { hash: '#/firmware' });
+  await tab.press(releaseRow(tab, '1.2.4+0'), 'button', 'Revoke');
+  const dialog = tab.dialog();
+  const pressBackdrop = () => {
+    dialog.dispatchEvent({ type: 'mousedown', target: dialog });
+    dialog.dispatchEvent({ type: 'click', target: dialog });
+  };
+  pressBackdrop();
+  assert.notEqual(tab.dialog(), null);
+  await tab.wait(400);
+  pressBackdrop();
+  assert.equal(tab.dialog(), null, 'after that, the backdrop closes it as usual');
+});
+
+test('when the control that had the focus goes away, the keyboard stays in the page', async (t) => {
+  const finished = deployment(OFFERED, {
+    status: 'COMPLETED',
+    completedAt: ago(0),
+    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', startedAt: ago(100) })],
+  });
+  const tab = await openTab(t, { hash: `#/deployments/${OFFERED}` });
+  one(tab.main, 'button', 'Cancel deployment').focus();
+  tab.becomes({ ...WORLD, deployments: [finished] });
+  await tab.wait(3000);
+  assert.deepEqual(writes(tab.main), []);
+  assert.equal(tab.document.activeElement.id, 'page-title');
+});
+
+test('a deployment that ends while its cancel button has the focus does not hand it to another button', async (t) => {
+  const declined = deployment(OFFERED, {
+    status: 'COMPLETED',
+    completedAt: ago(0),
+    executions: [execution(WAITING, 'declined', { status: 'REJECTED', reason: 'declined', startedAt: null })],
+  });
+  const tab = await openTab(t, { hash: `#/deployments/${OFFERED}` });
+  one(tab.main, 'button', 'Cancel deployment').focus();
+  tab.becomes({ ...WORLD, deployments: [declined] });
+  await tab.wait(3000);
+  assert.equal(one(tab.main, 'button', 'Offer again').getAttribute('class'), 'btn');
+  assert.equal(tab.document.activeElement.id, 'page-title');
+});
+
+test('an account that was removed or disabled is told that, and not that it can be added to a group', async (t) => {
+  const tab = await openTab(t, {
+    answer: (method, url) => (url === '/api/me'
+      ? refusal(403, 'account_inactive', 'Your account is disabled or not confirmed.')
+      : null),
+  });
+  const words = textOf(tab.main);
+  assert.match(words, /^.*Your account is not active/);
+  assert.match(words, /disabled or removed/);
+  assert.doesNotMatch(words, /no access yet|neither|add you/);
+  assert.equal(all(tab.main, 'button').map(textOf).join(), 'Sign out');
+});
+
+test('an account that is in no group is told so', async (t) => {
+  const tab = await openTab(t, {
+    answer: (method, url) => (url === '/api/me' ? refusal(403, 'no_access', 'Not in a group.') : null),
+  });
+  assert.match(textOf(tab.main), /Your account has no access yet/);
+});
+
+test('the same message twice is one toast, that stays for longer', async (t) => {
+  const tab = await openTab(t, { hash: '#/firmware' });
+  const copy = async () => {
+    click(all(tab.main, 'button').find((item) => item.getAttribute('aria-label') === 'Copy the key fingerprint'));
+    await settle();
+  };
+  await copy();
+  await tab.wait(4000);
+  await copy();
+  assert.deepEqual(tab.toasts(), ['Copied the key fingerprint.']);
+  await tab.wait(4000);
+  assert.deepEqual(tab.toasts(), ['Copied the key fingerprint.'], 'its time started again');
+  await tab.wait(1000);
+  assert.deepEqual(tab.toasts(), []);
+  await copy();
+  assert.deepEqual(tab.toasts(), ['Copied the key fingerprint.'], 'and once it is gone it can come again');
 });
 
 test('a viewer gets the pages without the controls', async (t) => {
@@ -319,7 +501,7 @@ test('a page is read again while boards are busy, and not while the tab is hidde
   assert.equal(tab.since(mark).includes('GET /api/devices'), true, 'and the schedule goes on');
 });
 
-test('a page whose boards are at rest is read every 30 s, and the list of releases not at all', async (t) => {
+test('a page whose boards are at rest is read every 30 s, and so are lists that others can change', async (t) => {
   const calm = { ...WORLD, devices: [WORLD.devices[2]], deployments: [WORLD.deployments[2]] };
   const tab = await openTab(t, { world: calm });
   assert.equal(all(tab.main, 'span.freshness-live').length, 0);
@@ -331,8 +513,168 @@ test('a page whose boards are at rest is read every 30 s, and the list of releas
 
   await tab.goto('#/firmware');
   mark = tab.requests.length;
-  await tab.wait(120000);
+  await tab.wait(29000);
   assert.deepEqual(tab.since(mark), []);
+  await tab.wait(1000);
+  assert.deepEqual(tab.since(mark), ['GET /api/firmware']);
+
+  await tab.goto('#/activity');
+  mark = tab.requests.length;
+  await tab.wait(30000);
+  assert.equal(tab.since(mark).includes('GET /api/audit?limit=50'), true);
+});
+
+test('a refresh by the clock waits while it would get in the way', async (t) => {
+  const tab = await openTab(t, { hash: '#/firmware' });
+  // With a dialog open.
+  await tab.press(releaseRow(tab, '1.2.4+0'), 'button', 'Revoke');
+  let mark = tab.requests.length;
+  await tab.wait(60000);
+  assert.deepEqual(tab.since(mark), []);
+  await tab.press(tab.dialog(), 'button', 'Keep the release');
+  mark = tab.requests.length;
+  await tab.wait(30000);
+  assert.deepEqual(tab.since(mark), ['GET /api/firmware']);
+
+  // With a file in hand.
+  await chooseFile(tab);
+  mark = tab.requests.length;
+  await tab.wait(60000);
+  assert.deepEqual(tab.since(mark), []);
+  await tab.press(tab.main, 'button', 'Choose another file');
+  await tab.wait(30000);
+  assert.deepEqual(tab.since(mark), ['GET /api/firmware']);
+});
+
+test('the log does not take away the pages that were loaded by hand', async (t) => {
+  const entries = Array.from({ length: 51 }, () => WORLD.entries[0]);
+  const tab = await openTab(t, {
+    hash: '#/activity',
+    answer: (method, url) => {
+      if (url === '/api/audit?limit=50') return Response.json({ entries: entries.slice(0, 50), next: 'more' });
+      if (url === '/api/audit?limit=50&before=more') return Response.json({ entries: entries.slice(50), next: null });
+      return null;
+    },
+  });
+  await tab.press(tab.main, 'button', 'Load more');
+  assert.equal(all(tab.main, 'li.log-line').length, 51);
+  const mark = tab.requests.length;
+  await tab.wait(60000);
+  assert.deepEqual(tab.since(mark), []);
+  assert.equal(all(tab.main, 'li.log-line').length, 51);
+});
+
+test('a board that a forced cancellation found restarting is followed until it is back', async (t) => {
+  const started = { status: 'CANCELED', startedAt: ago(100), lastUpdatedAt: ago(1) };
+  const run = (running) => deployment(OFFERED, {
+    status: 'CANCELED',
+    executions: [execution(WAITING, 'cancelled', { ...started, running })],
+  });
+  const restarting = device(WAITING, {
+    ota: { state: 'rebooting', job: OFFERED, progress: 0, last: 'none', error: '' },
+  });
+  const tab = await openTab(t, {
+    hash: `#/deployments/${OFFERED}`,
+    world: { ...WORLD, devices: [restarting], deployments: [run('1.2.3+4')] },
+  });
+  await tab.wait(0);
+  assert.match(textOf(one(tab.main, 'p.execution-title')), /^Finishing despite the cancellation/);
+  assert.match(textOf(one(tab.main, 'span.freshness-live')), /every 3 s/);
+  assert.equal(all(tab.main, 'button').some((item) => textOf(item) === 'Offer again'), false);
+
+  tab.becomes({
+    ...WORLD,
+    devices: [device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } })],
+    deployments: [run('1.2.3+5')],
+  });
+  await tab.wait(3000);
+  await tab.wait(0);
+  assert.match(textOf(one(tab.main, 'p.execution-title')), /^Installed despite the cancellation/);
+  assert.equal(all(tab.main, 'span.freshness-live').length, 0, 'and then it stops');
+  const mark = tab.requests.length;
+  await tab.wait(60000);
+  assert.deepEqual(tab.since(mark), []);
+});
+
+test('a release revoked elsewhere stops being offered again on a page that is already open', async (t) => {
+  const declined = deployment(OFFERED, {
+    status: 'COMPLETED',
+    completedAt: ago(10),
+    executions: [execution(WAITING, 'declined', { status: 'REJECTED', reason: 'declined' })],
+  });
+  const world = { ...WORLD, deployments: [declined] };
+  const tab = await openTab(t, { hash: `#/deployments/${OFFERED}`, world });
+  assert.equal(all(tab.main, 'button').some((item) => textOf(item) === 'Offer again'), true);
+
+  tab.becomes({
+    ...world,
+    releases: WORLD.releases.map((item) => (item.version === '1.2.3+5'
+      ? release('1.2.3+5', { status: 'revoked', revoked: revoked({ enforcedAt: ago(1) }) })
+      : item)),
+  });
+  await tab.wait(30000);
+  assert.equal(all(tab.main, 'button').some((item) => textOf(item) === 'Offer again'), false);
+  assert.match(textOf(tab.main), /was revoked/);
+  // There is no more to wait for.
+  const mark = tab.requests.length;
+  await tab.wait(60000);
+  assert.deepEqual(tab.since(mark), []);
+});
+
+test('a copy of a board\'s history from before it ran the version is read again, and a failed read is said and retried', async (t) => {
+  const board = (version) => device(WAITING, { fw: { version, confirmed: true } });
+  const cancelled = deployment(OFFERED, {
+    status: 'CANCELED',
+    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), running: '1.2.3+4' })],
+  });
+  let down = false;
+  const tab = await openTab(t, {
+    hash: `#/devices/${WAITING}`,
+    world: { ...WORLD, devices: [board('1.2.3+4')], deployments: [cancelled] },
+    answer: (method, url) => (down && url === `/api/devices/${WAITING}` ? gateway(500, 'Internal Server Error') : null),
+  });
+  // The board moves on while this copy stays in memory. A later deployment did it.
+  const later = deployment('cranium-1-2-3-b5-20261010T115800Z-0d0d', {
+    status: 'COMPLETED',
+    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', startedAt: ago(50), running: '1.2.3+5' })],
+  });
+  const run = deployment(OFFERED, {
+    status: 'CANCELED',
+    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), running: '1.2.3+5' })],
+  });
+  tab.becomes({ ...WORLD, devices: [board('1.2.3+5')], deployments: [run, later] });
+  down = true;
+  await tab.goto(`#/deployments/${OFFERED}`);
+  await tab.wait(2000);
+  await tab.wait(2000);
+  // The read fails, and the copy is not taken for an answer.
+  const words = () => textOf(tab.main);
+  assert.doesNotMatch(words(), /Installed despite/);
+  assert.match(words(), /Could not refresh the board’s list of updates/);
+  assert.equal(all(tab.main, 'button').some((item) => textOf(item) === 'Offer again'), false);
+
+  down = false;
+  await tab.press(tab.main, 'button', 'Try again');
+  assert.doesNotMatch(words(), /Installed despite|Could not refresh the board/);
+  assert.match(words(), /Another deployment installed 1\.2\.3\+5\./);
+});
+
+test('while a board restarts after a forced cancel the overview follows it and does not say that nothing is going on', async (t) => {
+  const run = deployment(OFFERED, {
+    status: 'CANCELED',
+    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), lastUpdatedAt: ago(1) })],
+  });
+  const restarting = device(WAITING, { ota: { state: 'rebooting', job: OFFERED, progress: 0, last: 'none', error: '' } });
+  const tab = await openTab(t, { world: { ...WORLD, devices: [restarting], deployments: [run] } });
+  assert.doesNotMatch(textOf(tab.main), /No update is in progress/);
+  assert.match(textOf(one(tab.main, 'li.run')), /Finishing despite the cancellation/);
+  assert.match(textOf(one(tab.main, 'span.freshness-live')), /every 3 s/);
+
+  const done = device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } });
+  tab.becomes({ ...WORLD, devices: [done], deployments: [run] });
+  await tab.wait(3000);
+  assert.equal(all(tab.main, 'li.run').length, 0);
+  assert.match(textOf(tab.main), /No update is in progress/);
 });
 
 test('a page that could not be loaded says so, and is asked for again more slowly', async (t) => {
@@ -429,6 +771,35 @@ async function chooseFile(tab, file = imageFile()) {
   await until(() => all(tab.main, 'ul.checks').length > 0, 'the file to be read');
 }
 
+test('a request made after the session has ended says so, and keeps the dialog with what was typed', async (t) => {
+  const tab = await openTab(t, { session: 100, hash: '#/firmware' });
+  const dialog = await openRevoke(tab, '1.2.4+0');
+  await tab.type(one(dialog, 'textarea'), REASON);
+  await tab.wait(101000);
+  const mark = tab.requests.filter((request) => request.method === 'POST').length;
+  await tab.submit();
+
+  assert.equal(tab.requests.filter((request) => request.method === 'POST').length, mark, 'nothing was sent');
+  assert.deepEqual(tab.navigations, [], 'and the console has not left');
+  assert.equal(tab.dialog(), dialog);
+  assert.equal(textOf(one(dialog, 'span.notice-said')), 'Not revoked. Your session has ended. Sign in again to continue.');
+  assert.equal(one(dialog, 'textarea').value, REASON);
+  assert.equal(textOf(one(tab.account, 'span.account-session')), 'Session ended');
+
+  await tab.press(dialog, 'button', 'Sign in again');
+  await leaving(tab);
+  assert.equal(pendingRoute(tab), '#/firmware');
+  assert.equal(tab.dialog(), null);
+});
+
+test('a refresh that finds the session over does not take away what is in hand', async (t) => {
+  const tab = await openTab(t, { session: 100, hash: `#/deployments/${OFFERED}` });
+  await tab.press(tab.main, 'button', 'Cancel deployment');
+  await tab.wait(110000);
+  assert.deepEqual(tab.navigations, []);
+  assert.notEqual(tab.dialog(), null);
+});
+
 test('a chosen file is not thrown away by the end of the session', async (t) => {
   const tab = await openTab(t, { session: 100, hash: '#/firmware' });
   await chooseFile(tab);
@@ -441,9 +812,12 @@ test('a chosen file is not thrown away by the end of the session', async (t) => 
   assert.deepEqual(tab.navigations, [], 'the file is still in hand');
   assert.equal(textOf(one(tab.main, 'p.upload-title')), 'zephyr.signed.bin');
 
-  // The session is over by now; the panel says so and offers the way back in.
+  // The session is over by now; the panel says so and offers the way back in. Sending
+  // the file is not on offer any more, and the masthead says the same.
   await tab.wait(45000);
   assert.match(textOf(one(tab.main, 'div.notice.is-warn')), /^Your session has ended\./);
+  assert.equal(all(tab.main, 'button').some((item) => textOf(item) === 'Upload for verification'), false);
+  assert.equal(textOf(one(tab.account, 'span.account-session')), 'Session ended');
   await tab.press(tab.main, 'button', 'Sign in again');
   await leaving(tab);
   assert.equal(pendingRoute(tab), '#/firmware');
@@ -497,6 +871,25 @@ test('a reply from the sign-in page that this tab did not ask for is dropped unr
   assert.deepEqual(tab.requests, []);
   assert.equal(tab.location.search, '');
   assert.deepEqual(controls(tab.main), ['Sign in']);
+});
+
+test('a token the API refuses counts as over, whatever time it had left', async (t) => {
+  const refused = (method, url) => (url.startsWith('/api/firmware/') ? refusal(401, 'unauthorized', 'Nope.') : null);
+  const tab = await openTab(t, { hash: '#/firmware', answer: refused });
+  assert.equal(textOf(one(tab.account, 'span.account-session')), 'Session ends in 1 h');
+  await tab.press(releaseRow(tab, '1.2.4+0'), 'button', 'Revoke');
+  await tab.type(one(tab.dialog(), 'textarea'), 'A reason.');
+  await tab.submit();
+  // The dialog stays, with what was typed, and says so; and so does the masthead.
+  assert.match(textOf(tab.dialog()), /Your session has ended/);
+  assert.equal(textOf(one(tab.account, 'span.account-session')), 'Session ended');
+  assert.equal(tab.storage.has('cranium.session'), false, 'a token that is refused is not kept');
+  // Once the work is put down, the console leaves for the sign-in page as it does at the end of a session.
+  assert.deepEqual(tab.navigations, []);
+  await tab.press(tab.dialog(), 'button', 'Keep the release');
+  await tab.wait(5000);
+  assert.equal(tab.navigations.length, 1);
+  assert.match(tab.navigations[0], /\/oauth2\/authorize\?/);
 });
 
 test('a token the API refuses leads back to sign-in, to the page the user was on', async (t) => {
@@ -555,8 +948,42 @@ test('revoking sends the reason, says what it cancelled and shows the release as
   assert.equal(tab.dialog(), null);
   assert.deepEqual(tab.toasts(), ['Revoked 1.2.4+0. 1 unfinished deployment was cancelled.']);
   assert.equal(tab.since(mark).includes('GET /api/firmware'), true);
+  assert.equal(tab.since(mark).includes('GET /api/devices'), true, 'to name the boards that run it');
   assert.deepEqual(badges(releaseRow(tab, '1.2.4+0')), ['Revoked']);
   assert.deepEqual(writes(releaseRow(tab, '1.2.4+0')), []);
+});
+
+test('a revocation is confirmed at once; which boards still run the release follows', async (t) => {
+  const runsIt = device(WAITING, { fw: { version: '1.2.4+0', confirmed: true } });
+  let answerBoards = null;
+  let holding = false;
+  const world = { ...WORLD, devices: [runsIt], deployments: [] };
+  const replies = repliesFor(world);
+  const tab = await openTab(t, {
+    world,
+    hash: '#/firmware',
+    answer(method, url) {
+      if (method === 'POST' && url === '/api/firmware/1.2.4+0/revoke') {
+        return Response.json({ release: release('1.2.4+0', { status: 'revoked', revoked: revoked({ enforcedAt: ago(0) }) }), cancelled: [] });
+      }
+      if (url === '/api/devices' && holding) {
+        return new Promise((resolve) => { answerBoards = () => resolve(Response.json(replies.get(url))); });
+      }
+      return null;
+    },
+  });
+  holding = true;
+  await tab.press(releaseRow(tab, '1.2.4+0'), 'button', 'Revoke');
+  await tab.type(one(tab.dialog(), 'textarea'), 'A reason.');
+  await tab.submit();
+  assert.equal(tab.dialog(), null);
+  assert.deepEqual(tab.toasts(), ['Revoked 1.2.4+0. No deployment of it was still open.']);
+  answerBoards();
+  await settle();
+  assert.deepEqual(tab.toasts(), [
+    'Revoked 1.2.4+0. No deployment of it was still open.',
+    `${WAITING} still runs it; to replace it there, upload a newer version and deploy that.`,
+  ]);
 });
 
 test('a release that somebody else revoked first is not reported as "not revoked"', async (t) => {
@@ -693,6 +1120,30 @@ test('a new deployment: the only free board is ticked, and a refusal updates the
   assert.equal(all(tab.main, 'li.deployment-row').length, 4);
 });
 
+test('pressing Deploy on a release that was revoked since says so, and suggests no other', async (t) => {
+  const tab = await openTab(t, { hash: '#/firmware' });
+  // Somebody else revokes it after this page has read the list.
+  const mark = revoked({ enforcedAt: ago(0) });
+  tab.becomes({
+    ...WORLD,
+    releases: WORLD.releases.map((item) =>
+      (item.version === '1.2.4+0' ? { ...item, status: 'revoked', revoked: mark } : item)),
+  });
+  await tab.press(releaseRow(tab, '1.2.4+0'), 'button', 'Deploy');
+  const dialog = tab.dialog();
+  assert.match(textOf(one(dialog, 'div.notice.is-warn')), /^1\.2\.4\+0 has been revoked/);
+  assert.equal(all(dialog, 'input').every((input) => !input.checked), true);
+  assert.equal(one(dialog, 'button', 'Next').disabled, true);
+  // The page behind the dialog has learned it too.
+  assert.deepEqual(badges(releaseRow(tab, '1.2.4+0')), ['Revoked']);
+
+  // Choosing another takes the note away.
+  click(all(dialog, 'input')[0]);
+  await settle();
+  assert.equal(all(tab.dialog(), 'div.notice.is-warn').length, 0);
+  assert.equal(one(tab.dialog(), 'button', 'Next').disabled, false);
+});
+
 test('a deployment that starts takes the console to its page', async (t) => {
   const created = 'cranium-1-2-4-b0-20261010T120000Z-0e0e';
   const offline = execution(NEVER, 'waiting_for_device', { online: false });
@@ -745,7 +1196,8 @@ test('cancelling a deployment that somebody else has cancelled: the dialog comes
   assert.match(textOf(dialog), /Nothing is left to cancel\./);
   assert.doesNotMatch(textOf(dialog), /Right now/);
   assert.equal(one(dialog, 'button.is-danger').disabled, true);
-  assert.match(textOf(one(dialog, 'span.notice-said')), /^Not cancelled\. This deployment has already/);
+  // What was refused has nothing to add to that, and cannot contradict it.
+  assert.equal(all(dialog, 'span.notice-said').length, 0);
   // Nothing more can be sent from here.
   const before = tab.requests.length;
   await tab.submit();
@@ -768,7 +1220,7 @@ test('a deployment that was cancelled without force can still have its boards st
   });
   // The page is still live: the job is cancelled, the board is not.
   assert.match(textOf(one(tab.main, 'span.freshness-live')), /every 3 s/);
-  await tab.press(tab.main, 'button', 'Cancel deployment');
+  await tab.press(tab.main, 'button', 'Stop boards that have started');
   // Withdrawing the offer is done already; stopping the board is what is left, and chosen.
   assert.deepEqual(all(tab.dialog(), 'input').map((input) => [input.checked, input.disabled]),
     [[false, true], [true, false]]);
@@ -777,12 +1229,119 @@ test('a deployment that was cancelled without force can still have its boards st
 
   assert.deepEqual(tab.requests[mark].body, { force: true });
   assert.equal(tab.dialog(), null);
-  assert.deepEqual(tab.toasts(), ['Cancelled. Boards that had started are being stopped.']);
+  assert.deepEqual(tab.toasts(), ['Stop requested. Boards that had started have been asked to stop.']);
   assert.deepEqual(writes(tab.main), []);
   assert.equal(all(tab.main, 'span.freshness-live').length, 0, 'nothing is left to wait for');
 });
 
 // Uploading.
+
+test('a board that runs what was cancelled: its own list of updates says who installed it', async (t) => {
+  const later = 'cranium-1-2-3-b5-20261010T115800Z-0d0d';
+  const cancelled = deployment(OFFERED, {
+    status: 'CANCELED',
+    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(300), running: '1.2.3+5' })],
+  });
+  const installer = deployment(later, {
+    status: 'COMPLETED',
+    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', startedAt: ago(100), running: '1.2.3+5' })],
+  });
+  const board = device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } });
+  const tab = await openTab(t, {
+    world: { ...WORLD, devices: [board], deployments: [installer, cancelled] },
+    hash: `#/deployments/${OFFERED}`,
+  });
+  assert.equal(sentTo(tab, `/api/devices/${WAITING}`).length, 1);
+  assert.equal(textOf(one(tab.main, 'p.execution-title')), 'Cancelled');
+  assert.equal(one(tab.main, 'a', 'Open the deployment that installed it').getAttribute('href'), `#/deployments/${later}`);
+  // It does not offer again what the board runs already.
+  assert.equal(all(tab.main, 'button').some((item) => textOf(item).includes('Offer again')), false);
+});
+
+test('a deployment page reads no list of updates that it has no use for', async (t) => {
+  const tab = await openTab(t, { hash: `#/deployments/${OFFERED}` });
+  assert.equal(sentTo(tab, `/api/devices/${WAITING}`).length, 0);
+});
+
+test('signing out in one tab ends the others, whatever they hold', async (t) => {
+  // Two tabs of the same browser, as far as the line between them goes.
+  const lines = new Set();
+  class Line {
+    constructor(name) {
+      this.name = name;
+      this.listeners = [];
+      lines.add(this);
+    }
+
+    addEventListener(type, listener) {
+      if (type === 'message') this.listeners.push(listener);
+    }
+
+    postMessage(data) {
+      for (const line of lines) {
+        if (line !== this && line.name === this.name) for (const listener of line.listeners) listener({ data });
+      }
+    }
+  }
+  const tab = await openTab(t, { hash: '#/firmware', BroadcastChannel: Line });
+  const [here] = lines;
+  const other = new Line(here.name);
+  const signedOut = () => textOf(one(tab.main, 'h1'));
+
+  // Something else on the line changes nothing.
+  for (const listener of here.listeners) listener({ data: 'hello' });
+  assert.equal(signedOut(), 'Firmware');
+
+  // A dialog is open, and a file is in hand.
+  await chooseFile(tab);
+  await tab.press(releaseRow(tab, '1.2.4+0'), 'button', 'Revoke');
+  assert.notEqual(tab.dialog(), null);
+
+  other.postMessage('signed-out');
+  await settle();
+  assert.equal(tab.dialog(), null);
+  assert.equal(signedOut(), 'You are signed out');
+  assert.deepEqual(controls(tab.main), ['Sign in']);
+  assert.deepEqual([...tab.storage.keys()], ['cranium.signedout'], 'no token left here');
+  assert.deepEqual(tab.navigations, [], 'not sent anywhere: the other tab has ended the login session');
+  assert.equal(all(tab.main, 'div.upload-main').length, 0);
+
+  // And nothing is asked for any more.
+  const mark = tab.requests.length;
+  await tab.wait(60000);
+  assert.equal(tab.since(mark).length, 0);
+});
+
+test('signing out says so on the line between tabs, and nothing else', async (t) => {
+  const posted = [];
+  class Line {
+    constructor(name) {
+      this.name = name;
+    }
+
+    addEventListener() {}
+
+    postMessage(data) {
+      posted.push([this.name, data]);
+    }
+  }
+  const tab = await openTab(t, { BroadcastChannel: Line });
+  await tab.press(tab.account, 'button', 'Sign out');
+  assert.deepEqual(posted, [['cranium.session', 'signed-out']]);
+  assert.match(tab.navigations[0], /\/logout\?/);
+});
+
+test('a browser that cannot open the line between tabs still signs out', async (t) => {
+  class Refusing {
+    constructor() {
+      throw new Error('Not allowed.');
+    }
+  }
+  const tab = await openTab(t, { BroadcastChannel: Refusing });
+  assert.equal(textOf(one(tab.main, 'h1')), 'Overview');
+  await tab.press(tab.account, 'button', 'Sign out');
+  assert.match(tab.navigations[0], /\/logout\?/);
+});
 
 test('an upload: read in the browser, verified by the server, and said once when registered', async (t) => {
   const registered = release('2.0.1+0', { uploadedAt: ago(0), notes: 'Fixes the pads.' });
@@ -855,4 +1414,61 @@ test('the image the browser reads is the one the API tests sign', async (t) => {
   // The name is recorded in the characters the API accepts.
   assert.equal(fact('Recorded as'), 'valid-1.2.3_5.signed.bin');
   assert.match(textOf(state), /Newer than every registered release \(highest so far: 1\.2\.3\+4\)\./);
+});
+
+// The Developer section.
+
+test('the serial console opens by its address and asks the API for nothing', async (t) => {
+  const tab = await openTab(t, { hash: '#/overview' });
+  navigatorSerial();
+  const mark = tab.requests.length;
+  await tab.goto('#/serial');
+  assert.equal(textOf(one(tab.main, 'h1')), 'Serial console');
+  assert.equal(tab.document.title, 'Serial console · Cranium');
+  assert.deepEqual(tab.since(mark), []);
+  await tab.wait(120000);
+  assert.deepEqual(tab.since(mark), [], 'and it does not poll');
+});
+
+test('a viewer who opens the serial console gets an explanation and no controls', async (t) => {
+  const tab = await openTab(t, { viewer: true, hash: '#/serial' });
+  await tab.wait(0);
+  assert.match(textOf(tab.main), /for release managers/);
+  assert.deepEqual(all(tab.main, 'input'), []);
+  assert.equal(all(tab.main, 'button').length, 0);
+});
+
+test('a browser without Web Serial is told so and gets no controls', async (t) => {
+  const tab = await openTab(t, { hash: '#/serial' });
+  await tab.wait(0);
+  assert.match(textOf(tab.main), /Chrome and Edge/);
+  assert.match(textOf(tab.main), /115200 baud/);
+  assert.deepEqual(all(tab.main, 'input'), []);
+  assert.equal(all(tab.main, 'button').length, 0);
+});
+
+test('the history page says plainly that a checkout that was never deployed has none', async (t) => {
+  const tab = await openTab(t, { hash: '#/history' });
+  await tab.wait(0);
+  assert.equal(textOf(one(tab.main, 'h1')), 'History');
+  assert.match(textOf(tab.main), /no history in this copy/);
+  assert.equal(tab.requests.some(({ url }) => url === `${NEIGHBOURS}history.json`), true);
+});
+
+test('the history page shows the file beside its script, and fetches it once', async (t) => {
+  const file = {
+    deployment: { commit: 'a'.repeat(40), tree: 'clean', deployedAt: new Date(NOW - 60000).toISOString() },
+    commits: [{ short: 'aaaaaaa', hash: 'a'.repeat(40), date: new Date(NOW - 3600000).toISOString(), subject: 'Add a page', tags: ['website'] }],
+  };
+  const tab = await openTab(t, {
+    hash: '#/history',
+    answer: (method, url) => (url === `${NEIGHBOURS}history.json` ? Response.json(file) : null),
+  });
+  await tab.wait(0);
+  assert.match(textOf(tab.main), /Add a page/);
+  await tab.goto('#/overview');
+  const mark = tab.requests.length;
+  await tab.goto('#/history');
+  assert.equal(tab.since(mark).some((request) => request.includes('history.json')), false);
+  assert.match(textOf(tab.main), /Add a page/);
 });

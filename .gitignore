@@ -47,3 +47,6 @@ wifi_secrets.h
 .env
 .env.*
 *.local.json
+
+# Written at deployment by cloud/web/build-history.mjs
+cloud/web/src/site/assets/history.json

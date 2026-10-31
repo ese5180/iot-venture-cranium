@@ -69,7 +69,7 @@ export function versionOfDeployment(id) {
 
 // Routes. The console has exactly these; anything else in the address bar is ignored.
 
-const SECTIONS = ['overview', 'devices', 'firmware', 'deployments', 'activity'];
+const SECTIONS = ['overview', 'devices', 'firmware', 'deployments', 'activity', 'serial', 'history'];
 const ROUTE = /^#\/([a-z]+)(?:\/([A-Za-z0-9-]+))?$/;
 
 /** Turn a location hash into a route, or null if it is not one of the console's. */
@@ -125,6 +125,20 @@ export function exactTime(iso) {
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return '';
   return new Date(then).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
+}
+
+/**
+ * The time of day to write next to a relative time where the exact moment matters. A
+ * tooltip cannot be reached with a keyboard or on a touch screen. Another day's time
+ * says the day as well.
+ */
+export function clockTime(iso, nowMs) {
+  const then = new Date(Date.parse(iso));
+  if (Number.isNaN(then.getTime())) return '';
+  const time = { hour: '2-digit', minute: '2-digit' };
+  return then.toDateString() === new Date(nowMs).toDateString()
+    ? then.toLocaleTimeString(undefined, time)
+    : then.toLocaleString(undefined, { day: 'numeric', month: 'short', ...time });
 }
 
 /** "Today", "Yesterday" or a date: the heading a log entry is filed under. */
@@ -257,8 +271,10 @@ export function recordedFilename(name) {
 }
 
 /**
- * What can be said about a chosen file before it is uploaded. `blocked` is set only
- * when sending it would be pointless; everything else is left for the server to decide.
+ * What can be said about a chosen file before it is uploaded. `blocked` is set when the
+ * file cannot be firmware for the board. `doomed` is set when the server is certain to
+ * refuse it because of what is registered already, which only ever grows: the way on
+ * is then another file. Everything else is left for the server to decide.
  */
 export function reviewImage({ header, size, digest }, firmware) {
   const notes = [];
@@ -275,7 +291,7 @@ export function reviewImage({ header, size, digest }, firmware) {
 
   if (header.version === '0.0.0+0') {
     notes.push({ tone: 'warn', text: 'Version 0.0.0+0 is never accepted. Give the build a version first.' });
-    return { blocked, notes };
+    return { blocked, doomed: true, notes };
   }
   // Nothing is said about other releases until the list of them has arrived.
   if (!firmware) return { blocked, notes };
@@ -289,6 +305,7 @@ export function reviewImage({ header, size, digest }, firmware) {
   }, null);
 
   const top = highest ? formatVersion(highest) : '';
+  const doomed = Boolean(same || taken || (highest && compareVersions(version, highest) <= 0));
   if (same) {
     notes.push({ tone: 'warn', text: `This exact file is already registered as ${same.version}.` });
   } else if (taken) {
@@ -306,7 +323,7 @@ export function reviewImage({ header, size, digest }, firmware) {
   } else {
     notes.push({ tone: 'good', text: 'This will be the first release.' });
   }
-  return { blocked, notes };
+  return { blocked, doomed, notes };
 }
 
 // Reading API replies. Every reply is rebuilt field by field; a reply whose outline is
@@ -597,10 +614,88 @@ export function canRetryUpload(error) {
   return !isRefusal(error) || error.status === 429 || error.code === 'upload_conflict';
 }
 
+/**
+ * What the server checks before it stores an image, in the order it does so
+ * (cloud/api/src/lib/mcuboot.mjs and handlers/firmware.mjs). It answers 201 only when
+ * all of them passed, and otherwise names the first that did not, by its code.
+ */
+export const IMAGE_CHECKS = Object.freeze([
+  {
+    name: 'Image format',
+    passed: 'It is an MCUboot image, and it fits the board’s update slot.',
+    codes: ['not_an_image', 'too_small', 'too_large', 'bad_magic', 'bad_header', 'truncated'],
+  },
+  {
+    name: 'Flash layout',
+    passed: 'It was built for this product’s flash layout.',
+    codes: ['unsupported_flags', 'wrong_target'],
+  },
+  {
+    name: 'Signature area',
+    passed: 'Its signature area is well formed, with nothing after it.',
+    codes: ['malformed_tlv', 'unexpected_tlv', 'trailing_data', 'unsigned'],
+  },
+  {
+    name: 'Image hash',
+    passed: 'The image matches its own SHA-256 hash, so the file is not damaged.',
+    codes: ['hash_mismatch'],
+  },
+  { name: 'Signing key', passed: 'It is signed with this project’s key.', codes: ['wrong_key'] },
+  {
+    name: 'Signature',
+    passed: 'Its ECDSA P-256 signature is valid.',
+    codes: ['bad_signature', 'bad_signature_encoding'],
+  },
+  {
+    name: 'Version',
+    passed: 'Its version is newer than every release before it.',
+    passedFirst: 'Its version has a number, and no release came before it.',
+    codes: ['version_zero', 'version_exists', 'version_not_newer'],
+  },
+]);
+
+/** The name of the check that an image failed, from the code of the server's refusal. Null if it names none. */
+export function failedCheck(code) {
+  return IMAGE_CHECKS.find((check) => check.codes.includes(code))?.name ?? null;
+}
+
 /** A message as a sentence: some of the server's come without their full stop. */
 export function sentence(message) {
   const words = String(message ?? '').trim();
   return words === '' || /[.!?…]$/.test(words) ? words : `${words}.`;
+}
+
+// What the signature check says when an image is laid out differently from what it
+// expects: true, but in terms of the file format. A person who signed with the wrong
+// kind of key has to be told what to change.
+const SIGNED_WRONGLY = 'This image is not signed the way this project requires: an ECDSA P-256 ' +
+  'signature, with a hash of the public key. Sign it with the project’s imgtool settings.';
+const PLAIN_WORDS = {
+  unexpected_tlv: SIGNED_WRONGLY,
+  malformed_tlv: 'The signature area of this image cannot be read. Build and sign it again.',
+  bad_signature_encoding: 'The signature in this image cannot be read. Build and sign it again.',
+};
+
+/** What to say about a failed request: the server's wording, unless it is written in jargon. */
+export function plainMessage(error) {
+  return entryOf(PLAIN_WORDS, error.code) ?? error.message;
+}
+
+/**
+ * What to say once a deployment has been cancelled. `withdrawn`: it was cancelled before,
+ * so that stopping the boards is all this did. What a cancellation does to a board takes
+ * effect later, so it is told as what was asked for, not as what has happened.
+ */
+export function cancelNotice({ force, withdrawn, started }) {
+  if (withdrawn) return 'Stop requested. Boards that had started have been asked to stop.';
+  if (force) {
+    return started > 0
+      ? 'Cancelled. Boards that had started have been asked to stop.'
+      : 'Cancelled. Boards that had not started are no longer offered this update.';
+  }
+  return started > 0
+    ? `Cancelled. ${plural(started, 'board that had started carries', 'boards that had started carry')} on.`
+    : 'Cancelled. Boards that had not started are no longer offered this update.';
 }
 
 // Revoking. Marking a release revoked is the first of three steps. Refusing its image
@@ -638,17 +733,24 @@ export function revocationInPlace(error) {
  * @param {string[]|null} result.cancelled  the deployments it cancelled; null when the
  *                                          server only said that all is in place
  * @param {boolean} result.again            the release was revoked before this request
+ * @param {string[]} [result.running]       the boards that report that they run it
  */
-export function revocationNotice(version, { cancelled, again }) {
+export function stillRunning(running) {
+  const who = running.length === 1 ? `${running[0]} still runs it` : `${running.length} boards still run it`;
+  return `${who}; to replace it there, upload a newer version and deploy that.`;
+}
+
+export function revocationNotice(version, { cancelled, again, running = [] }) {
+  const still = running.length > 0 ? ` ${stillRunning(running)}` : '';
   if (cancelled === null) {
-    return again
+    return `${again
       ? `The revocation of ${version} is in place: its image is refused and no deployment of it is open.`
-      : `${version} was revoked already, and that revocation is in place.`;
+      : `${version} was revoked already, and that revocation is in place.`}${still}`;
   }
   const lead = again ? `The revocation of ${version} is in place.` : `Revoked ${version}.`;
-  if (cancelled.length === 0) return `${lead} No deployment of it was still open.`;
+  if (cancelled.length === 0) return `${lead} No deployment of it was still open.${still}`;
   const stopped = plural(cancelled.length, 'unfinished deployment was', 'unfinished deployments were');
-  return `${lead} ${stopped} cancelled.`;
+  return `${lead} ${stopped} cancelled.${still}`;
 }
 
 function errorFrom(status, payload) {
@@ -734,7 +836,9 @@ function form(fields) {
  * The session is timed with this computer's own clock from start to end (`now`), so a
  * clock that is wrong changes nothing: the token's lifetime is a length of time.
  */
-export function createAuth({ config, storage, location, history, fetch, crypto, now = () => Date.now() }) {
+export function createAuth({
+  config, storage, location, history, fetch, crypto, now = () => Date.now(), tellOtherTabs = () => {},
+}) {
   const seconds = () => Math.floor(now() / 1000);
 
   function randomToken() {
@@ -773,6 +877,9 @@ export function createAuth({ config, storage, location, history, fetch, crypto, 
       state,
       code_challenge: toBase64Url(new Uint8Array(digest)),
       code_challenge_method: 'S256',
+      // Every sign-in asks for the password and the code, also while the login page's own
+      // cookie is still valid: a closed tab, or one left open, does not sign in by itself.
+      prompt: 'login',
     })}`);
   }
 
@@ -912,10 +1019,16 @@ export function createAuth({ config, storage, location, history, fetch, crypto, 
     return { status: 'redirecting' };
   }
 
-  /** Forget the session here, then end it at the login pages too. */
-  function signOut() {
+  /** Forget everything of this session in this tab. A reload then finds it signed out. */
+  function forgetSession() {
     storage.clear();
     storage.setItem(SIGNED_OUT_KEY, '1');
+  }
+
+  /** Forget the session here and in the tabs next to this one, then end it at the login pages too. */
+  function signOut() {
+    forgetSession();
+    tellOtherTabs();
     location.assign(`${config.loginOrigin}/logout?${form({
       client_id: config.clientId,
       logout_uri: config.redirectUri,
@@ -926,6 +1039,12 @@ export function createAuth({ config, storage, location, history, fetch, crypto, 
     resume,
     signIn,
     signOut,
+    /** Another tab was signed out: the same here, without going to the login pages. */
+    signedOutElsewhere: forgetSession,
+    /** The server has turned the token down, so it is worth nothing any more. */
+    tokenRefused() {
+      storage.removeItem(SESSION_KEY);
+    },
     secondsLeft,
     /** The access token, or null once it has expired. */
     accessToken() {
@@ -940,6 +1059,11 @@ export function createAuth({ config, storage, location, history, fetch, crypto, 
     revocation: () => revocation,
   };
 }
+
+// What tabs of the same address say to each other. Only ever this one fixed word: no
+// token, no address, nothing about who was signed in.
+export const SESSION_CHANNEL = 'cranium.session';
+export const SIGNED_OUT_SIGNAL = 'signed-out';
 
 // The API client.
 
@@ -1106,7 +1230,9 @@ export function createApi({ auth, fetch, XMLHttpRequest, crypto, clock, onUnauth
 }
 
 // How often to ask again. A deployment is polled every 3 s while a board is installing
-// and every 10 s while one is still waiting, and not at all once nothing is in flight.
+// or is online and may move at any moment, because someone stands at it to press its
+// button. It is polled every 10 s while the only boards left are offline, and not at
+// all once nothing is in flight.
 
 export const POLL_INSTALLING_MS = 3000;
 export const POLL_WAITING_MS = 10000;
@@ -1121,20 +1247,70 @@ export function pollInterval(statuses) {
   return waiting ? POLL_WAITING_MS : 0;
 }
 
-/** The execution status a deployment summary amounts to, for pollInterval. */
-export function summaryActivity(deployment) {
+/** The status an execution counts as for pollInterval: an online board that waits is watched closely. */
+export function executionActivity(execution) {
+  return execution.status === 'QUEUED' && execution.online ? 'IN_PROGRESS' : execution.status;
+}
+
+/**
+ * The status a deployment summary amounts to, for pollInterval. `devices` is the board
+ * list, where it has been read: the summary itself does not say which boards are online.
+ */
+export function summaryActivity(deployment, devices = []) {
   if (deployment.counts.inProgress > 0) return 'IN_PROGRESS';
-  return deployment.counts.queued > 0 ? 'QUEUED' : null;
+  if (deployment.counts.queued === 0) return null;
+  const online = devices.some((device) => device.online && deployment.things.includes(device.thing));
+  return online ? 'IN_PROGRESS' : 'QUEUED';
 }
 
 /** The same for a board, judged by what it last reported. An offline board is not waited on. */
 export function deviceActivity(device) {
   if (!device.online || !device.ota || device.ota.state === 'idle') return null;
-  return device.ota.state === 'awaiting_user' ? 'QUEUED' : 'IN_PROGRESS';
+  return 'IN_PROGRESS';
+}
+
+// A board that a forced cancellation found restarting cannot be stopped, and comes back
+// on the new firmware or the old one a while later. AWS says nothing more about it, so
+// for this long what the board itself reports is still followed.
+const SETTLING_MS = 5 * MINUTE;
+
+/**
+ * True while a cancelled update may still change what a board runs: it had started,
+ * and the board's last report still names this deployment.
+ */
+export function stillSettling(execution, board, deploymentId, nowMs) {
+  if (execution.status !== 'CANCELED' || !execution.startedAt) return false;
+  if (!board?.ota || board.ota.job !== deploymentId || board.ota.state === 'idle') return false;
+  const since = Date.parse(execution.lastUpdatedAt);
+  return !Number.isNaN(since) && nowMs - since < SETTLING_MS;
+}
+
+/**
+ * True for a board that said that it is restarting and has not been written off yet. It
+ * is off for that moment, whatever its connection still counts as.
+ */
+export function isRestarting(device) {
+  return device.online && device.ota?.state === 'rebooting';
 }
 
 export function isUnfinished(status) {
   return status === 'QUEUED' || status === 'IN_PROGRESS';
+}
+
+/**
+ * True while a board that a cancellation found restarting or on trial is still reporting
+ * this deployment. AWS has written it off, and the board has not finished. It goes on
+ * counting for as long as stillSettling() follows such a board.
+ */
+export function stillFinishing(deployment, devices, nowMs) {
+  if (deployment.status !== 'CANCELED') return false;
+  return (devices ?? []).some((device) => {
+    if (device.ota?.job !== deployment.id) return false;
+    if (device.ota.state !== 'rebooting' && device.ota.state !== 'testing') return false;
+    if (device.online) return true;
+    const since = Date.parse(device.lastSeen);
+    return !Number.isNaN(since) && nowMs - since < SETTLING_MS;
+  });
 }
 
 /**
@@ -1184,11 +1360,13 @@ export function shouldRenew({ needsRenewal, visible, gate, dialogOpen, uploadSta
 /**
  * What follows when the API refuses the token: as a rule 'sign-in' again; 'refused'
  * when the token is fresh, because signing in again would only repeat the refusal;
- * 'stay' when the page already shows a message about signing in. `gate` is the message
- * that fills the page, if any; one that only says "loading" does not count.
+ * 'stay' when the page already shows a message about signing in, or when leaving would
+ * throw work away (`holding`: an open dialog, a chosen file). The request that failed
+ * then says so where the work is. `gate` is the message that fills the page, if any;
+ * one that only says "loading" does not count.
  */
-export function afterUnauthorized({ gate, fresh }) {
-  if (gate && !gate.waiting) return 'stay';
+export function afterUnauthorized({ gate, fresh, holding = false }) {
+  if ((gate && !gate.waiting) || holding) return 'stay';
   return fresh ? 'refused' : 'sign-in';
 }
 
@@ -1229,11 +1407,18 @@ export const STEPS = [
   { name: 'Offered' },
   { name: 'Approved on the board', doing: `Waiting for ${BUTTON_1}`, failed: 'Not approved' },
   { name: 'Downloading', failed: 'Download failed' },
-  { name: 'Verified', doing: 'Verifying', failed: 'Check failed' },
+  // What the board checks here is the digest and the version. The signature is the
+  // bootloader's to check, at the restart: this step must not read as that.
+  { name: 'Download checked', doing: 'Checking the download', failed: 'Check failed' },
   { name: 'Restarting', failed: 'Did not start' },
-  { name: 'Testing', failed: 'Rolled back' },
+  { name: 'On trial', failed: 'Rolled back' },
   { name: 'Confirmed' },
 ];
+const APPROVED = 1;
+const DOWNLOADED = 2;
+const VERIFIED = 3;
+const RESTARTED = 4;
+const TESTED = 5;
 
 const REFUSALS = {
   not_newer: 'the board already runs this version or a newer one',
@@ -1288,18 +1473,34 @@ function entryOf(table, name) {
   return typeof name === 'string' && Object.hasOwn(table, name) ? table[name] : undefined;
 }
 
-function steps(done, { current = null, failed = null, ended = false } = {}) {
+/**
+ * `failed` is the step at which the update went wrong, `stopped` the step the board had
+ * reached when it was told to stop or went quiet: nothing went wrong there, and nothing
+ * after it took place. `refusal` calls the failed step what it was when nobody turned
+ * the update down by hand. `unknown` says that nothing can be told about the steps after
+ * the ones that are done.
+ */
+function steps(done, { current = null, failed = null, stopped = null, ended = false, refusal = null, unknown = false } = {}) {
   return STEPS.map((step, index) => {
-    let state = 'upcoming';
+    let state = unknown ? 'unknown' : 'upcoming';
     if (index < done) state = 'done';
     else if (index === failed) state = 'failed';
+    else if (index === stopped) state = 'stopped';
     else if (index === current) state = 'current';
     else if (ended) state = 'skipped';
     let label = step.name;
-    if (state === 'current') label = step.doing ?? step.name;
-    else if (state === 'failed') label = step.failed ?? step.name;
+    if (state === 'current' || state === 'stopped') label = step.doing ?? step.name;
+    else if (state === 'failed') label = refusal ?? step.failed ?? step.name;
     return { label, state };
   });
+}
+
+/** The other deployment that put this version on a board, from the board's own list of updates. */
+function otherInstall(history, deployment, version) {
+  const other = (history ?? []).find((entry) => entry.deployment !== deployment &&
+    (entry.version ?? versionOfDeployment(entry.deployment)) === version &&
+    (entry.status === 'SUCCEEDED' || entry.status === 'IN_PROGRESS'));
+  return other?.deployment ?? null;
 }
 
 function firstSentence(text) {
@@ -1317,6 +1518,8 @@ function description(tone, icon, title, text, timeline, extra = {}) {
     steps: timeline,
     progress: null,
     code: null,
+    next: null,
+    retry: false,
     ...extra,
   };
 }
@@ -1324,18 +1527,39 @@ function description(tone, icon, title, text, timeline, extra = {}) {
 /**
  * Describe one board's part in a deployment.
  *
+ * @param {object} execution
+ * @param {object} [known]
+ * @param {object|null} [known.board]       the board as the board list has it, where that was read
+ * @param {string|null} [known.deployment]  the id of the deployment
+ * @param {string|null} [known.version]     the version the deployment installs
+ * @param {Array|null} [known.history]      the board's own list of updates; null while it has
+ *   not been read. A cancelled execution's `running` is what the board reports now, so
+ *   this is what tells whether another deployment is what put a version there.
+ * @param {boolean} [known.unread]          the board list has not been read yet, so that
+ *   `board` being null does not mean that the board has nothing to say.
  * @returns {{tone: string, icon: string, title: string, text: string, brief: string,
- *   steps: Array, progress: number|null, code: string|null}} `brief` is the first
- *   sentence of `text`; `progress` is the download in percent while the board reports
- *   it; `code` is the board's own reason when the console has no words for it.
+ *   steps: Array, progress: number|null, code: string|null, next: string|null,
+ *   retry: boolean}} `brief` is the first sentence of `text`; `progress` is the download
+ *   in percent while the board reports it; `code` is the board's own reason when the
+ *   console has no words for it; `next` is what to do about an update that ended short;
+ *   `retry` says that offering the same release again makes sense. For a cancelled update
+ *   `installed` says that it went through all the same, `installedBy` names the other
+ *   deployment that installed this version, and `unsure` that this cannot be told yet.
  */
-export function describeExecution(execution) {
+export function describeExecution(execution, { board = null, deployment = null, version = null, history, unread = false } = {}) {
   const { phase, reason, running, online, progress, startedAt } = execution;
   const reports = running ? ` The board reports that it runs ${running}.` : '';
   const kept = ' It keeps running the firmware it had.';
+  const again = { next: 'To try again, start a new deployment.', retry: true };
 
   switch (phase) {
     case 'waiting_for_device':
+      // A board the list knows and has never heard from: nothing to wait for by itself.
+      if (!online && board && !board.lastSeen) {
+        return description('wait', 'minus-circle', 'Never connected',
+          'Power it up and check that it was provisioned; it will see this update when it first connects.',
+          steps(0, { current: 0 }));
+      }
       if (!online) {
         return description('wait', 'offline', 'Board offline',
           'The board is offline; it will see this update when it reconnects.',
@@ -1348,14 +1572,14 @@ export function describeExecution(execution) {
       // The one moment in an update when everything waits for a person: said as an
       // instruction, in a tone of its own.
       return description('act', 'press', `Press ${BUTTON_1} on the board`,
-        'The board has the offer and waits for someone to press Button 1. LED1 blinks quickly ' +
+        `The board has the offer and waits for someone to press ${BUTTON_1}. LED1 blinks quickly ` +
         'while the offer is open; Button 2 declines it.',
         steps(1, { current: 1 }));
     case 'downloading':
       return description('live', 'download', progress === null ? 'Downloading' : `Downloading ${progress}%`,
         'The board is downloading the image into its spare flash slot. The firmware it runs is ' +
         'not touched yet.',
-        steps(2, { current: 2 }), { progress });
+        steps(2, { current: 2 }), { progress, said: 'Downloading' });
     case 'verifying':
       return description('live', 'shield', 'Checking the download',
         'The board is checking the size, the SHA-256 digest and the version in the signed header ' +
@@ -1380,44 +1604,113 @@ export function describeExecution(execution) {
       return description('bad', 'undo', 'Rolled back',
         'The bootloader put the previous firmware back. The new firmware started but did not ' +
         `reconnect to AWS IoT, so it was never confirmed.${reports}`,
-        steps(5, { failed: 5, ended: true }));
+        steps(5, { failed: 5, ended: true }),
+        { next: 'Fix the build, then upload a newer version and deploy that.' });
     case 'declined':
       return description('warn', 'minus-circle', 'Declined on the board',
         `Someone pressed Button 2 on the board to decline this update. Nothing was installed.${reports}`,
-        steps(1, { failed: 1, ended: true }));
+        steps(1, { failed: 1, ended: true }), again);
     case 'refused': {
       const why = entryOf(REFUSALS, reason);
       const said = why ? `Refused: ${why}.` : 'The board refused this update before installing anything.';
+      // Offered again, a board that already runs this version gives the same answer.
+      const way = reason === 'not_newer'
+        ? { next: 'To put something else on it, upload a newer version and deploy that.' }
+        : { ...again, next: 'Deal with that first, then start a new deployment.' };
       return description('warn', 'ban', 'Refused by the board', `${said}${reports}`,
-        steps(1, { failed: 1, ended: true }), { code: why ? null : reason });
+        steps(1, { failed: 1, ended: true, refusal: 'Refused' }), { code: why ? null : reason, ...way });
     }
     case 'failed': {
       const failure = entryOf(FAILURES, reason);
       if (failure) {
         return description('bad', 'x-circle', failure.title, `${failure.text}${kept}${reports}`,
-          steps(failure.at ?? 2, { failed: failure.at, ended: true }));
+          steps(failure.at ?? DOWNLOADED,
+            failure.at === null ? { stopped: DOWNLOADED, ended: true } : { failed: failure.at, ended: true }),
+          again);
       }
       // A refusal reported once the update was under way arrives as a failure.
       const why = entryOf(REFUSALS, reason);
       const said = why ? `The board stopped: ${why}.` : 'The board reported that the update failed.';
       return description('bad', 'x-circle', 'Failed', `${said}${kept}${reports}`,
-        steps(2, { ended: true }), { code: why ? null : reason });
+        steps(DOWNLOADED, { stopped: DOWNLOADED, ended: true }), { code: why ? null : reason, ...again });
     }
-    case 'cancelled':
+    case 'cancelled': {
+      // What the board runs now, against what this deployment offered. `running` is what it
+      // reports today, which can be long after this deployment ended.
+      const [now, offered] = [running, version].map((text) => (text ? parseVersion(text) : null));
+      const movedOn = Boolean(now && offered) && compareVersions(now, offered) > 0;
+      const runsIt = Boolean(running) && running === version;
       if (!startedAt) {
-        // The offer was made, and withdrawn before the board acted on it.
+        // The offer was made, and withdrawn before the board acted on it. If the board runs
+        // this version or a newer one all the same, that came from another deployment, and
+        // offering this one again would only be refused.
+        if (runsIt || movedOn) {
+          const installedBy = runsIt ? otherInstall(history, deployment, version) : null;
+          return description('idle', 'stop', 'Cancelled',
+            `Cancelled before the board started, so this deployment installed nothing. A later one put ${running} on the board.`,
+            steps(APPROVED, { ended: true }), { laterCame: true, ...(installedBy ? { installedBy } : {}) });
+        }
         return description('idle', 'stop', 'Cancelled',
           `Cancelled before the board started. Nothing was installed.${reports}`,
-          steps(1, { ended: true }));
+          steps(APPROVED, { ended: true }), again);
+      }
+      // It stopped when it was told to, and a later deployment is what installed the version.
+      const installedBy = runsIt ? otherInstall(history, deployment, version) : null;
+      if (installedBy) {
+        return description('idle', 'stop', 'Cancelled',
+          `Cancelled after the board had started, and it stopped there. Another deployment installed ${running}.`,
+          steps(DOWNLOADED, { stopped: DOWNLOADED, ended: true }), { installedBy });
+      }
+      // A newer version came later. Whether this update had finished before that is not on
+      // record: a board that AWS has cancelled can no longer report. Nothing is claimed, and
+      // this version is not offered again, because the board would refuse it.
+      if (movedOn) {
+        return description('idle', 'stop', 'Cancelled',
+          `Cancelled after the board had started. The board has since moved on to ${running}, so ` +
+          'this page cannot tell how this update ended.',
+          steps(DOWNLOADED, { unknown: true }), { unsure: true });
+      }
+      // A board that was past its last look at AWS when the cancellation came: it ends
+      // up on the new firmware all the same, and AWS has no more to say about it.
+      if (runsIt && history !== null) {
+        return description('warn', 'alert', 'Installed despite the cancellation',
+          `This deployment was cancelled, but the board had gone too far to be stopped. It now runs ${running}.`,
+          steps(board?.fw && !board.fw.confirmed ? TESTED : STEPS.length, { current: TESTED, ended: true }),
+          { next: 'To replace it, upload a newer version and deploy that.', installed: true });
+      }
+      const reached = board?.ota && board.ota.job === deployment ? board.ota.state : null;
+      if (reached === 'rebooting' || reached === 'testing') {
+        const at = reached === 'rebooting' ? RESTARTED : TESTED;
+        return description('live', 'restart', 'Finishing despite the cancellation',
+          'This deployment was cancelled, but the board was already restarting into the new firmware ' +
+          'and cannot be stopped. What it ends up running will show here.',
+          steps(at, { current: at, ended: true }));
+      }
+      // The board runs this version, and how it got there is not known yet: nothing is claimed.
+      if (runsIt) {
+        return description('idle', 'stop', 'Cancelled',
+          `Cancelled after the board had started. The board now runs ${running}.`,
+          steps(DOWNLOADED, { unknown: true }), { unsure: true });
+      }
+      // The board list decides between "it stopped" and "it is restarting and cannot be
+      // stopped". Until it has been read, neither is said.
+      if (unread) {
+        return description('idle', 'stop', 'Cancelled',
+          'Cancelled after the board had started. What the board did next is still being read.',
+          steps(DOWNLOADED, { unknown: true }), { unsure: true });
       }
       return description('idle', 'stop', 'Cancelled',
-        'Cancelled after the board had started. A board asks AWS before it installs, so a ' +
-        `cancelled update is not installed.${reports}`,
-        steps(2, { ended: true }));
+        'Cancelled after the board had started. A board asks AWS before it installs, so it stops ' +
+        `there and keeps the firmware it had.${reports}`,
+        steps(reached === 'verifying' ? VERIFIED : DOWNLOADED,
+          { stopped: reached === 'verifying' ? VERIFIED : DOWNLOADED, ended: true }),
+        again);
+    }
     case 'timed_out':
       return description('bad', 'hourglass', 'Timed out',
         `The board started but did not report a result before the time limit.${reports}`,
-        steps(2, { ended: true }));
+        steps(DOWNLOADED, { stopped: DOWNLOADED, ended: true }),
+        { ...again, next: 'Check that the board is powered and online, then start a new deployment.' });
     case 'removed':
       return description('idle', 'minus', 'Removed', 'This board was taken out of the deployment.',
         steps(0, { ended: true }));
@@ -1432,7 +1725,7 @@ export function describeExecution(execution) {
 export function describeStatus(status) {
   switch (status) {
     case 'QUEUED': return { tone: 'wait', icon: 'clock', label: 'Waiting' };
-    case 'IN_PROGRESS': return { tone: 'live', icon: 'restart', label: 'Installing' };
+    case 'IN_PROGRESS': return { tone: 'live', icon: 'restart', label: 'Updating' };
     case 'SUCCEEDED': return { tone: 'good', icon: 'check-circle', label: 'Installed' };
     case 'FAILED': return { tone: 'bad', icon: 'x-circle', label: 'Failed' };
     case 'TIMED_OUT': return { tone: 'bad', icon: 'hourglass', label: 'Timed out' };
@@ -1443,8 +1736,26 @@ export function describeStatus(status) {
   }
 }
 
+// What the status alone cannot tell apart, and the board's last report can.
+const OWN_WORDS = {
+  FAILED: { rolled_back: { tone: 'bad', icon: 'undo', label: 'Rolled back' } },
+  REJECTED: {
+    declined: { tone: 'warn', icon: 'minus-circle', label: 'Declined on the board' },
+    refused: { tone: 'warn', icon: 'ban', label: 'Refused by the board' },
+  },
+};
+
+/**
+ * The words for an entry of a board's history. `last` is how the board says its newest
+ * update ended, for that entry; the others only have their status.
+ */
+export function describeHistory(status, last = null) {
+  return entryOf(entryOf(OWN_WORDS, status) ?? {}, last) ?? describeStatus(status);
+}
+
+// `quiet` marks what is an absence of news, so that it is drawn as less than news.
 const LAST_UPDATE = {
-  none: { tone: 'idle', icon: 'minus', title: 'No update in progress' },
+  none: { tone: 'idle', icon: 'minus', title: 'No update in progress', quiet: true },
   succeeded: { tone: 'good', icon: 'check-circle', title: 'Last update succeeded' },
   failed: { tone: 'bad', icon: 'x-circle', title: 'Last update failed' },
   rolled_back: { tone: 'bad', icon: 'undo', title: 'Last update was rolled back' },
@@ -1460,7 +1771,7 @@ const LAST_UPDATE = {
 export function describeUpdate(device) {
   const { ota, online } = device;
   const settled = { text: '', progress: null, deployment: null };
-  if (!ota) return { tone: 'idle', icon: 'minus', title: 'Nothing reported', ...settled };
+  if (!ota) return { tone: 'idle', icon: 'minus', title: 'Nothing reported', quiet: true, ...settled };
 
   const version = versionOfDeployment(ota.job);
   const target = version ?? 'an update';
@@ -1495,29 +1806,59 @@ export function describeUpdate(device) {
     case 'rebooting':
       return live('live', 'restart', `Restarting into ${target}`, '');
     case 'testing':
-      return live('live', 'pulse', `Testing ${target}`, 'On trial until the board has reconnected.');
+      return live('live', 'pulse', `On trial: ${target}`, 'It is kept once the board has reconnected.',
+        { was: `on trial with ${target}` });
     default:
       return live('live', 'restart', 'Updating', '');
   }
 }
 
-/** The badge for a deployment as a whole. */
+/**
+ * The badge for a deployment as a whole. `said` is the sentence for one that is over and
+ * has something to tell, good or bad, on a page that would otherwise only say that nothing
+ * is going on.
+ */
 export function describeDeployment(deployment) {
   const { status, counts, things } = deployment;
   const total = things.length || COUNTS.reduce((sum, name) => sum + counts[name], 0);
   switch (status) {
     case 'IN_PROGRESS':
       return counts.inProgress > 0
-        ? { tone: 'live', icon: 'restart', label: 'Installing' }
+        ? { tone: 'live', icon: 'restart', label: 'Updating' }
         : { tone: 'wait', icon: 'clock', label: 'Waiting for boards' };
     case 'COMPLETED':
       if (total > 0 && counts.succeeded === total) {
-        return { tone: 'good', icon: 'check-circle', label: 'Succeeded' };
+        const what = deployment.version ?? 'The update';
+        return {
+          tone: 'good',
+          icon: 'check-circle',
+          label: 'Succeeded',
+          said: total === 1 ? `${what} is installed and confirmed.` : `${what} is installed and confirmed on ${total} boards.`,
+        };
       }
-      if (counts.succeeded > 0) return { tone: 'warn', icon: 'alert', label: 'Partly succeeded' };
-      if (counts.failed + counts.timedOut > 0) return { tone: 'bad', icon: 'x-circle', label: 'Failed' };
+      if (counts.succeeded > 0) {
+        return {
+          tone: 'warn', icon: 'alert', label: 'Partly succeeded', said: 'The last deployment partly succeeded.',
+        };
+      }
+      if (counts.failed + counts.timedOut > 0) {
+        return { tone: 'bad', icon: 'x-circle', label: 'Failed', said: 'The last deployment failed.' };
+      }
       return { tone: 'idle', icon: 'minus-circle', label: 'Not installed' };
-    case 'CANCELED': return { tone: 'idle', icon: 'stop', label: 'Cancelled' };
+    case 'CANCELED':
+      // Cancelling leaves boards that had started alone: the badge does not hide them.
+      if (counts.inProgress > 0) {
+        return { tone: 'live', icon: 'restart', label: `Cancelled, ${plural(counts.inProgress, 'board')} still working` };
+      }
+      if (counts.succeeded > 0) {
+        return {
+          tone: 'warn',
+          icon: 'alert',
+          label: `Cancelled, ${plural(counts.succeeded, 'board')} finished`,
+          said: `The last deployment was cancelled, but ${plural(counts.succeeded, 'board')} finished it.`,
+        };
+      }
+      return { tone: 'idle', icon: 'stop', label: 'Cancelled' };
     case 'SCHEDULED': return { tone: 'wait', icon: 'clock', label: 'Scheduled' };
     case 'DELETION_IN_PROGRESS': return { tone: 'idle', icon: 'minus', label: 'Being deleted' };
     default: return { tone: 'idle', icon: 'minus', label: 'Unknown' };
@@ -1526,7 +1867,7 @@ export function describeDeployment(deployment) {
 
 const COUNT_WORDS = [
   ['succeeded', 'succeeded', 'good', 'check-circle'],
-  ['inProgress', 'installing', 'live', 'restart'],
+  ['inProgress', 'updating', 'live', 'restart'],
   ['queued', 'waiting', 'wait', 'clock'],
   ['failed', 'failed', 'bad', 'x-circle'],
   ['timedOut', 'timed out', 'bad', 'hourglass'],
@@ -1535,11 +1876,42 @@ const COUNT_WORDS = [
   ['removed', 'removed', 'idle', 'minus'],
 ];
 
-/** The non-zero board counts of a deployment, in a fixed order, with their words. */
-export function describeCounts(counts) {
-  return COUNT_WORDS
-    .filter(([name]) => counts[name] > 0)
-    .map(([name, label, tone, icon]) => ({ name, count: counts[name], label, tone, icon }));
+/**
+ * The non-zero board counts of a deployment, in a fixed order, with their words.
+ * `atButton` of the waiting boards are waiting for a person, which is told apart where
+ * the board list says so.
+ */
+export function describeCounts(counts, atButton = 0) {
+  const pressing = Math.min(atButton, counts.queued);
+  const lines = COUNT_WORDS
+    .filter(([name]) => counts[name] > 0 && !(name === 'queued' && counts.queued === pressing))
+    .map(([name, label, tone, icon]) => ({
+      name, count: name === 'queued' ? counts.queued - pressing : counts[name], label, tone, icon,
+    }));
+  if (pressing > 0) {
+    lines.unshift({
+      name: 'atButton', count: pressing, label: `waiting for ${BUTTON_1}`, tone: 'act', icon: 'press',
+    });
+  }
+  return lines;
+}
+
+/**
+ * What to say to a screen reader about the boards in a list, compared with what they
+ * were when `before` was made. Only a change of state is news, not every percent.
+ * Returns the new record and the sentences. The first look at a board says nothing.
+ */
+export function boardChanges(before, devices) {
+  const seen = new Map();
+  const said = [];
+  for (const device of devices) {
+    const { title } = describeUpdate(device);
+    seen.set(device.thing, title);
+    if (before.has(device.thing) && before.get(device.thing) !== title) {
+      said.push(`${device.thing.slice(0, 12)}…: ${title}.`);
+    }
+  }
+  return { seen, said };
 }
 
 // People. An account is its id (the token's sub); the e-mail address is what it showed
@@ -1569,10 +1941,39 @@ const AUDIT_ACTIONS = {
   },
 };
 
+// What scripts/ota.sh and the test bench call their requests. They invoke the API function
+// directly, with AWS credentials and without API Gateway or a sign-in, in a person's name.
+// API Gateway makes up the id of every request that comes through it, so nobody can put
+// this on a request from a browser.
+const SCRIPTED_REQUEST = 'bench-';
+
 const AUDIT_OUTCOMES = {
   rejected: { tone: 'warn', icon: 'ban', label: 'Refused' },
   denied: { tone: 'bad', icon: 'lock', label: 'Not allowed' },
   error: { tone: 'bad', icon: 'alert', label: 'Server error' },
+};
+
+// Why the server refused a request, in words, for a log line that only has the code.
+const REFUSAL_WORDS = {
+  wrong_key: 'Signed with a different key than this project’s',
+  bad_signature: 'The signature is not valid',
+  unsigned: 'Not signed',
+  hash_mismatch: 'The file is damaged',
+  bad_magic: 'Not an MCUboot image',
+  not_an_image: 'Not an MCUboot image',
+  too_small: 'Too small to be a firmware image',
+  too_large: 'Too large for the board’s slot',
+  truncated: 'Shorter than its header says',
+  wrong_target: 'Not built for this product’s flash layout',
+  trailing_data: 'Has data after the signature',
+  unexpected_tlv: 'Not signed the way this project requires',
+  malformed_tlv: 'The signature area cannot be read',
+  bad_signature_encoding: 'The signature cannot be read',
+  version_exists: 'That version is already registered',
+  version_not_newer: 'Not newer than the highest version registered',
+  version_zero: 'Version 0.0.0+0 is never accepted',
+  device_busy: 'A board had an unfinished update',
+  release_revoked: 'The release is revoked',
 };
 
 function yesOrNo(value) {
@@ -1592,16 +1993,17 @@ function stepsLeft(value) {
 }
 
 // What the API records with an entry, in the words of the console and in the order in
-// which a line reads best. `code` marks a value that is an identifier and is set in
-// the monospace face; `phrase` a label that reads on into its value without a colon.
+// which a line reads best. A label reads on into its value, like "Size 1,264 bytes";
+// `sentence` marks a value in free words, which a colon sets off from its label. `code`
+// marks a value that is an identifier and is set in the monospace face.
 const AUDIT_DETAILS = {
-  code: { label: 'Refused with', code: true, phrase: true },
-  incomplete: { label: 'Left undone', say: stepsLeft },
+  code: { label: 'Refused with', code: true },
+  incomplete: { label: 'Left undone', say: stepsLeft, sentence: true },
   filename: { label: 'File', code: true },
   version: { label: 'Version', code: true },
   things: { label: 'Boards' },
   force: { label: 'Forced', say: yesOrNo },
-  reason: { label: 'Reason' },
+  reason: { label: 'Reason', sentence: true },
   cancelled: { label: 'Cancelled', say: yesOrNo },
   size: { label: 'Size', say: (value) => exactBytes(Number(value)) || value },
   sha256: { label: 'SHA-256', code: true },
@@ -1609,15 +2011,20 @@ const AUDIT_DETAILS = {
 
 function auditFact(entry, key, value) {
   const known = entryOf(AUDIT_DETAILS, key);
-  if (!known) return { key, label: key, value, code: false, phrase: false };
+  if (!known) return { key, label: key, value, code: false, phrase: false, words: null };
   let { label } = known;
   // A revocation counts the deployments it cancelled; a failure that is not a refusal
   // did not refuse anything.
   if (key === 'cancelled' && entry.action === 'firmware.revoke') label = 'Deployments cancelled';
   if (key === 'code' && entry.outcome === 'error') label = 'Failed with';
   return {
-    key, label, value: known.say ? known.say(value) : value, code: known.code === true,
-    phrase: known.phrase === true,
+    key,
+    label,
+    value: known.say ? known.say(value) : value,
+    code: known.code === true,
+    phrase: known.sentence !== true,
+    // A refusal is said in words where there are words for it, with its code after them.
+    words: key === 'code' ? entryOf(REFUSAL_WORDS, value) ?? null : null,
   };
 }
 
@@ -1645,10 +2052,12 @@ export function describeAudit(entry) {
     if (!details.has(key)) continue;
     // Said by the sentence already: the version of a deployment, and that a revocation was finished.
     if ((key === 'version' && details.get(key) === label) || (key === 'resumed' && resumed)) continue;
+    // And the name of the file that an upload is told by.
+    if (key === 'filename' && details.get(key) === label) continue;
     facts.push(auditFact(entry, key, details.get(key)));
   }
   if (deployment) {
-    facts.push({ key: 'target', label: 'Deployment', value: deployment, code: true, phrase: false });
+    facts.push({ key: 'target', label: 'Deployment', value: deployment, code: true, phrase: true, words: null });
   }
 
   return {
@@ -1658,5 +2067,6 @@ export function describeAudit(entry) {
     outcome: ok ? null : entryOf(AUDIT_OUTCOMES, entry.outcome) ?? other,
     href: deploymentHref(entry.target) ?? (isVersion(entry.target) ? '#/firmware' : null),
     facts,
+    scripted: String(entry.requestId ?? '').startsWith(SCRIPTED_REQUEST),
   };
 }

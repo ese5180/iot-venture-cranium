@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { createApp } from '../src/app.mjs';
 import { loadConfig } from '../src/config.mjs';
 import { HttpError, describeError, errorCode, errorResponse, json } from '../src/http.mjs';
+import { auditDigest } from '../src/lib/audit.mjs';
 import {
   accessClaims, apiEvent, awsError, createFakeAws, createTestConsole, fakeEnv, fixture, manualTimers,
 } from './fake-aws.mjs';
@@ -17,6 +18,7 @@ const HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
   'x-content-type-options': 'nosniff',
+  'strict-transport-security': 'max-age=63072000; includeSubDomains',
 };
 
 function setup(options) {
@@ -150,7 +152,22 @@ test('each request is logged once, without bodies, tokens or addresses', async (
   await context.call('POST', '/api/deployments', { as: viewer, body: { version: '1.2.3+4', things: [BOARD] }, requestId: 'req-8' });
   await context.call('TRACE', '/api/devices', { as: viewer, requestId: 'req-9' });
 
-  assert.deepEqual(logs.map((line) => [line.requestId, line.sub, line.method, line.route, line.status]), [
+  // A write also leaves the digest of its entry in the activity log, and nothing else
+  // that it did not leave before.
+  const digests = logs.filter((line) => line.event === 'audit_entry');
+  assert.deepEqual(digests.map((line) => Object.keys(line)),
+    Array(2).fill(['event', 'requestId', 'sub', 'action', 'outcome', 'digest']));
+  assert.deepEqual(digests.map((line) => [line.requestId, line.sub, line.action, line.outcome]), [
+    ['req-2', manager.sub, 'firmware.upload', 'ok'],
+    ['req-8', viewer.sub, 'deployment.create', 'denied'],
+  ]);
+  for (const line of digests) {
+    const stored = fake.auditLog().find((item) => item.requestId === line.requestId);
+    assert.equal(line.digest, auditDigest(stored));
+  }
+
+  const requests = logs.filter((line) => line.event !== 'audit_entry');
+  assert.deepEqual(requests.map((line) => [line.requestId, line.sub, line.method, line.route, line.status]), [
     ['req-2', manager.sub, 'POST', 'POST /api/firmware', 201],
     ['req-3', viewer.sub, 'GET', 'GET /api/devices/{thing}', 200],
     ['req-4', viewer.sub, 'GET', 'GET /api/firmware/{version}', 200],
@@ -160,7 +177,7 @@ test('each request is logged once, without bodies, tokens or addresses', async (
     ['req-8', viewer.sub, 'POST', 'POST /api/deployments', 403],
     ['req-9', viewer.sub, 'OTHER', 'unmatched', 404],
   ]);
-  for (const line of logs) {
+  for (const line of requests) {
     assert.deepEqual(Object.keys(line), ['requestId', 'sub', 'method', 'route', 'status', 'duration']);
     assert.equal(typeof line.duration, 'number');
   }
@@ -224,9 +241,14 @@ test('a write that runs out of time is answered and recorded, and goes no furthe
     ['deployment.create', 'error', '1.2.3+4', 'req-slow']);
   assert.deepEqual(entry.detail, { version: '1.2.3+4', things: '1', code: 'timeout' });
   assert.deepEqual(entry.actor, { sub: manager.sub, email: manager.email });
-  // And the two log lines: what happened, and the line every request gets.
+  // And the three log lines: what happened, the digest of the entry, and the line every
+  // request gets.
   assert.deepEqual(logs, [
     { level: 'error', event: 'request_timed_out', requestId: 'req-slow', budget: 16000 },
+    {
+      event: 'audit_entry', requestId: 'req-slow', sub: manager.sub, action: 'deployment.create', outcome: 'error',
+      digest: auditDigest(entry),
+    },
     { requestId: 'req-slow', sub: manager.sub, method: 'POST', route: 'POST /api/deployments', status: 500, duration: 16000 },
   ]);
 
@@ -239,8 +261,8 @@ test('a write that runs out of time is answered and recorded, and goes no furthe
   await settle();
   assert.equal(fake.calls.length, sent);
   assert.equal(fake.auditLog().length, 2);
-  assert.ok(logs.slice(2).every((line) => line.level === 'warn'));
-  assert.ok(logs.slice(2).every((line) => line.error.includes('the request had run out of time')));
+  assert.ok(logs.slice(3).every((line) => line.level === 'warn'));
+  assert.ok(logs.slice(3).every((line) => line.error.includes('the request had run out of time')));
 
   // The next request is served as usual.
   logs.length = 0;

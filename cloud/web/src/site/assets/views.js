@@ -16,11 +16,11 @@
  */
 
 import {
-  SESSION_WARNING_S, alreadyRuns, busyBoards, canRetryUpload, compareVersions, dayLabel, deploymentHref,
-  describeAudit, describeCounts, describeDeployment, describeExecution, describeStatus, describeUpdate,
-  deviceHref, duration, exactBytes, exactTime, fileSize, isRefusal, isUnderWay, isUnfinished, nameOf,
-  parseVersion, plural, reviewImage, revocationState, sentence, shortAccount, signalQuality, singleLine,
-  timeAgo, versionOfDeployment,
+  SESSION_WARNING_S, STEPS, alreadyRuns, busyBoards, canRetryUpload, clockTime, compareVersions, dayLabel,
+  deploymentHref, describeAudit, describeCounts, describeDeployment, describeExecution, describeHistory,
+  describeUpdate, deviceActivity, deviceHref, duration, exactBytes, exactTime, failedCheck, fileSize, IMAGE_CHECKS,
+  isRefusal, isRestarting, isUnderWay, isUnfinished, nameOf, parseVersion, plainMessage, plural, reviewImage,
+  revocationState, sentence, shortAccount, signalQuality, singleLine, stillFinishing, timeAgo, versionOfDeployment,
 } from './core.js';
 
 // Drawing.
@@ -231,6 +231,10 @@ const ICONS = {
     ['path', { d: 'M8.5 11V8a3.5 3.5 0 0 1 7 0v3' }],
   ],
   plus: [['path', { d: 'M12 5.5v13M5.5 12h13' }]],
+  swap: [
+    ['polyline', { points: '8 4 4 8 8 12' }], ['path', { d: 'M4 8h13' }],
+    ['polyline', { points: '16 12 20 16 16 20' }], ['path', { d: 'M20 16H7' }],
+  ],
   file: [['path', { d: 'M7 3.5h7l4 4v13H7zM14 3.5v4h4' }]],
   'sign-out': [
     ['path', { d: 'M10 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2H10M9.5 12H20' }],
@@ -249,6 +253,111 @@ export function icon(name, className = '') {
   }, shapes.map(([tag, attributes]) => h(tag, attributes)));
 }
 
+// Brand artwork. All of it is decoration: it says nothing that the words beside it do not.
+
+const DOME = 'M2 18a14 14 0 0 1 28 0v9a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3z';
+const GROOVES = 'M7 30V18a9 9 0 0 1 18 0v12M12 30V18a4 4 0 0 1 8 0v12';
+
+/** The mark: a dome cut with the grooves of a record. */
+export function brandMark(className = '') {
+  return h('svg', {
+    class: `brand-mark ${className}`.trim(),
+    viewBox: '0 0 32 32',
+    'aria-hidden': 'true',
+    focusable: 'false',
+  }, h('path', { class: 'brand-dome', d: DOME }), h('path', { class: 'brand-grooves', d: GROOVES }));
+}
+
+/** The same dome at the scale of a wall, rising from the bottom edge of what holds it. */
+function domeArt(className = '') {
+  const grooves = [];
+  for (let radius = 52, step = 0; radius < 430; step += 1, radius += 34 + step * 1.5) {
+    grooves.push(h('path', {
+      key: String(step),
+      class: 'art-groove',
+      pathLength: '1',
+      d: `M${500 - radius} 1000V540a${radius} ${radius} 0 0 1 ${radius * 2} 0V1000`,
+      vars: { '--step': String(step) },
+    }));
+  }
+  return h('svg', {
+    class: `dome-art ${className}`.trim(),
+    viewBox: '0 0 1000 1000',
+    preserveAspectRatio: 'xMidYMax meet',
+    'aria-hidden': 'true',
+    focusable: 'false',
+  },
+  h('path', { class: 'art-dome', d: 'M40 1000V540a460 460 0 0 1 920 0V1000z' }),
+  grooves);
+}
+
+/** Thin arches in the corner of a panel: the dome again, as a watermark. */
+function archWatermark() {
+  const lines = [];
+  for (let radius = 60; radius <= 420; radius += 60) {
+    lines.push(h('path', {
+      key: String(radius),
+      d: `M${440 - radius} 480V${440}a${radius} ${radius} 0 0 1 ${radius * 2} 0V480`,
+    }));
+  }
+  return h('svg', {
+    class: 'arch-watermark',
+    viewBox: '0 0 880 480',
+    preserveAspectRatio: 'xMaxYMax meet',
+    'aria-hidden': 'true',
+    focusable: 'false',
+  }, lines);
+}
+
+// Line drawings for pages with nothing on them yet.
+
+const DRAWINGS = {
+  // A development board: its chip, its pin headers, a button and an LED.
+  chip: [
+    ['rect', { x: 18, y: 14, width: 124, height: 72, rx: 5 }],
+    ['rect', { x: 66, y: 34, width: 32, height: 32, rx: 2, class: 'is-accent' }],
+    ['path', { d: 'M74 34v-5M82 34v-5M90 34v-5M74 66v5M82 66v5M90 66v5M66 42h-5M66 50h-5M66 58h-5M98 42h5M98 50h5M98 58h5' }],
+    ['path', { d: 'M26 22h40M122 78h12M26 78h28' }],
+    ['rect', { x: 8, y: 40, width: 10, height: 20, rx: 1.5 }],
+    ['circle', { cx: 122, cy: 30, r: 4 }],
+    ['circle', { cx: 122, cy: 50, r: 7 }],
+  ],
+  // Two flash slots: one holds an image, the other is free.
+  package: [
+    ['rect', { x: 20, y: 16, width: 120, height: 28, rx: 3, class: 'is-accent' }],
+    ['rect', { x: 20, y: 56, width: 120, height: 28, rx: 3, class: 'is-dashed' }],
+    ['path', { d: 'M32 26h44M32 34h28' }],
+    ['path', { d: 'M122 24l6 2.2v4c0 3.2-2.4 5.2-6 6.8-3.6-1.6-6-3.6-6-6.8v-4z' }],
+  ],
+  // A release on its way out to three boards.
+  send: [
+    ['circle', { cx: 28, cy: 50, r: 10, class: 'is-accent' }],
+    ['path', { d: 'M38 50h30M68 50c16 0 18-26 34-26h14M68 50h48M68 50c16 0 18 26 34 26h14' }],
+    ['rect', { x: 116, y: 15, width: 26, height: 18, rx: 2 }],
+    ['rect', { x: 116, y: 41, width: 26, height: 18, rx: 2 }],
+    ['rect', { x: 116, y: 67, width: 26, height: 18, rx: 2 }],
+  ],
+  // A ledger: lines that have not been written yet.
+  list: [
+    ['path', { d: 'M48 12v76' }],
+    ['circle', { cx: 48, cy: 26, r: 5, class: 'is-accent' }],
+    ['circle', { cx: 48, cy: 50, r: 5 }],
+    ['circle', { cx: 48, cy: 74, r: 5 }],
+    ['path', { class: 'is-dashed', d: 'M64 26h64M64 50h48M64 74h56' }],
+  ],
+};
+
+function drawing(name) {
+  const shapes = DRAWINGS[name];
+  if (!shapes) return null;
+  return h('svg', {
+    class: 'drawing',
+    viewBox: '0 0 160 100',
+    'aria-hidden': 'true',
+    focusable: 'false',
+  }, shapes.map(([tag, attributes], index) => h(tag, { ...attributes, key: String(index) })));
+}
+
 // Small pieces used by every view.
 
 function badge(tone, iconName, label, title) {
@@ -257,6 +366,13 @@ function badge(tone, iconName, label, title) {
 
 function mono(content, className = '') {
   return h('span', { class: `mono ${className}`.trim() }, content);
+}
+
+const TECHNICAL = /(\d+\.\d+\.\d+\+\d+|(?:[\w-]+\/)*(?:[\w*-]+\.)?signed\.bin)/;
+
+/** A sentence from core.js, with the versions and the file names in it set in the monospace face. */
+function prose(text) {
+  return String(text ?? '').split(TECHNICAL).map((part, index) => (index % 2 ? mono(part) : part));
 }
 
 /** A link when there is somewhere valid to go, plain text otherwise. */
@@ -268,6 +384,12 @@ function linkTo(href, props, ...children) {
 function when(iso, now, prefix = '') {
   if (!iso) return null;
   return h('time', { datetime: iso, title: exactTime(iso) }, `${prefix}${timeAgo(iso, now)}`);
+}
+
+/** The same, with the time of day written out: for where the exact moment matters. */
+function whenAt(iso, now, prefix = '') {
+  if (!iso) return null;
+  return [when(iso, now, prefix), ` (${clockTime(iso, now)})`];
 }
 
 function whenLoaded(resource, now) {
@@ -312,10 +434,64 @@ function factNote(text) {
   return h('span', { class: 'fact-note' }, text);
 }
 
+/**
+ * One whole split into parts, read at a glance. Each part is a block as wide as its
+ * share, with its amount printed on it where it fits; the accessible name gives every
+ * part in words, and so does the legend next to it. `tone` picks the fill.
+ */
+function segments(parts, label, { thin = false } = {}) {
+  const shown = parts.filter((part) => part.amount > 0);
+  return h('div', {
+    class: `segments ${thin ? 'is-thin' : ''}`.trim(),
+    role: 'img',
+    'aria-label': label,
+  }, shown.map((part) => h('span', {
+    key: part.key,
+    class: `segment is-${part.tone}`,
+    title: `${part.name}: ${part.amount}`,
+    vars: { '--share': String(part.amount) },
+  }, thin ? null : h('span', { class: 'segment-value' }, String(part.amount)))));
+}
+
+/** The parts of a board count, as `segments` and describeCounts see them. */
+function countParts(counts, atButton = 0) {
+  return describeCounts(counts, atButton).map((entry) => ({
+    key: entry.name, amount: entry.count, tone: entry.tone, name: entry.label,
+  }));
+}
+
+function countWords(counts, atButton = 0) {
+  return describeCounts(counts, atButton).map((entry) => `${entry.count} ${entry.label}`).join(', ');
+}
+
+/** A row of big numbers, each with what it counts. */
+function stats(rows) {
+  return h('dl', { class: 'stats' }, rows.filter(Boolean).map(([label, value, note]) =>
+    h('div', { key: label, class: 'stat' },
+      h('dt', { class: 'stat-label' }, label),
+      h('dd', { class: 'stat-value' }, String(value)),
+      note ? h('dd', { class: 'stat-note' }, note) : null)));
+}
+
+/**
+ * One tile per board: filled while it is online, an outline once it has gone quiet, a
+ * dashed outline if it has never reported. The words next to the tiles count the same.
+ */
+function boardTiles(devices) {
+  const rank = (device) => {
+    if (device.online) return 0;
+    return device.lastSeen ? 1 : 2;
+  };
+  const looks = ['is-on', 'is-off', 'is-never'];
+  const ordered = [...devices].sort((a, b) => rank(a) - rank(b));
+  return h('span', { class: 'tiles', 'aria-hidden': 'true' }, ordered.map((device) =>
+    h('span', { key: device.thing, class: `tile ${looks[rank(device)]}`, title: device.thing })));
+}
+
 /** Nothing here yet: what that means, and what to do next. `action` is a link drawn as a button. */
 function empty({ iconName, title, text, command, action }) {
   return h('div', { class: 'empty' },
-    h('span', { class: 'empty-icon' }, icon(iconName)),
+    drawing(iconName) ?? h('span', { class: 'empty-icon' }, icon(iconName)),
     h('p', { class: 'empty-title' }, title),
     text ? h('p', { class: 'empty-text' }, text) : null,
     command ? h('code', { class: 'code' }, command) : null,
@@ -349,7 +525,7 @@ function notice(tone, iconName, said, { more = null, action = null } = {}) {
 
 /** How to refer to a failed request: the server's code for it and the request id. */
 function problemRef(error) {
-  const coded = error.status >= 400 && error.code && error.code !== 'gateway' && error.code !== 'http';
+  const coded = error.status >= 400 && error.code && !['gateway', 'http', 'unauthorized'].includes(error.code);
   if (!coded && !error.requestId) return null;
   return h('span', { class: 'notice-ref dotted' },
     coded ? h('span', null, 'Code ', mono(error.code)) : null,
@@ -359,29 +535,56 @@ function problemRef(error) {
 /**
  * A failed action: what did not happen, then the server's own words. Only a refusal
  * (a 4xx reply) says for certain that nothing was done; after anything else the
- * request may have been carried out all the same, and the notice says so.
+ * request may have been carried out all the same, and the notice says so. When the
+ * session has ended, `signIn` is the way on.
  */
-function failure(refusal, error, extra) {
+function failure(refusal, error, extra, signIn) {
   const lead = isRefusal(error) ? refusal : 'It is not certain whether this went through.';
-  return notice('bad', 'x-circle', [h('strong', null, lead, ' '), sentence(error.message)],
-    { more: [extra ?? null, problemRef(error)] });
+  return notice('bad', 'x-circle', [h('strong', null, lead, ' '), sentence(plainMessage(error))], {
+    more: [extra ?? null, problemRef(error)],
+    action: error.status === 401 && signIn ? button('is-small', signIn, 'Sign in again') : null,
+  });
 }
 
 function loadProblem(resource, what, ctx) {
-  if (!resource.error) return null;
-  const stale = resource.value !== null;
+  return resource.error ? loadNotice([resource], what, ctx) : null;
+}
+
+/** What could not be read. `failed` holds the resources this one notice speaks for. */
+function loadNotice(failed, what, ctx) {
+  const [{ error }] = failed;
+  const stale = failed.filter((resource) => resource.value !== null);
+  const oldest = stale.reduce((first, resource) => (resource.loadedAt < first.loadedAt ? resource : first), stale[0]);
   return h('div', { key: `problem-${what}`, class: 'page-notice' },
     notice('bad', 'alert', [
-      h('strong', null, stale ? `Could not refresh ${what}. ` : `Could not load ${what}. `),
-      sentence(resource.error.message),
+      h('strong', null, stale.length > 0 ? `Could not refresh ${what}. ` : `Could not load ${what}. `),
+      sentence(plainMessage(error)),
     ], {
       // The age changes with the clock and the request id with every retry.
       more: [
-        stale ? [' Showing what was loaded ', whenLoaded(resource, ctx.state.now), '.'] : null,
-        problemRef(resource.error),
+        stale.length > 0 ? [' Showing what was loaded ', whenLoaded(oldest, ctx.state.now), '.'] : null,
+        problemRef(error),
       ],
       action: button('is-small', ctx.actions.refresh, 'Try again'),
     }));
+}
+
+/**
+ * The same for a page that reads several things. One lost connection fails them all
+ * alike: that is one problem, with one way to try again. `items` is [resource, what].
+ */
+function loadProblems(items, ctx) {
+  const failed = items.filter(([resource]) => resource.error);
+  if (failed.length === 0) return null;
+  const [[{ error: first }]] = failed;
+  const alike = failed.every(([{ error }]) => error.message === first.message);
+  if (failed.length > 1 && alike) return loadNotice(failed.map(([resource]) => resource), 'this page', ctx);
+  return failed.map(([resource, what]) => loadProblem(resource, what, ctx));
+}
+
+/** The server knows of no such thing: nothing to try again, and the way back instead. */
+function missing(resource) {
+  return resource.error?.status === 404;
 }
 
 function loading(what) {
@@ -453,6 +656,8 @@ function card({ key, title, more, className = '' }, ...body) {
 }
 
 function presence(device, now) {
+  // A board that is restarting is off for the moment, whatever its last connection says.
+  if (isRestarting(device)) return badge('idle', 'restart', 'Restarting');
   if (device.online) {
     const reported = device.lastSeen ? `Last report ${timeAgo(device.lastSeen, now)}` : null;
     return badge('good', 'online', 'Online', reported);
@@ -463,7 +668,7 @@ function presence(device, now) {
 
 /** An icon and a few words for a state; `description` comes from core.js. */
 function statusLine(description, extra) {
-  return h('span', { class: `status is-${description.tone}` },
+  return h('span', { class: `status is-${description.tone} ${description.quiet ? 'is-quiet' : ''}`.trim() },
     icon(description.icon),
     h('span', null, description.title ?? description.label),
     extra ?? null);
@@ -484,15 +689,219 @@ function releaseBadge(release) {
 }
 
 function signalBars(quality) {
-  return h('svg', { class: 'signal', viewBox: '0 0 20 16', 'aria-hidden': 'true', focusable: 'false' },
+  return h('svg', { class: 'signal', viewBox: '0 0 22 16', 'aria-hidden': 'true', focusable: 'false' },
     [0, 1, 2, 3].map((index) => h('rect', {
+      key: String(index),
       class: index < quality.bars ? 'is-on' : null,
-      x: String(index * 5.5),
-      y: String(12 - index * 4),
-      width: '3.5',
-      height: String(4 + index * 4),
+      x: String(index * 6),
+      y: String(11 - index * 3.67),
+      width: '4',
+      height: String(5 + index * 3.67),
       rx: '1',
     })));
+}
+
+/** A message at the foot of the page. It stays until its time is up, or until it is closed. */
+export function toastView(message, close) {
+  return h('div', { class: 'toast-body' },
+    h('span', { class: 'toast-text' }, message),
+    h('button', {
+      type: 'button', class: 'toast-close', title: 'Close', 'aria-label': 'Close', onClick: close,
+    }, icon('x', 'is-small')));
+}
+
+// Where the scale of a signal reading starts and ends, in dBm.
+const SIGNAL_FLOOR = -90;
+const SIGNAL_CEILING = -40;
+// The bands of signalQuality in core.js, weakest first, with the reading each one starts at.
+const SIGNAL_BANDS = [['Weak', SIGNAL_FLOOR], ['Fair', -75], ['Good', -67], ['Excellent', -55]];
+
+function onSignalScale(rssi) {
+  const place = (rssi - SIGNAL_FLOOR) / (SIGNAL_CEILING - SIGNAL_FLOOR);
+  return `${Math.round(Math.min(1, Math.max(0, place)) * 1000) / 10}%`;
+}
+
+/** A reading on the scale of a signal meter: the four bands, and a needle where the board is. */
+function signalScale(device) {
+  const quality = signalQuality(device.rssi);
+  if (!quality) return null;
+  return h('div', {
+    class: 'signal-scale',
+    role: 'img',
+    'aria-label': `Wi-Fi signal ${signed(device.rssi)} dBm, ${quality.label.toLowerCase()}`,
+  },
+  h('div', { class: 'signal-track' },
+    SIGNAL_BANDS.map(([label, from], index) => {
+      const to = SIGNAL_BANDS[index + 1]?.[1] ?? SIGNAL_CEILING;
+      return h('span', {
+        key: label,
+        class: `signal-band ${label === quality.label ? 'is-here' : ''}`.trim(),
+        vars: { '--span': String(to - from) },
+      }, h('span', { class: 'signal-band-name' }, label));
+    }),
+    h('span', { class: 'signal-needle', vars: { '--at': onSignalScale(device.rssi) } })));
+}
+
+// What a board's flash holds: the bootloader and the two slots.
+
+/**
+ * One row of the flash map. A row only ever fills while bytes are really arriving; a
+ * slot that holds an image is said in words, because nothing reports how full it is.
+ */
+function flashRow(name, { version, none = 'No new image', state, tone = 'idle', iconName = null, receiving = null }) {
+  return h('li', {
+    key: name,
+    class: `flash-row is-${tone} ${receiving === null ? '' : 'is-receiving'}`.trim(),
+    vars: receiving === null ? null : { '--fill': `${receiving}%` },
+  },
+  h('span', { class: 'flash-name' }, name),
+  h('span', { class: 'flash-version' }, version ? mono(version) : h('span', { class: 'flash-none' }, none)),
+  h('span', { class: 'flash-state' }, iconName ? icon(iconName, 'is-small') : null, h('span', null, state)));
+}
+
+const WORKED_OUT = 'Worked out from the step the board last reported.';
+
+function flashMap(title, primary, secondary, { swapping = false, heading = 'h3', note = WORKED_OUT } = {}) {
+  return h('section', { class: 'flash', key: 'flash', 'aria-label': title },
+    h(heading, { class: 'eyebrow flash-title' }, title),
+    h('ul', { class: 'flash-rows' },
+      h('li', { key: 'boot', class: 'flash-row is-boot' },
+        h('span', { class: 'flash-name' }, 'Bootloader'),
+        h('span', { class: 'flash-version' }, mono('MCUboot')),
+        h('span', { class: 'flash-state' }, 'Checks every signature')),
+      flashRow('Primary slot', primary),
+      swapping ? h('li', { key: 'swap', class: 'flash-swap', 'aria-hidden': 'true' }, icon('swap')) : null,
+      flashRow('Secondary slot', secondary)),
+    h('p', { class: 'flash-note' }, note));
+}
+
+const FLASH_NOW = 'Flash memory now';
+const FLASH_ENDED = 'Flash memory when this update ended';
+const FLASH_SEEN = 'Flash memory when last seen';
+
+/**
+ * What each slot holds at this point of an update, told from the phase the board last
+ * reported. Null where the phase does not say.
+ *
+ * `description` is what describeExecution() made of the same execution: a cancelled
+ * update can end in several ways, and the map says the same as the words above it.
+ */
+function slotsOfExecution(execution, known, target, description, deployment) {
+  const { phase, running, progress, startedAt } = execution;
+  const reported = known?.fw?.version ?? null;
+  const before = running ?? reported;
+  const previous = before && before !== target ? before : null;
+  const stays = { version: before, none: 'Version not reported', state: 'Runs from here, not touched', tone: 'run' };
+  const old = { version: previous, none: 'Previous firmware' };
+  const restarting = () => flashMap(FLASH_NOW, { ...stays, state: 'Being replaced', tone: 'live', iconName: 'restart' },
+    { version: target, state: 'Bootloader checks the signature', tone: 'live', iconName: 'shield' }, { swapping: true });
+  const onTrial = () => flashMap(FLASH_NOW, { version: target, state: 'Runs on trial', tone: 'live', iconName: 'pulse' },
+    { ...old, state: 'Kept to fall back on' });
+
+  switch (phase) {
+    case 'waiting_for_device':
+      return flashMap(FLASH_NOW, stays, { state: 'Nothing written yet' });
+    case 'waiting_for_button':
+      return flashMap(FLASH_NOW, stays, { state: 'Nothing is written until Button 1 is pressed' });
+    case 'downloading':
+      return flashMap(FLASH_NOW, stays, {
+        version: target,
+        state: 'Receiving the image',
+        tone: 'live',
+        iconName: 'download',
+        receiving: progress ?? 0,
+      });
+    case 'verifying':
+      return flashMap(FLASH_NOW, stays, { version: target, state: 'Written, being checked', tone: 'live', iconName: 'shield' });
+    case 'rebooting':
+      return restarting();
+    case 'testing':
+      return onTrial();
+    case 'succeeded':
+      return flashMap(FLASH_ENDED, { version: running ?? target, state: 'Runs from here, confirmed', tone: 'good', iconName: 'check' },
+        { ...old, state: 'No longer needed' });
+    case 'rolled_back':
+      return flashMap(FLASH_ENDED, { ...stays, state: 'Put back by the bootloader', tone: 'good', iconName: 'undo' },
+        { version: target, state: 'Started but never confirmed', tone: 'bad', iconName: 'x-circle' });
+    case 'declined':
+    case 'refused':
+      return flashMap(FLASH_ENDED, stays, { state: 'Nothing written' });
+    case 'failed':
+      return flashMap(FLASH_ENDED, stays, { version: target, state: 'Not installed', tone: 'bad', iconName: 'x-circle' });
+    case 'cancelled': {
+      // The board runs this version or a newer one now, and a later deployment put it there.
+      // When this one ended it still ran what it had before.
+      if (description.laterCame) {
+        return flashMap(FLASH_ENDED, { none: 'Previous firmware', state: 'Stayed in place', tone: 'run' }, { state: 'Nothing written' });
+      }
+      if (!startedAt) return flashMap(FLASH_ENDED, stays, { state: 'Nothing written' });
+      // It had gone too far to be stopped: the new firmware is what runs.
+      if (description.installed) {
+        return known?.fw && !known.fw.confirmed
+          ? onTrial()
+          : flashMap(FLASH_ENDED, { version: target, state: 'Runs from here, confirmed', tone: 'good', iconName: 'check' },
+            { none: 'Previous firmware', state: 'No longer needed' });
+      }
+      const reached = known?.ota?.job === deployment ? known.ota.state : null;
+      if (reached === 'rebooting') return restarting();
+      if (reached === 'testing') return onTrial();
+      // How it ended is not known, so there is no map of that: only what the board says today.
+      if (description.unsure) {
+        return flashMap(FLASH_NOW, { ...stays, state: 'What the board reports', iconName: null },
+          { none: 'Not reported by the board', state: 'How this update ended is not known' },
+          { note: 'A board that AWS has cancelled cannot report the end of that update.' });
+      }
+      // Another deployment installed it later: when this one ended, the board had not.
+      if (description.installedBy) {
+        return flashMap(FLASH_ENDED, { none: 'Previous firmware', state: 'Stayed in place', tone: 'run' },
+          { version: target, state: 'Not installed' });
+      }
+      return flashMap(FLASH_ENDED, stays, { version: target, state: 'Not installed' });
+    }
+    default:
+      return null;
+  }
+}
+
+/** The same, told from what a board last reported about itself. */
+function slotsOfDevice(device) {
+  const { fw, ota, online } = device;
+  const running = {
+    version: fw?.version ?? null,
+    none: 'Version not reported',
+    state: fw?.confirmed ? 'Runs from here, confirmed' : fw ? 'Runs on trial' : 'Nothing reported',
+    tone: fw?.confirmed ? 'good' : fw ? 'live' : 'idle',
+    iconName: fw?.confirmed ? 'check' : fw ? 'pulse' : null,
+  };
+  const target = versionOfDeployment(ota?.job);
+  // The page's title is a level above: a board's page has no other heading in between.
+  const options = {
+    heading: 'h2',
+    note: ota ? WORKED_OUT : 'The board reports what it runs, and nothing about its other slot.',
+  };
+  const title = online ? FLASH_NOW : FLASH_SEEN;
+  if (!ota || ota.state === 'idle') {
+    return flashMap(title, running, { none: 'Not reported by the board', state: 'No update under way' }, options);
+  }
+  if (ota.state === 'awaiting_user') {
+    return flashMap(title, running, {
+      none: 'Not reported by the board',
+      state: online ? 'Nothing is written until Button 1 is pressed' : describeUpdate(device).title,
+    }, options);
+  }
+  if (ota.state === 'testing') {
+    return flashMap(title, { ...running, state: 'Runs on trial', tone: online ? 'live' : 'idle', iconName: 'pulse' },
+      { none: 'Previous firmware', state: 'Kept to fall back on' }, options);
+  }
+  // It went quiet in the middle of this, and may have moved on since: old news is told as old news.
+  if (!online) return flashMap(title, running, { version: target, state: describeUpdate(device).title }, options);
+  if (ota.state === 'downloading') {
+    return flashMap(title, running, {
+      version: target, state: 'Receiving the image', tone: 'live', iconName: 'download', receiving: ota.progress ?? 0,
+    }, options);
+  }
+  return flashMap(title, running, { version: target, state: 'Written, being checked', tone: 'live', iconName: 'shield' },
+    { ...options, swapping: ota.state === 'rebooting' });
 }
 
 // The step indicator for one board's update.
@@ -500,42 +909,114 @@ function signalBars(quality) {
 const STEP_STATES = {
   done: { icon: 'check', label: 'done' },
   current: { icon: null, label: 'in progress' },
-  failed: { icon: 'x', label: 'stopped here' },
+  failed: { icon: null, label: 'stopped here' },
+  // Where a board that was stopped, or went quiet, had got to. Nothing went wrong there.
+  stopped: { icon: 'minus', label: 'stopped here' },
   skipped: { icon: null, label: 'not reached' },
   upcoming: { icon: null, label: 'not started' },
+  // Nobody can tell from here: a board that AWS has cancelled no longer reports.
+  unknown: { icon: 'minus', label: 'not known' },
 };
 const DOWNLOAD_STEP = 2;
+// What each step is drawn with while it is not done: the same order as STEPS in core.js.
+const STEP_ICONS = ['send', 'press', 'download', 'shield', 'restart', 'pulse', 'check-circle'];
+// Whose turn it is decides what the current step is called.
+const CURRENT_WORDS = { act: 'your turn', wait: 'waiting' };
 
-function stepList(description) {
-  return h('ol', { class: 'steps', 'aria-label': 'Steps of the update' },
+/** Pressing the button is somebody's turn. For a viewer, who cannot deploy either, that is not said to be theirs. */
+function currentWord(tone, viewer) {
+  return viewer && tone === 'act' ? 'waiting for someone' : CURRENT_WORDS[tone];
+}
+
+/** The mark of a step that stopped: the way back for a rollback, otherwise what stopped it. */
+function failedMark(description) {
+  if (description.icon === 'undo' || description.icon === 'ban') return description.icon;
+  return description.tone === 'warn' ? 'minus' : 'x';
+}
+
+function stepList(description, { compact = false, preview = false, viewer = false } = {}) {
+  const at = description.steps.findIndex((step) => step.state === 'failed');
+  const look = `is-${description.tone ?? 'idle'} ${compact ? 'is-compact' : ''} ${preview ? 'is-preview' : ''}`;
+  // The mark of a step that failed takes the tone of the headline above it.
+  return h('ol', { class: `steps ${look}`.replace(/\s+/g, ' ').trim(), 'aria-label': 'Steps of the update' },
     description.steps.map((step, index) => {
       const state = STEP_STATES[step.state];
       const current = step.state === 'current';
+      const failed = step.state === 'failed';
       const downloading = current && index === DOWNLOAD_STEP && description.progress !== null;
+      let path = '';
+      if (at > 0 && index <= at) {
+        path = 'is-on-return';
+        if (index === 0) path += ' is-return-start';
+        if (index === at) path += ' is-return-end';
+      }
+      let mark = state.icon ?? STEP_ICONS[index];
+      if (failed) mark = failedMark(description);
       return h('li', {
         // By position: what a step is called changes with its state.
         key: String(index),
-        class: `step is-${step.state} ${downloading ? 'has-progress' : ''}`.trim(),
+        class: `step is-${step.state} ${downloading ? 'has-progress' : ''} ${path}`.replace(/\s+/g, ' ').trim(),
         'aria-current': current ? 'step' : null,
         // The rail from this step to the next fills as the image comes in.
         vars: downloading ? { '--progress': `${description.progress}%` } : null,
       },
-      h('span', { class: 'step-mark' }, state.icon ? icon(state.icon) : null),
+      h('span', { class: 'step-mark' }, icon(mark)),
       h('span', { class: 'step-label' }, step.label, downloading ? ` ${description.progress}%` : null),
-      h('span', { class: 'sr-only' }, `: ${state.label}`));
+      // A list of what every update goes through has no states to tell.
+      preview ? null : h('span', { class: 'sr-only' }, ': '),
+      preview
+        ? null
+        : h('span', { class: 'step-state' }, current ? currentWord(description.tone, viewer) ?? state.label : state.label));
     }));
+}
+
+/**
+ * The way back when an update stops: an arc over the steps, from where it stopped to
+ * where it began, with what the board runs now. Nothing to draw if it stopped nowhere
+ * in particular.
+ */
+function returnPath(execution, description) {
+  const at = description.steps.findIndex((step) => step.state === 'failed');
+  if (at < 1) return null;
+  const { phase, running } = execution;
+  let words = ['Still on the firmware it had', running ? [': ', mono(running)] : null];
+  if (phase === 'rolled_back') {
+    words = ['Back on the previous firmware', running ? [': ', mono(running)] : null];
+  } else if (phase === 'declined' || phase === 'refused') {
+    words = ['Nothing was installed', running ? ['. Still on ', mono(running)] : null];
+  }
+  return h('div', {
+    class: `return-path is-${description.tone} ${at < 3 ? 'is-short' : ''}`.trim(),
+    key: 'return',
+    vars: { '--at': String(at) },
+  },
+  h('span', { class: 'return-arc', 'aria-hidden': 'true' }),
+  h('p', { class: 'return-label' },
+    icon('undo'),
+    h('span', null, words)));
 }
 
 // Sign-in and other moments when there is no console to show.
 
 /** A single message in the middle of the page, with at most one thing to do. */
-export function gateView({ iconName = 'lock', title, text, detail, code, action }) {
-  return h('div', { class: 'gate' },
-    h('span', { class: 'gate-icon' }, icon(iconName)),
-    h('h1', { class: 'gate-title', id: 'page-title', tabindex: '-1' }, title),
-    text ? h('p', { class: 'gate-text' }, text) : null,
-    detail ? h('p', { class: 'gate-text' }, detail, code ? [' ', mono(code)] : null) : null,
-    action ? button(action.quiet ? '' : 'is-primary', action.run, action.label) : null);
+export function gateView({ iconName = 'lock', title, text, detail, code, action, waiting, leaving }) {
+  const moving = waiting || leaving;
+  return h('div', { class: `gate ${moving ? 'is-moving' : ''}`.trim() },
+    h('div', { class: 'gate-copy' },
+      h('div', { class: 'gate-brand' },
+        brandMark(),
+        h('span', { class: 'gate-brand-text' },
+          h('span', { class: 'gate-brand-name' }, 'Cranium'),
+          h('span', { class: 'gate-brand-sub' }, 'Firmware console'))),
+      h('div', { class: 'gate-message' },
+        // The padlock is what every gate has by default; the mark above says as much.
+        iconName === 'lock' ? null : h('span', { class: 'gate-icon' }, icon(iconName)),
+        h('h1', { class: 'gate-title', id: 'page-title', tabindex: '-1' }, title),
+        text ? h('p', { class: 'gate-text' }, text) : null,
+        detail ? h('p', { class: 'gate-text' }, detail, code ? [' ', mono(code)] : null) : null,
+        action ? button(`is-large ${action.quiet ? '' : 'is-primary'}`.trim(), action.run, action.label) : null),
+      h('p', { class: 'gate-foot' }, 'Upload signed firmware, offer it to boards, watch each one update.')),
+    h('div', { class: 'gate-art' }, domeArt()));
 }
 
 // The masthead: sections and who is signed in.
@@ -546,23 +1027,64 @@ const SECTIONS = [
   ['firmware', 'Firmware'],
   ['deployments', 'Deployments'],
   ['activity', 'Activity'],
+  ['developer', 'Developer'],
 ];
-const SECTION_OF = { device: 'devices', deployment: 'deployments' };
+const SECTION_OF = { device: 'devices', deployment: 'deployments', serial: 'developer', history: 'developer' };
+
+/** Where Developer leads: a viewer has no use for the serial console's controls. */
+function sectionHref(view, ctx) {
+  if (view !== 'developer') return `#/${view}`;
+  return ctx.state.me?.canWrite === false ? '#/history' : '#/serial';
+}
 
 export function navView(ctx) {
   const current = SECTION_OF[ctx.state.route.view] ?? ctx.state.route.view;
   return h('ul', { class: 'nav-list' }, SECTIONS.map(([view, label]) =>
     h('li', { key: view }, h('a', {
       class: 'nav-link',
-      href: `#/${view}`,
+      href: sectionHref(view, ctx),
+      // Keeps the room the name takes in bold, so that the sections stay where they are.
+      'data-label': label,
       'aria-current': view === current ? 'page' : null,
     }, label))));
+}
+
+// The pages of the Developer section, which have a script each (serial.js, history.js).
+
+export { badge, button, empty, loading, mono, notice, pageHead };
+
+export function developerTabs(current) {
+  return h('nav', { class: 'dev-tabs', key: 'tabs', 'aria-label': 'Developer pages' },
+    h('span', { class: 'eyebrow' }, 'Developer'),
+    [['serial', 'Serial console'], ['history', 'History']].map(([view, label]) => h('a', {
+      key: view,
+      class: 'nav-link',
+      href: `#/${view}`,
+      'data-label': label,
+      'aria-current': view === current ? 'page' : null,
+    }, label)));
+}
+
+/** Such a page while its script is on the way, or when it could not be fetched. */
+export function scriptPending(ctx, view, title) {
+  return h('div', { class: 'page', key: 'page' },
+    developerTabs(view),
+    pageHead({ title }),
+    ctx.state.scriptFailed
+      ? notice('bad', 'alert', 'This page could not be loaded. The console may have been updated since ' +
+        'this tab was opened: reload to get the new version.', {
+        action: button('is-small', () => location.reload(), 'Reload'),
+      })
+      : loading('the page'));
 }
 
 export function accountView(ctx) {
   const { me, sessionLeft } = ctx.state;
   const left = Math.max(0, sessionLeft);
   const ends = new Date(Date.now() + left * 1000);
+  const session = left > 0
+    ? { title: `You will be asked to sign in again at ${ends.toLocaleTimeString()}.`, text: `Session ends in ${duration(left)}` }
+    : { title: 'Sign in again to go on.', text: 'Session ended' };
   const role = me.canWrite ? 'Release manager' : 'Viewer';
   // The account id is what the activity log files this person's actions under.
   const identity = [me.email, me.sub ? `Account ${me.sub}` : ''].filter(Boolean).join(' · ');
@@ -571,14 +1093,14 @@ export function accountView(ctx) {
       h('span', { class: 'account-email', title: identity || null }, me.email || 'Signed in'),
       h('span', { class: 'account-meta' },
         h('span', { class: 'account-role' }, icon(me.canWrite ? 'key' : 'user', 'is-small'), role),
-        h('span', {
-          class: 'account-session',
-          title: `You will be asked to sign in again at ${ends.toLocaleTimeString()}.`,
-        }, `Session ends in ${duration(left)}`))),
+        h('span', { class: 'account-session', title: session.title }, session.text))),
     button('is-small', ctx.actions.signOut, icon('sign-out'), 'Sign out'));
 }
 
 // Overview.
+
+const SCRIPTED_NOTE = 'Sent by a script with AWS credentials, directly to the API function. Nobody signed in: ' +
+  'the name is the one the script gave, and it was checked only to be an active release manager.';
 
 /** One entry of the activity log. The short form is for the overview. */
 function activityLine(entry, ctx, compact) {
@@ -589,26 +1111,36 @@ function activityLine(entry, ctx, compact) {
   const outcome = description.outcome
     ? [' ', badge(description.outcome.tone, description.outcome.icon, description.outcome.label)]
     : null;
+  // The line says that the deployment was started. How it ended is not in the log, and
+  // follows from the deployment as it is now, once it is over.
+  const run = entry.action === 'deployment.create' && entry.outcome === 'ok'
+    ? (ctx.state.deployments.value ?? []).find((deployment) => deployment.id === entry.target) ?? null
+    : null;
+  const ending = run && !isUnderWay(run) ? describeDeployment(run) : null;
   return h('li', { key: `${entry.at}-${entry.requestId}`, class: 'log-line' },
-    h('span', { class: 'log-icon' }, icon(description.icon)),
+    h('span', { class: `log-icon ${description.outcome ? `is-${description.outcome.tone}` : ''}`.trim() },
+      icon(description.icon)),
     h('div', { class: 'log-body' },
       h('p', { class: 'log-what' },
-        // The short form leaves out the domain of the address; the tooltip has all of it.
+        // The whole address, in the short form too: its owner can change it, and the part
+        // before the @ alone could be anybody's. The tooltip adds the account.
         h('span', {
           class: 'log-actor',
           title: compact ? [actor?.email, account].filter(Boolean).join(' · ') || null : account,
-        }, compact && actor?.email ? name.split('@')[0] : name),
+        }, name),
         ` ${description.verb} `,
         description.label
           ? linkTo(description.href, { class: 'mono log-target' }, description.label)
           : null,
-        outcome),
+        outcome,
+        ending ? [' ', badge(ending.tone, ending.icon, ending.label)] : null,
+        description.scripted
+          ? [' ', h('span', { class: 'tag is-warn', title: SCRIPTED_NOTE }, 'Script, no sign-in')]
+          : null),
       compact
         ? null
         : h('p', { class: 'log-detail dotted' },
-          description.facts.map((fact) => h('span', { key: `fact-${fact.key}` },
-            fact.phrase ? `${fact.label} ` : `${fact.label}: `,
-            fact.code ? mono(fact.value) : fact.value)),
+          description.facts.map((fact) => auditFact(fact, ctx)),
           // Two accounts can show the same address, or one that looks the same. The id tells them apart.
           actor?.sub
             ? h('span', { key: 'account', class: 'log-ref', title: account },
@@ -620,27 +1152,75 @@ function activityLine(entry, ctx, compact) {
     h('span', { class: 'log-when' }, when(entry.at, ctx.state.now)));
 }
 
-/** One board of a deployment that is under way, as a line on the overview. */
-function boardLine(execution, now, known) {
-  const description = describeExecution(execution);
-  const lastSeen = known?.lastSeen ?? null;
-  const offline = execution.phase === 'waiting_for_device' && !execution.online;
-  return h('li', { key: execution.thing, class: 'board-run' },
-    linkTo(deviceHref(execution.thing), { class: 'mono board-run-name' }, execution.thing),
-    h('div', { class: 'board-run-state' },
-      statusLine(description),
-      description.progress !== null
-        ? meter(description.progress, `Download on ${execution.thing}`)
-        : h('span', { class: 'board-run-note' }, description.brief,
-          offline && lastSeen ? [' Last seen ', when(lastSeen, now), '.'] : null)));
+/** One fact of a log entry. A digest is shortened: the button next to it copies all of it. */
+function auditFact(fact, ctx) {
+  if (fact.key === 'sha256') {
+    return h('span', { key: 'fact-sha256', class: 'digest-row' },
+      `${fact.label} `, mono(`${fact.value.slice(0, 12)}…`),
+      copyButton(fact.value, `the SHA-256 of ${fact.value.slice(0, 12)}…`, ctx));
+  }
+  if (fact.words) {
+    return h('span', { key: `fact-${fact.key}` }, `${fact.words} (`, mono(fact.value), ')');
+  }
+  return h('span', { key: `fact-${fact.key}` },
+    fact.phrase ? `${fact.label} ` : `${fact.label}: `,
+    fact.code ? mono(fact.value) : fact.value);
 }
 
-function startedBy(deployment, now) {
+/** The two buttons on the board, while it waits for a person. The words beside it say the same. */
+function buttonKeys() {
+  return h('div', { class: 'keys', 'aria-hidden': 'true' },
+    h('span', { class: 'key is-lit' },
+      h('span', { class: 'key-cap' }),
+      h('span', { class: 'key-words' }, h('strong', null, 'Button 1'), 'installs')),
+    h('span', { class: 'key' },
+      h('span', { class: 'key-cap' }),
+      h('span', { class: 'key-words' }, h('strong', null, 'Button 2'), 'declines')));
+}
+
+/** One board of a deployment that is under way, as a line on the overview. */
+function boardLine(execution, deployment, ctx, known) {
+  const { now } = ctx.state;
+  const description = describeExecution(execution, {
+    board: known ?? null, deployment: deployment.id, version: deployment.version, unread: ctx.state.devices.value === null,
+  });
+  const lastSeen = known?.lastSeen ?? null;
+  const offline = execution.phase === 'waiting_for_device' && !execution.online;
+  return h('li', { key: execution.thing, class: `board-run is-${description.tone}` },
+    h('div', { class: 'board-run-head' },
+      h('div', { class: 'board-run-who' },
+        linkTo(deviceHref(execution.thing), { class: 'mono board-run-name', title: execution.thing }, execution.thing),
+        h('div', { class: 'board-run-state' },
+          description.progress !== null
+            ? h('span', { class: `status is-${description.tone}` },
+              icon(description.icon),
+              h('span', null, description.said ?? description.title,
+                h('span', { class: 'said-big' }, ` ${description.progress}%`)))
+            : statusLine(description),
+          description.progress !== null
+            ? meter(description.progress, `Download on ${execution.thing}`)
+            : h('span', { class: 'board-run-note' }, prose(description.brief),
+              offline && lastSeen ? [' Last seen ', when(lastSeen, now), '.'] : null))),
+      description.progress !== null
+        ? h('p', { class: 'board-run-figure', 'aria-hidden': 'true' },
+          String(description.progress), h('span', { class: 'execution-percent' }, '%'))
+        : null,
+      description.tone === 'act' ? buttonKeys() : null),
+    stepList(description, { compact: true, viewer: !ctx.state.me.canWrite }));
+}
+
+function startedBy(deployment, now, stamp = when) {
   return [
     'Started ',
-    when(deployment.createdAt, now),
+    stamp(deployment.createdAt, now),
     deployment.createdBy ? [' by ', who(deployment.createdBy)] : null,
   ];
+}
+
+/** The versions of the releases that are revoked, as far as they are known here. */
+function revokedVersions(ctx) {
+  const releases = ctx.state.firmware.value?.releases ?? [];
+  return new Set(releases.filter((release) => release.status !== 'active').map((release) => release.version));
 }
 
 /**
@@ -664,87 +1244,211 @@ function gettingStarted(ctx, have) {
         title, done[index] ? h('span', { class: 'sr-only' }, ' (done)') : null),
       done[index] ? null : h('p', { class: 'guide-text' }, text)));
   };
-  return card({ key: 'guide', title: 'Getting started', className: 'guide' },
-    h('ol', { class: 'guide-steps' },
-      step(0, 'Register a board',
-        'Each board gets its own certificate and name. With the board connected over USB, run ',
-        h('code', { class: 'code' }, 'python3 tools/provision_device.py')),
-      canWrite
-        ? step(1, 'Upload a signed image',
-          'Drop the build’s zephyr.signed.bin on the ', h('a', { href: '#/firmware' }, 'Firmware'),
-          ' page. The server checks its signature before it is stored.')
-        : step(1, 'Upload a signed image',
-          'A release manager uploads the build’s zephyr.signed.bin. ',
-          'The server checks its signature before it is stored.'),
-      canWrite
-        ? step(2, 'Deploy it',
-          'Start a deployment on the ', h('a', { href: '#/deployments' }, 'Deployments'),
-          ' page, then press Button 1 on the board to install.')
-        : step(2, 'Deploy it',
-          'A release manager offers the release to boards; pressing Button 1 on a board installs it.')));
+  const list = h('ol', { class: 'guide-steps' },
+    step(0, 'Register a board',
+      'Each board gets its own certificate and name. With the board connected over USB, run ',
+      h('code', { class: 'code' }, 'python3 tools/provision_device.py')),
+    canWrite
+      ? step(1, 'Upload a signed image',
+        'Drop ', mono('binaries/latest.signed.bin'), ' on the ', h('a', { href: '#/firmware' }, 'Firmware'),
+        ' page. The server checks its signature before it is stored.')
+      : step(1, 'Upload a signed image',
+        'A release manager uploads a signed build. ',
+        'The server checks its signature before it is stored.'),
+    canWrite
+      ? step(2, 'Deploy it',
+        'Start a deployment on the ', h('a', { href: '#/deployments' }, 'Deployments'),
+        ' page, then press Button 1 on the board to install.')
+      : step(2, 'Deploy it',
+        'A release manager offers the release to boards; pressing Button 1 on a board installs it.'));
+  return card({ key: 'guide', title: 'Getting started', className: 'guide' }, list);
 }
+
+/** What every update goes through, for a console that has not seen one yet. */
+function updateJourney() {
+  const preview = { progress: null, steps: STEPS.map((step) => ({ label: step.name, state: 'upcoming' })) };
+  return h('section', { class: 'journey', key: 'journey', 'aria-label': 'The steps of an update' },
+    h('div', { class: 'journey-head' },
+      h('p', { class: 'journey-title' }, 'What every update goes through'),
+      h('p', { class: 'journey-text' },
+        'Nothing installs itself: a person agrees on the board, the board checks what it received, and ',
+        'the bootloader goes back to the previous firmware if the new one cannot reconnect.')),
+    stepList(preview, { preview: true }));
+}
+
+/** On line and not restarting: a board that said it is restarting is off for the moment. */
+function isUp(device) {
+  return device.online && !isRestarting(device);
+}
+
+/** Boards in the words the tiles draw them in. */
+function boardsCounted(devices) {
+  const online = devices.filter(isUp).length;
+  const quiet = devices.filter((device) => !isUp(device) && device.lastSeen).length;
+  const never = devices.length - online - quiet;
+  return { online, quiet, never };
+}
+
+/** The words next to the tiles, for a fleet of more than one board: one board is said by the figure. */
+function tileWords(devices, extra = []) {
+  const { online, quiet, never } = boardsCounted(devices);
+  return h('p', { class: 'tile-words dotted', key: 'words' },
+    online ? h('span', { key: 'online' }, `${online} online`) : null,
+    quiet ? h('span', { key: 'quiet' }, `${quiet} offline`) : null,
+    never ? h('span', { key: 'never' }, `${never} never connected`) : null,
+    extra.filter(([, count]) => count > 0).map(([word, count]) => h('span', { key: word }, `${count} ${word}`)));
+}
+
+function fleetFigure(devices) {
+  const { online } = boardsCounted(devices);
+  return [
+    h('p', { class: 'figure', key: 'figure' },
+      h('span', { class: 'figure-value' }, String(online)),
+      h('span', { class: 'figure-unit' }, ` of ${plural(devices.length, 'board')} online`)),
+    devices.length > 1 ? boardTiles(devices) : null,
+  ];
+}
+
+/** How many boards are online, in the panel at the top of the overview. */
+function onlineCard(ctx, devices) {
+  let body;
+  if (devices === null) {
+    body = pending(ctx.state.devices, 'boards');
+  } else if (devices.length === 0) {
+    body = h('p', { class: 'quiet' }, 'No boards are registered yet.');
+  } else {
+    body = [fleetFigure(devices), devices.length > 1 ? tileWords(devices) : null];
+  }
+  return card({ key: 'online', title: 'Fleet', className: 'is-zone' }, body);
+}
+
+// More than this, and the card sends the reader to the page that has them all.
+const BOARDS_SHOWN = 6;
 
 function boardsCard(ctx, devices) {
   const { state } = ctx;
-  const online = (devices ?? []).filter((device) => device.online).length;
   let body;
   if (devices === null) {
     body = pending(state.devices, 'boards');
   } else if (devices.length === 0) {
-    body = empty(NO_BOARDS);
+    body = h('p', { class: 'quiet' }, 'Boards appear here once they are registered.');
   } else {
+    const head = h('li', { key: 'head', class: 'board-head', 'aria-hidden': 'true' },
+      h('span', null, 'Board'), h('span', null, 'Firmware'), h('span', null, 'Signal'), h('span', null, 'Update'));
     body = [
-      h('p', { class: 'figure', key: 'figure' },
-        h('span', { class: 'figure-value' }, String(online)),
-        h('span', { class: 'figure-unit' }, ` of ${plural(devices.length, 'board')} online`)),
-      h('ul', { class: 'board-list', key: 'list' }, devices.map((device) =>
-        h('li', { key: device.thing, class: 'board-line' },
-          h('span', { class: `presence-dot ${device.online ? 'is-on' : ''}`.trim() }),
-          linkTo(deviceHref(device.thing), { class: 'mono' }, device.thing),
-          h('span', { class: 'board-line-note' },
-            device.online
-              ? 'Online'
-              : device.lastSeen ? when(device.lastSeen, state.now, 'Seen ') : 'Never connected')))),
+      h('ul', { class: 'board-list', key: 'list' }, head, devices.slice(0, BOARDS_SHOWN).map((device) => {
+        const quality = signalQuality(device.rssi);
+        const reported = describeUpdate(device);
+        // The panel above and this row say one percentage: the board list is read less often.
+        const own = state.deploymentDetails.get(device.ota?.job)?.value?.executions
+          .find((execution) => execution.thing === device.thing);
+        const progress = reported.progress !== null && own?.phase === 'downloading' && own.progress !== null
+          ? own.progress
+          : reported.progress;
+        // A row among rows: the panel above is what asks somebody to press a button.
+        const update = reported.tone === 'act'
+          ? { ...reported, tone: 'wait', title: 'Waiting for its button' }
+          : { ...reported, progress };
+        let seen = 'Never connected';
+        if (isRestarting(device)) seen = 'Restarting';
+        else if (device.online) seen = ['Online, reported ', when(device.lastSeen, state.now)];
+        else if (device.lastSeen) seen = when(device.lastSeen, state.now, 'Offline, seen ');
+        return h('li', { key: device.thing, class: 'board-line' },
+          h('span', { class: `presence-dot ${isUp(device) ? 'is-on' : ''}`.trim() }),
+          h('span', { class: 'board-line-who' },
+            linkTo(deviceHref(device.thing), { class: 'mono board-line-name', title: device.thing }, device.thing),
+            h('span', { class: 'board-line-note' }, seen)),
+          h('span', { class: 'board-line-fw' },
+            device.fw
+              ? [mono(device.fw.version),
+                device.fw.confirmed
+                  ? h('span', { class: 'board-line-mark', title: 'Confirmed' }, icon('check', 'is-small'), h('span', { class: 'sr-only' }, ' confirmed'))
+                  : h('span', { class: 'tag is-warn' }, 'On trial')]
+              : h('span', { class: 'quiet' }, 'Not reported')),
+          h('span', { class: 'board-line-signal' },
+            quality ? [signalBars(quality), quality.label] : h('span', { class: 'quiet' }, 'Not reported')),
+          h('span', { class: 'board-line-update' },
+            statusLine(update, update.progress !== null ? h('span', { class: 'status-value' }, `${update.progress}%`) : null)));
+      })),
+      devices.length > BOARDS_SHOWN
+        ? h('p', { class: 'card-note board-more', key: 'more' },
+          h('a', { href: '#/devices' }, `and ${plural(devices.length - BOARDS_SHOWN, 'more board')}`))
+        : null,
     ];
   }
-  return card({ key: 'boards', title: 'Boards', more: { href: '#/devices', label: 'All devices' } }, body);
+  return card({
+    key: 'boards',
+    title: 'Boards',
+    className: 'overview-boards',
+    more: { href: '#/devices', label: 'All devices' },
+  }, body);
 }
 
-function fleetCard(ctx, devices, newest) {
+/** The boards by the version they report: newest first, boards that have not said last. */
+function versionGroups(devices) {
   const groups = new Map();
   for (const device of devices ?? []) {
     const version = device.fw?.version ?? '';
     groups.set(version, (groups.get(version) ?? []).concat(device));
   }
-  // Newest first; boards that have not said what they run come last.
   const versions = [...groups.keys()].sort((a, b) => {
     if (a === '' || b === '') return a === '' ? 1 : -1;
     return compareVersions(parseVersion(b), parseVersion(a));
   });
+  return versions.map((version) => ({ version, members: groups.get(version) }));
+}
 
+const OLDER_SHADES = 3;
+
+/**
+ * The fleet by firmware: a row per version with one tile per board. Rows label themselves,
+ * so one board is a tile, not a bar that fills the width to say "1".
+ */
+function versionRows(devices, newest, revokedOnes) {
+  let behind = 0;
+  return h('ul', { class: 'fleet-list', key: 'versions' }, versionGroups(devices).map(({ version, members }) => {
+    let tone = 'none';
+    if (version && version === newest?.version) {
+      tone = 'newest';
+    } else if (version) {
+      behind = Math.min(behind + 1, OLDER_SHADES);
+      tone = `older-${behind}`;
+    }
+    const onTrial = members.filter((device) => device.fw && !device.fw.confirmed).length;
+    return h('li', { key: version || 'none', class: 'fleet-line' },
+      h('span', { class: 'fleet-name' },
+        version ? mono(version, 'fleet-version') : h('span', { class: 'fleet-version quiet' }, 'Not reported'),
+        version && newest?.version === version ? h('span', { class: 'tag' }, 'Newest release') : null,
+        onTrial > 0 ? h('span', { class: 'tag is-warn' }, `${onTrial} on trial`) : null),
+      h('span', { class: 'fleet-count' }, plural(members.length, 'board'),
+        revokedOnes.has(version) ? h('span', { class: 'tag is-bad' }, 'Revoked release') : null),
+      h('span', { class: 'tiles', 'aria-hidden': 'true' }, members.map((device) =>
+        h('span', { key: device.thing, class: `tile is-${tone}`, title: device.thing }))));
+  }));
+}
+
+function fleetCard(ctx, devices, newest) {
+  const groups = versionGroups(devices);
   let body;
   if (devices === null) {
     body = pending(ctx.state.devices, 'versions');
-  } else if (versions.length === 0) {
+  } else if (groups.length === 0) {
     body = h('p', { class: 'quiet' }, 'Versions appear here once a board has reported.');
   } else {
-    body = h('ul', { class: 'fleet-list' }, versions.map((version) => {
-      const members = groups.get(version);
-      const onTrial = members.filter((device) => device.fw && !device.fw.confirmed).length;
-      return h('li', { key: version || 'none', class: 'fleet-line' },
-        version
-          ? mono(version, 'fleet-version')
-          : h('span', { class: 'fleet-version quiet' }, 'Not reported'),
-        h('span', { class: 'pips', 'aria-hidden': 'true' },
-          members.map((device) => h('span', { key: device.thing, class: 'pip' }))),
-        h('span', { class: 'fleet-count' }, plural(members.length, 'board')),
-        version && newest?.version === version ? h('span', { class: 'tag' }, 'Newest release') : null,
-        onTrial > 0 ? h('span', { class: 'tag is-warn' }, `${onTrial} on trial`) : null);
-    }));
+    const current = groups.find(({ version }) => version && version === newest?.version)?.members.length ?? 0;
+    body = [
+      newest
+        ? h('p', { class: 'figure fleet-headline', key: 'headline' },
+          h('span', { class: 'figure-value' }, String(current)),
+          h('span', { class: 'figure-unit' }, ` of ${devices.length} on the newest release`))
+        : h('p', { class: 'fleet-headline', key: 'headline' }, 'No release can be deployed.'),
+      versionRows(devices, newest, revokedVersions(ctx)),
+    ];
   }
   return card({
     key: 'fleet',
     title: 'Firmware in the fleet',
+    className: 'is-zone',
     more: { href: '#/devices', label: 'Devices' },
   }, body);
 }
@@ -785,6 +1489,7 @@ function releaseCard(ctx, newest) {
   return card({
     key: 'release',
     title: 'Newest release',
+    className: 'is-zone',
     more: { href: '#/firmware', label: 'Firmware' },
   }, body);
 }
@@ -795,30 +1500,50 @@ function updatesCard(ctx, devices) {
   const deployments = state.deployments.value;
   const byThing = new Map((devices ?? []).map((device) => [device.thing, device]));
   // Decided by the boards, not by the status of the job: a cancelled deployment can
-  // still have a board that is installing.
-  const active = (deployments ?? []).filter(isUnderWay);
-  const lastDone = (deployments ?? []).find((deployment) => !isUnderWay(deployment)) ?? null;
+  // still have a board that is installing, or restarting into the new firmware.
+  const active = (deployments ?? []).filter((deployment) =>
+    isUnderWay(deployment) || stillFinishing(deployment, devices, now));
+  const lastDone = (deployments ?? []).find((deployment) => !active.includes(deployment)) ?? null;
+  // What is on the page predates the failure: it cannot say that nothing is going on.
+  const outOfDate = Boolean(state.deployments.error);
 
   let body;
   if (deployments === null) {
     body = pending(state.deployments, 'deployments');
   } else if (active.length === 0) {
-    // The tick is for updates that have been through. Before the first deployment
-    // there is nothing to tick off.
-    const tone = deployments.length === 0 ? 'idle' : 'good';
-    body = h('div', { class: 'calm' },
-      h('p', { class: `calm-title is-${tone}` },
-        icon(tone === 'idle' ? 'minus-circle' : 'check-circle'), 'No update is in progress.'),
+    // The tick is for updates that have been through, and only for those: a page that
+    // says all is well right after a rollout failed would mislead at a glance. A
+    // deployment that went wrong is what the panel opens with, in words, an icon and its
+    // outcome bar. Before the first deployment there is nothing to tick off.
+    const ending = lastDone ? describeDeployment(lastDone) : null;
+    const tone = outOfDate ? 'idle' : ending?.tone ?? 'idle';
+    const news = outOfDate ? null : ending?.said ?? null;
+    const iconName = tone === 'idle' ? 'minus-circle' : ending.icon;
+    // Called off or one board's result: the words say it. A bar that is one block across
+    // measures nothing, so it is for what several boards did.
+    const boards = lastDone?.things.length ?? 0;
+    const showBar = boards > 1 && (tone === 'bad' || tone === 'warn' || tone === 'good');
+    const resting = outOfDate ? 'Whether an update is in progress cannot be told right now.' : 'No update is in progress.';
+    body = h('div', { class: `calm is-${tone}` },
+      h('p', { class: `calm-title is-${tone}` }, icon(iconName), news ?? resting),
       lastDone
-        ? h('p', { class: 'card-note' },
-          'Last deployment: ',
+        ? h('p', { class: 'card-note calm-note' },
+          news ? null : 'Last deployment: ',
           linkTo(deploymentHref(lastDone.id), { class: 'mono' }, lastDone.version ?? lastDone.id),
-          `, ${describeDeployment(lastDone).label.toLowerCase()}, `,
-          // A cancelled deployment has no end on record: say that the time is its start.
-          lastDone.completedAt
-            ? when(lastDone.completedAt, now)
-            : when(lastDone.createdAt, now, 'started '))
-        : h('p', { class: 'card-note' }, 'Deployments appear here while boards are being updated.'));
+          ' ', badge(ending.tone, ending.icon, ending.label), ' ',
+          h('span', null,
+            // A cancelled deployment has no end on record: say that the time is its start.
+            lastDone.completedAt
+              ? when(lastDone.completedAt, now)
+              : when(lastDone.createdAt, now, 'started '),
+            news ? '. No update is in progress.' : null))
+        : h('p', { class: 'card-note' }, 'Deployments appear here while boards are being updated.'),
+      showBar
+        ? h('div', { class: 'calm-outcome' },
+          segments(countParts(lastDone.counts), `Boards: ${countWords(lastDone.counts)}.`, { thin: true }),
+          // One board's count says what the words above say already.
+          boards > 1 ? countList(lastDone.counts) : null)
+        : null);
   } else {
     body = h('ul', { class: 'run-list' }, active.map((deployment) => {
       const detail = state.deploymentDetails.get(deployment.id)?.value ?? null;
@@ -830,18 +1555,20 @@ function updatesCard(ctx, devices) {
           h('span', { class: 'card-note' }, startedBy(deployment, now))),
         deployment.status === 'CANCELED'
           ? h('p', { class: 'card-note run-note' },
-            'This deployment was cancelled. A board that had already started carries on ',
-            'unless it is stopped.')
+            isUnderWay(deployment)
+              ? 'This deployment was cancelled. A board that had already started carries on unless it is stopped.'
+              : 'This deployment was cancelled, but a board was already restarting into the new firmware. That cannot be stopped.')
           : null,
         detail
           ? h('ul', { class: 'board-runs' }, detail.executions.map((execution) =>
-            boardLine(execution, now, byThing.get(execution.thing))))
+            boardLine(execution, deployment, ctx, byThing.get(execution.thing))))
           : h('p', { class: 'card-note' }, counted.join(', ')));
     }));
   }
   return card({
     key: 'updates',
-    title: 'Updates in progress',
+    title: active.length > 0 ? 'Updates in progress' : 'Updates',
+    className: `is-zone updates overview-updates ${active.length > 0 ? 'is-active' : ''}`.trim(),
     more: { href: '#/deployments', label: 'All deployments' },
   }, body);
 }
@@ -862,6 +1589,7 @@ function activityCard(ctx) {
   return card({
     key: 'activity',
     title: 'Recent activity',
+    className: 'overview-activity',
     more: { href: '#/activity', label: 'All activity' },
   }, body);
 }
@@ -890,6 +1618,12 @@ function openRevocations(ctx, firmware) {
     ], { action: h('a', { class: 'btn is-small', href: '#/firmware' }, 'Firmware', icon('arrow-right')) }));
 }
 
+/** A page is only as fresh as the oldest thing on it that could not be read again. */
+function oldestRead(resources) {
+  const read = resources.filter((resource) => resource.loadedAt > 0);
+  return read.reduce((oldest, resource) => (resource.loadedAt < oldest.loadedAt ? resource : oldest), read[0] ?? null);
+}
+
 export function overviewView(ctx) {
   const { state } = ctx;
   const devices = state.devices.value?.devices ?? null;
@@ -907,14 +1641,18 @@ export function overviewView(ctx) {
   // "nothing yet". What has been recorded all the same, a refused upload for one, stays.
   const blank = loaded && !have.boards && !have.releases && !have.deployments;
   const recorded = (state.recent.value?.entries ?? []).length > 0;
+  // A list that could not be read again may be missing what would finish the steps.
+  const failed = [state.devices, state.firmware, state.deployments].filter((resource) => resource.error);
 
   let cards = null;
   if (!blank) {
-    cards = h('div', { class: 'overview', key: 'grid' },
-      h('div', { class: 'overview-main' },
+    cards = [
+      h('div', { class: 'panel on-ink overview-panel', key: 'panel' },
         updatesCard(ctx, devices),
-        h('div', { class: 'overview-pair' }, fleetCard(ctx, devices, newest), releaseCard(ctx, newest))),
-      h('div', { class: 'overview-side' }, boardsCard(ctx, devices), activityCard(ctx)));
+        h('div', { class: 'fleet' },
+          onlineCard(ctx, devices), fleetCard(ctx, devices, newest), releaseCard(ctx, newest))),
+      h('div', { class: 'overview', key: 'grid' }, boardsCard(ctx, devices), activityCard(ctx)),
+    ];
   } else if (recorded) {
     cards = activityCard(ctx);
   }
@@ -923,32 +1661,47 @@ export function overviewView(ctx) {
     pageHead({
       title: 'Overview',
       lede: 'What the fleet runs, and what is being updated right now.',
-      tools: freshness(state.devices, ctx),
+      tools: freshness(oldestRead(failed) ?? state.devices, ctx),
     }),
-    loadProblem(state.devices, 'the boards', ctx),
-    loadProblem(state.firmware, 'the releases', ctx),
-    loadProblem(state.deployments, 'the deployments', ctx),
-    loadProblem(state.recent, 'the activity log', ctx),
+    loadProblems([
+      [state.devices, 'the boards'],
+      [state.firmware, 'the releases'],
+      [state.deployments, 'the deployments'],
+      [state.recent, 'the activity log'],
+    ], ctx),
     openRevocations(ctx, firmware),
-    loaded && !started ? gettingStarted(ctx, have) : null,
+    loaded && !started && failed.length === 0
+      ? h('div', { class: `welcome ${blank ? 'panel on-ink' : ''}`.trim(), key: 'welcome' },
+        blank ? archWatermark() : null,
+        gettingStarted(ctx, have))
+      : null,
+    blank ? updateJourney() : null,
     cards);
 }
 
 // Devices.
 
-function firmwareFact(device) {
+function firmwareFact(device, revokedOnes) {
   if (!device.fw) return h('span', { class: 'quiet' }, 'Not reported');
   return [
-    mono(device.fw.version, 'fact-strong'),
+    mono(device.fw.version, 'fact-strong device-version'),
     device.fw.confirmed
       ? badge('good', 'check', 'Confirmed')
       : badge('warn', 'pulse', 'On trial',
         'Not confirmed yet. The bootloader goes back to the previous firmware if the board ' +
         'restarts before it confirms.'),
+    // Revoking does not touch a board that runs the release.
+    revokedOnes.has(device.fw.version)
+      ? [
+        badge('bad', 'ban', 'Revoked release'),
+        factNote('To replace it, upload a newer version and deploy that.'),
+      ]
+      : null,
   ];
 }
 
-function updateFact(device) {
+/** `offer` is an update this board is offered and that it has not said anything about yet. */
+function updateFact(device, offer) {
   const update = describeUpdate(device);
   const percent = update.progress !== null
     ? h('span', { class: 'status-value' }, `${update.progress}%`)
@@ -956,18 +1709,26 @@ function updateFact(device) {
   return h('div', { class: 'fact-stack' },
     statusLine(update, percent),
     update.progress !== null ? meter(update.progress, `Download on ${device.thing}`) : null,
-    update.text ? factNote(update.text) : null,
-    update.deployment
-      ? linkTo(deploymentHref(update.deployment), { class: 'fact-link' },
+    update.text ? factNote(prose(update.text)) : null,
+    offer && !update.deployment
+      ? factNote([
+        'Offered ', offer.version ? mono(offer.version) : 'an update',
+        device.online ? '. It has not picked the offer up yet.' : '. It will see the offer when it connects.',
+      ])
+      : null,
+    update.deployment || offer
+      ? linkTo(deploymentHref(update.deployment ?? offer.deployment), { class: 'fact-link' },
         'Open the deployment', icon('arrow-right', 'is-small'))
       : null);
 }
 
-function signalFact(device) {
+function signalFact(device, withScale) {
   const quality = signalQuality(device.rssi);
   if (!quality) return h('span', { class: 'quiet' }, 'Not reported');
-  return h('span', { class: 'signal-fact' },
-    signalBars(quality), `${quality.label} · ${signed(device.rssi)} dBm`);
+  return [
+    h('span', { class: 'signal-fact' }, signalBars(quality), `${quality.label} · ${signed(device.rssi)} dBm`),
+    withScale ? signalScale(device) : null,
+  ];
 }
 
 function uptimeFact(device) {
@@ -975,20 +1736,57 @@ function uptimeFact(device) {
   return [duration(device.uptime), device.online ? null : h('span', { class: 'quiet' }, ' when last seen')];
 }
 
-function deviceFacts(device) {
+function deviceFacts(device, ctx, { offer = openOffer(device, ctx), withScale = false } = {}) {
   return facts([
-    ['Firmware', firmwareFact(device)],
-    ['Update', updateFact(device)],
-    ['Signal', signalFact(device)],
+    ['Firmware', firmwareFact(device, revokedVersions(ctx))],
+    ['Update', updateFact(device, offer)],
+    ['Signal', signalFact(device, withScale)],
     ['Uptime', uptimeFact(device)],
   ]);
 }
 
+/**
+ * The deployment that is waiting for a board, from the deployments whose record has been
+ * read. What a board says only goes as far as its last report; an offline board cannot
+ * have said anything about an offer made since.
+ */
+function openOffer(device, ctx) {
+  for (const deployment of ctx.state.deployments.value ?? []) {
+    const detail = ctx.state.deploymentDetails.get(deployment.id)?.value;
+    if (!isUnderWay(deployment) || !detail) continue;
+    const own = detail.executions.find((execution) => execution.thing === device.thing);
+    if (own?.status === 'QUEUED') return { deployment: deployment.id, version: deployment.version };
+  }
+  return null;
+}
+
+const NEVER_REPORTED = 'Has not reported to AWS IoT yet.';
+const NEVER_REPORTED_HELP = 'Power it up and check that it was provisioned.';
+
 function seenLine(device, now) {
   if (device.online) return ['Reported ', when(device.lastSeen, now)];
   if (device.lastSeen) return ['Last seen ', when(device.lastSeen, now)];
-  return 'Has not reported to AWS IoT yet. Power it up and check that it was provisioned.';
+  return NEVER_REPORTED;
 }
+
+/** The state of the fleet as a whole, at the top of the Devices page. */
+function devicesPanel(devices, ctx) {
+  const firmware = ctx.state.firmware.value;
+  const onTrial = devices.filter((device) => device.fw && !device.fw.confirmed).length;
+  const updating = devices.filter((device) => deviceActivity(device) !== null).length;
+  // The newest is marked once the releases are known.
+  const newest = firmware?.releases.find((release) => release.status === 'active') ?? null;
+  return h('section', { class: 'panel on-ink devices-panel', key: 'panel', 'aria-label': 'The fleet at a glance' },
+    h('div', { class: 'devices-figure' },
+      h('h2', { class: 'eyebrow' }, 'Fleet'),
+      fleetFigure(devices),
+      devices.length > 1 ? tileWords(devices, [['updating now', updating], ['on trial', onTrial]]) : null),
+    h('div', { class: 'devices-versions' },
+      h('h2', { class: 'eyebrow' }, 'Firmware in the fleet'),
+      versionRows(devices, newest, revokedVersions(ctx))));
+}
+
+const DEVICE_COLUMNS = ['Board', 'Status', 'Firmware', 'Update', 'Signal', 'Uptime'];
 
 export function devicesView(ctx) {
   const { state } = ctx;
@@ -999,15 +1797,23 @@ export function devicesView(ctx) {
   } else if (devices.length === 0) {
     body = card({ key: 'none' }, empty(NO_BOARDS));
   } else {
-    body = h('div', { class: 'device-grid', key: 'grid' }, devices.map((device) =>
-      h('article', { key: device.thing, class: 'card device' },
-        h('header', { class: 'device-head' },
-          h('div', null,
-            h('h2', { class: 'device-name' },
-              linkTo(deviceHref(device.thing), { class: 'mono cover-link' }, device.thing)),
-            h('p', { class: 'device-seen' }, seenLine(device, state.now))),
-          presence(device, state.now)),
-        deviceFacts(device))));
+    body = [
+      devicesPanel(devices, ctx),
+      h('div', { class: 'device-grid', key: 'grid' },
+        h('div', { class: 'device-columns', key: 'columns', 'aria-hidden': 'true' },
+          DEVICE_COLUMNS.map((name) => h('span', { key: name }, name))),
+        devices.map((device) =>
+          h('article', { key: device.thing, class: 'card device' },
+            h('header', { class: 'device-head' },
+              h('div', null,
+                h('h2', { class: 'device-name' },
+                  linkTo(deviceHref(device.thing), { class: 'mono cover-link' }, device.thing),
+                  icon('arrow-right', 'is-small')),
+                h('p', { class: 'device-seen' }, seenLine(device, state.now)),
+                device.lastSeen || device.online ? null : h('p', { class: 'device-help' }, NEVER_REPORTED_HELP)),
+              presence(device, state.now)),
+            deviceFacts(device, ctx)))),
+    ];
   }
   return h('div', { class: 'page' },
     pageHead({
@@ -1021,7 +1827,7 @@ export function devicesView(ctx) {
 
 const NOT_LOADED = Object.freeze({ value: null, error: null, loading: true, loadedAt: 0 });
 
-function historyRow(execution, now) {
+function historyRow(execution, now, last) {
   const version = execution.version ?? versionOfDeployment(execution.deployment);
   return h('li', { key: execution.deployment, class: 'row history-row' },
     h('div', { class: 'row-main' },
@@ -1030,7 +1836,51 @@ function historyRow(execution, now) {
       h('span', { class: 'row-note' },
         'Offered ', when(execution.queuedAt, now),
         isUnfinished(execution.status) ? null : [' · ended ', when(execution.lastUpdatedAt, now)])),
-    statusLine(describeStatus(execution.status)));
+    statusLine(describeHistory(execution.status, last)),
+    h('span', { class: 'row-chevron' }, icon('arrow-right')));
+}
+
+/** The entry of a board's history that the board's own last report speaks of: the one that ended last. */
+function newestEnded(executions) {
+  const ended = executions.filter((execution) => !isUnfinished(execution.status));
+  return ended.reduce((newest, execution) =>
+    (Date.parse(execution.lastUpdatedAt) > Date.parse(newest.lastUpdatedAt) ? execution : newest), ended[0] ?? null);
+}
+
+/**
+ * What matters most on a board's page, on its panel: what the board is doing, if it is
+ * doing anything, in words for across a room and with the keys while it waits for a
+ * person. Below that, what its flash holds. Nothing on it claims a report that never came.
+ */
+function boardPanel(device) {
+  const heard = device.fw || device.ota;
+  const update = describeUpdate(device);
+  const working = device.ota && device.ota.state !== 'idle';
+  return h('section', { class: 'panel on-ink board-panel', key: 'flash', 'aria-label': 'What the board reports' },
+    working
+      ? h('div', { class: `board-run board-now is-${update.tone}`, key: 'now' },
+        h('div', { class: 'board-run-head' },
+          h('div', { class: 'board-run-who' },
+            h('div', { class: 'board-run-state' },
+              h('span', { class: `status is-${update.tone}` },
+                icon(update.icon),
+                h('span', null, update.title,
+                  update.progress !== null ? h('span', { class: 'said-big' }, ` ${update.progress}%`) : null)),
+              update.text ? h('span', { class: 'board-run-note' }, prose(update.text)) : null)),
+          update.progress !== null
+            ? h('p', { class: 'board-run-figure', 'aria-hidden': 'true' },
+              String(update.progress), h('span', { class: 'execution-percent' }, '%'))
+            : null,
+          update.tone === 'act' ? buttonKeys() : null))
+      : null,
+    heard
+      ? slotsOfDevice(device)
+      : h('div', { class: 'board-silent', key: 'silent' },
+        h('p', { class: 'board-silent-title' }, icon('minus-circle'), 'Nothing reported yet'),
+        h('p', { class: 'board-silent-text' },
+          device.lastSeen
+            ? 'This board has not said what it runs, so nothing is known about its flash memory.'
+            : 'This board has not reported to AWS IoT, so nothing is known about its flash memory.')));
 }
 
 export function deviceView(ctx) {
@@ -1042,22 +1892,41 @@ export function deviceView(ctx) {
     back: { href: '#/devices', label: 'Devices' },
     eyebrow: 'Board',
     title: mono(thing),
-    lede: detail ? seenLine(detail.device, state.now) : null,
-    tools: freshness(resource, ctx),
+    lede: detail
+      ? [seenLine(detail.device, state.now), detail.device.lastSeen || detail.device.online ? null : ` ${NEVER_REPORTED_HELP}`]
+      : null,
+    tools: missing(resource) ? null : freshness(resource, ctx),
   });
-  if (!detail) {
+  if (missing(resource)) {
     return h('div', { class: 'page' },
+      head,
+      card({ key: 'none' }, empty({
+        iconName: 'chip',
+        title: 'No board with this name is registered.',
+        text: 'Check the address, or find the board in the list of devices.',
+        action: { href: '#/devices', label: 'All devices' },
+      })));
+  }
+  if (!detail) {
+    return h('div', { class: 'page is-board' },
       head, loadProblem(resource, 'this board', ctx), pending(resource, 'the board'));
   }
 
   const { device, certificates, executions } = detail;
-  return h('div', { class: 'page' },
+  const ended = newestEnded(executions);
+  // The board's own history says whether it has an update waiting, without any other list.
+  const queued = executions.find((execution) => execution.status === 'QUEUED') ?? null;
+  const offer = queued
+    ? { deployment: queued.deployment, version: queued.version ?? versionOfDeployment(queued.deployment) }
+    : openOffer(device, ctx);
+  return h('div', { class: 'page is-board' },
     head,
     loadProblem(resource, 'this board', ctx),
+    boardPanel(device),
     h('div', { class: 'split', key: 'split' },
       card({ key: 'state', title: 'State', className: 'device' },
         h('div', { class: 'device-presence' }, presence(device, state.now)),
-        deviceFacts(device)),
+        deviceFacts(device, ctx, { offer, withScale: true })),
       h('div', { class: 'stack' },
         card({ key: 'certificates', title: 'Certificates' },
           certificates.length === 0
@@ -1073,15 +1942,27 @@ export function deviceView(ctx) {
         card({ key: 'history', title: 'Update history' },
           executions.length === 0
             ? h('p', { class: 'quiet' }, 'This board has not been offered an update yet.')
-            : h('ul', { class: 'rows' }, executions.map((execution) => historyRow(execution, state.now)))))));
+            : h('ul', { class: 'rows' }, executions.map((execution) =>
+              historyRow(execution, state.now, execution === ended ? device.ota?.last ?? null : null)))))));
 }
 
 // Firmware.
+
+const CHAIN = [
+  ['key', 'Signed at build', 'With the project’s private key'],
+  ['shield', 'Checked on upload', 'By this server, with the public key'],
+  ['chip', 'Checked at boot', 'By the board’s bootloader'],
+];
 
 function trustPanel(ctx) {
   const fingerprint = ctx.state.firmware.value?.fingerprint ?? '';
   return h('div', { class: 'trust' },
     h('h2', { class: 'trust-title' }, icon('shield'), 'The server verifies every upload'),
+    h('ol', { class: 'chain', key: 'chain' }, CHAIN.map(([iconName, title, text]) =>
+      h('li', { key: title, class: 'chain-link' },
+        h('span', { class: 'chain-mark' }, icon(iconName)),
+        h('span', { class: 'chain-title' }, title),
+        h('span', { class: 'chain-text' }, text)))),
     h('p', null,
       'An image is stored only if its ECDSA P-256 signature checks out against this project’s ',
       'signing key. The board’s bootloader checks the same signature again before it starts the image.'),
@@ -1117,11 +1998,13 @@ function dropZone(ctx) {
     },
   }),
   h('span', { class: 'drop-icon' }, icon('upload')),
-  h('span', { class: 'drop-title' }, 'Drop ', mono('zephyr.signed.bin'), ' here'),
+  h('span', { class: 'drop-title' }, 'Drop ', mono('latest.signed.bin'), ' here'),
   h('span', { class: 'drop-or' }, 'or ', h('span', { class: 'drop-pick' }, 'choose a file')),
   h('span', { class: 'drop-note' },
     slot ? `A signed MCUboot image, up to ${fileSize(slot)}. ` : 'A signed MCUboot image. ',
-    'Nothing is sent until you have checked what the file contains.'));
+    'Nothing is sent until you have checked what the file contains.'),
+  h('span', { class: 'drop-note drop-where' },
+    'Each build leaves its signed image in ', mono('binaries/latest.signed.bin'), ' in your checkout. Git does not track that folder.'));
 }
 
 /** Enter in a field neither submits a dialog nor starts a new line in a one-line text. */
@@ -1163,24 +2046,189 @@ function sessionEnding(ctx) {
       }));
 }
 
+/** False once the release that was just uploaded has been revoked, here or elsewhere. */
+function stillRegistered(ctx) {
+  const { version } = ctx.state.upload.release;
+  const known = ctx.state.firmware.value?.releases.find((release) => release.version === version);
+  return !known || known.status === 'active';
+}
+
+/**
+ * The server looked at this file and said no, and the file is what it said no to. It says
+ * so before it has stored anything: a refusal of the file itself is final. A 401 or a 403
+ * refuses the account, and whatever else comes back may be tried again.
+ */
+function refusedForGood(upload) {
+  return upload.stage === 'refused' && !canRetryUpload(upload.error) &&
+    upload.error.status !== 401 && upload.error.status !== 403;
+}
+
+/** The newest deployment of the release that was just uploaded, once there is one. */
+function deployedAlready(ctx) {
+  const { version } = ctx.state.upload.release;
+  return (ctx.state.deployments.value ?? []).find((deployment) => deployment.version === version) ?? null;
+}
+
+/** A size in bytes, and in larger units where that says something else. */
+function sizeWords(bytes) {
+  const short = fileSize(bytes);
+  return short === exactBytes(bytes) ? short : `${exactBytes(bytes)} (${short})`;
+}
+
+/**
+ * Where a file stands on its way to the boards. The strip above the panel: a word and a
+ * mark for each stage, so that it reads without its colours.
+ */
+function uploadStages(ctx) {
+  const { upload } = ctx.state;
+  const finished = upload.stage === 'done' && stillRegistered(ctx);
+  const review = upload.stage === 'ready' ? reviewImage(upload, ctx.state.firmware.value) : null;
+  const unusable = Boolean(review?.blocked || review?.doomed);
+  const sentOff = ['sending', 'checking', 'refused'].includes(upload.stage) || finished;
+
+  // Finished steps stay in ink. Green is for the one result that was proved here.
+  const choose = sentOff
+    ? { state: 'done', word: 'done' }
+    : { state: unusable ? 'failed' : 'act', word: unusable ? 'cannot be used' : 'your turn' };
+  let verify = { state: 'ahead', word: 'not started' };
+  if (upload.stage === 'sending') verify = { state: 'live', word: 'uploading' };
+  else if (upload.stage === 'checking') verify = { state: 'live', word: 'the server is verifying' };
+  else if (finished) verify = { state: 'good', word: 'signature valid' };
+  else if (refusedForGood(upload)) verify = { state: 'failed', word: 'refused, nothing stored' };
+  else if (upload.stage === 'refused') verify = { state: 'failed', word: 'not finished' };
+  let deploy = finished ? { state: 'act', word: 'your turn' } : { state: 'ahead', word: 'not started' };
+  if (finished && deployedAlready(ctx)) deploy = { state: 'done', word: 'started' };
+
+  const marks = { done: 'check', good: 'check', failed: 'x' };
+  const stages = [
+    ['Choose a signed image', choose], ['The server verifies it', verify], ['Deploy it to boards', deploy],
+  ];
+  return h('ol', { class: 'upload-stages', 'aria-label': 'From a file to the boards' },
+    stages.map(([label, { state, word }], index) => h('li', {
+      key: label,
+      class: `upload-stage is-${state}`,
+      'aria-current': state === 'act' || state === 'live' ? 'step' : null,
+    },
+    // The words say the same: read out, the mark would run into the name of the stage.
+    h('span', { class: 'upload-stage-mark', 'aria-hidden': 'true' }, marks[state] ? icon(marks[state]) : String(index + 1)),
+    h('span', { class: 'upload-stage-words' },
+      h('span', { class: 'upload-stage-label' }, label),
+      h('span', { class: 'sr-only' }, ': '),
+      h('span', { class: 'upload-stage-word' }, word)))));
+}
+
+/**
+ * What the server answered to an upload that it accepted. Every value is from its reply:
+ * it answers like this only when every check in IMAGE_CHECKS has passed.
+ */
+function verifiedResult(ctx) {
+  const { release } = ctx.state.upload;
+  const { actions } = ctx;
+  const fingerprint = ctx.state.firmware.value?.fingerprint ?? '';
+  const sizes = release.size === null
+    ? null
+    : ['Size', sizeWords(release.size),
+      release.headerSize === null || release.payloadSize === null
+        ? null
+        : factNote(`${exactBytes(release.headerSize)} of header, ${exactBytes(release.payloadSize)} of firmware, then the signature.`)];
+  const deployed = deployedAlready(ctx);
+  return h('div', { class: 'upload-state is-verified' },
+    h('p', { class: 'verified-title' }, icon('shield'), 'Verified by the server'),
+    h('p', { class: 'upload-title is-good' }, icon('check-circle'), 'Registered as ', mono(release.version)),
+    h('p', { class: 'verified-text' }, deployed
+      ? 'The signature is valid and the image is stored. A deployment of it has been started.'
+      : 'The signature is valid and the image is stored. It can now be offered to boards.'),
+    h('div', { class: 'button-row' },
+      deployed
+        ? h('a', { class: 'btn is-primary is-large', href: deploymentHref(deployed.id) }, 'Open its deployment', icon('arrow-right'))
+        : button('is-primary is-large', () => actions.openDeploy(release.version), icon('send'), 'Deploy this release'),
+      deployed ? button('', () => actions.openDeploy(release.version), icon('send'), 'Deploy it again') : null,
+      button('', actions.resetUpload, 'Upload another')),
+    facts([
+      ['Signature', h('span', { class: 'status is-good' }, icon('check-circle'), h('span', null, 'ECDSA P-256, valid'))],
+      release.keyHash
+        ? ['Signing key', mono(release.keyHash, 'digest'),
+          factNote(release.keyHash === fingerprint
+            ? 'The fingerprint of this project’s signing key.'
+            : 'The fingerprint of the key that signed it.')]
+        : null,
+      ['Version', mono(release.version, 'fact-strong'), factNote('Read from the signed header of the image.')],
+      sizes,
+      release.sha256 ? ['SHA-256', mono(release.sha256, 'digest')] : null,
+      release.loadAddress === null ? null : ['Load address', mono(`0x${release.loadAddress.toString(16)}`)],
+    ]));
+}
+
+/**
+ * The proof next to the verdict, on the first screen, where the explanation of what the
+ * server would check stood before there was a result. The first release has nothing
+ * before it to be newer than.
+ */
+function verifiedProof(ctx) {
+  const { version } = ctx.state.upload.release;
+  const releases = ctx.state.firmware.value?.releases ?? [];
+  const first = releases.length > 0 && releases.every((release) => release.version === version);
+  return h('div', { class: 'trust verified-checks', key: 'proof' },
+    h('h3', { class: 'trust-title' }, icon('shield'), 'What the server checked'),
+    h('ul', { class: 'checks' }, IMAGE_CHECKS.map(({ passed, passedFirst }) => {
+      const words = first && passedFirst ? passedFirst : passed;
+      return h('li', { key: passed, class: 'check is-good' }, icon(CHECK_ICONS.good), h('span', null, words));
+    })),
+    h('p', { class: 'verified-after' }, 'The board’s bootloader checks the same signature again before it starts the image.'));
+}
+
+/**
+ * What the upload panel has to say to a screen reader. The panel changes as a whole from
+ * one stage to the next, so its words go through a line that is always there: text that
+ * appears together with its live region is not reliably read out. A refusal has a role
+ * of its own in the notice that says it.
+ */
+function uploadSummary(ctx) {
+  const { upload } = ctx.state;
+  switch (upload.stage) {
+    case 'reading':
+      return `Reading ${upload.name}.`;
+    case 'ready': {
+      const review = reviewImage(upload, ctx.state.firmware.value);
+      const version = upload.header.ok ? ` Version ${upload.header.version}.` : '';
+      return `${upload.name}.${version} ${review.notes.map((note) => note.text).join(' ')}`;
+    }
+    case 'sending':
+      return 'Uploading.';
+    case 'checking':
+      return 'Uploaded. The server is verifying the signature.';
+    case 'done':
+      return stillRegistered(ctx)
+        ? `Registered as ${upload.release.version}. The signature is valid and the image is stored.`
+        : '';
+    case 'refused':
+      return refusedForGood(upload) ? 'Nothing was stored.' : '';
+    default:
+      return '';
+  }
+}
+
+/** Which of the server's checks an image failed, in words, and what that leaves behind. */
+function refusalFacts(error) {
+  const check = failedCheck(error.code);
+  return h('p', { class: 'notice-more upload-refusal' },
+    check ? ['Check that failed: ', h('strong', null, check), '. '] : null,
+    'Nothing was stored.');
+}
+
 function uploadPanel(ctx) {
   const { upload } = ctx.state;
   const { actions } = ctx;
 
   if (upload.stage === 'idle') return dropZone(ctx);
   if (upload.stage === 'reading') {
-    return h('div', { class: 'upload-state', role: 'status' },
+    return h('div', { class: 'upload-state' },
       h('p', { class: 'upload-title' }, icon('file'), mono(upload.name)),
       h('p', { class: 'quiet' }, 'Reading the file…'));
   }
   if (upload.stage === 'done') {
-    const { version } = upload.release;
-    return h('div', { class: 'upload-state', role: 'status' },
-      h('p', { class: 'upload-title is-good' }, icon('check-circle'), 'Registered as ', mono(version)),
-      h('p', null, 'The signature is valid and the image is stored. It can now be offered to boards.'),
-      h('div', { class: 'button-row' },
-        button('is-primary', () => actions.openDeploy(version), icon('send'), 'Deploy this release'),
-        button('', actions.resetUpload, 'Upload another')));
+    // Revoked since: there is nothing left to offer, and the panel is ready for the next file.
+    return stillRegistered(ctx) ? verifiedResult(ctx) : dropZone(ctx);
   }
 
   const review = reviewImage(upload, ctx.state.firmware.value);
@@ -1189,25 +2237,31 @@ function uploadPanel(ctx) {
   // A refusal of the file itself is final: sending the same bytes again cannot end
   // differently, so the way on is another file. A request that failed can be repeated.
   const final = refused && !canRetryUpload(upload.error);
-  // What a 401 or a 403 refuses is the account, not the file.
-  const ofImage = final && upload.error.status !== 401 && upload.error.status !== 403;
+  const ofImage = refusedForGood(upload);
   const percent = Math.round((upload.sent ?? 0) * 100);
   const { header } = upload;
-  // Once the server has answered, its answer says what there is to say about the signature.
-  const checks = review.blocked || refused ? review.notes : [...review.notes, SIGNATURE_UNCHECKED];
+  // What is certain to be refused is not going to be sent, so nothing will check its signature.
+  const doomed = review.doomed && !refused;
+  // Once the server has refused the file, what was expected of it has no more to say.
+  // Before that the list says what is known; the server's answer says the rest.
+  let checks = [...review.notes, SIGNATURE_UNCHECKED];
+  if (final) checks = [];
+  // On its way, the line below says what is being done about the signature.
+  else if (review.blocked || refused || doomed || busy) checks = review.notes;
+  const ended = ctx.state.sessionLeft <= 0;
 
   let next = null;
   if (upload.stage === 'sending') {
-    // The figure is for the eye. The progress bar carries it for a screen reader,
-    // which would otherwise read out every change of this line.
-    next = h('div', { class: 'upload-progress', role: 'status' },
+    // The figure is for the eye. The progress bar carries it for a screen reader, and
+    // uploadSummary() says what is going on once.
+    next = h('div', { class: 'upload-progress' },
       h('p', null, 'Uploading…', h('span', { 'aria-hidden': 'true' }, ` ${percent}%`)),
       meter(percent, 'Upload'));
   } else if (upload.stage === 'checking') {
-    next = h('div', { class: 'upload-progress', role: 'status' },
-      h('p', null, 'Uploaded. The server is checking the signature…'),
+    next = h('div', { class: 'upload-progress' },
+      h('p', { class: 'upload-verifying' }, 'Uploaded. The server is verifying the signature…'),
       h('div', { class: 'meter is-busy' }, h('span', { class: 'meter-fill' })));
-  } else if (final) {
+  } else if (final || doomed) {
     next = h('div', { class: 'button-row', key: 'another' },
       button('is-primary', actions.resetUpload, icon('file'), 'Choose another file'));
   } else if (!review.blocked) {
@@ -1224,31 +2278,37 @@ function uploadPanel(ctx) {
         }),
         h('span', { class: 'field-hint' }, 'What changed in this build. Shown next to the release.')),
       sessionEnding(ctx),
-      h('div', { class: 'button-row', key: 'send' },
-        button('is-primary', actions.startUpload,
-          icon('upload'), refused ? 'Try again' : 'Upload for verification')),
+      // With the session over, the notice above has the one thing that can be done.
+      ended
+        ? null
+        : h('div', { class: 'button-row', key: 'send' },
+          button('is-primary', actions.startUpload,
+            icon('upload'), refused ? 'Try again' : 'Upload for verification')),
     ];
   }
 
   return h('div', { class: 'upload-state' },
     h('div', { class: 'upload-file' },
       h('p', { class: 'upload-title' }, icon('file'), mono(upload.name)),
-      busy || final ? null : button('is-small', actions.resetUpload, 'Choose another file')),
+      busy || final || doomed ? null : button('is-small', actions.resetUpload, 'Choose another file')),
     header.ok
       ? facts([
         ['Version', mono(header.version, 'fact-strong')],
-        ['Size', `${exactBytes(upload.size)} (${fileSize(upload.size)})`],
+        ['Size', sizeWords(upload.size)],
         ['SHA-256', mono(upload.digest, 'digest')],
         ['Layout',
           `${exactBytes(header.headerSize)} of header, ${exactBytes(header.payloadSize)} of firmware`],
         upload.recordedAs !== upload.name ? ['Recorded as', mono(upload.recordedAs)] : null,
       ])
       : null,
-    h('ul', { class: 'checks' }, checks.map((note) =>
-      h('li', { key: note.text, class: `check is-${note.tone}` },
-        icon(CHECK_ICONS[note.tone]), h('span', null, note.text)))),
+    checks.length > 0
+      ? h('ul', { class: 'checks', key: 'checks' }, checks.map((note) =>
+        h('li', { key: note.text, class: `check is-${note.tone}` },
+          icon(CHECK_ICONS[note.tone]), h('span', null, prose(note.text)))))
+      : null,
     refused
-      ? failure(ofImage ? 'The server refused this image.' : 'The image was not stored.', upload.error)
+      ? failure(ofImage ? 'The server refused this image.' : 'The image was not stored.', upload.error,
+        ofImage ? refusalFacts(upload.error) : null, actions.signInAgain)
       : null,
     next);
 }
@@ -1263,7 +2323,7 @@ function releaseDetails(release, fingerprint) {
     `${exactBytes(release.payloadSize)} of firmware, then the signature`;
   const { revoked } = release;
   return h('details', { class: 'more' },
-    h('summary', null, 'Details'),
+    h('summary', null, 'Details', h('span', { class: 'sr-only' }, ` of ${release.version}`)),
     facts([
       ['File', mono(release.filename)],
       ['Size', sizes],
@@ -1284,6 +2344,82 @@ function releaseDetails(release, fingerprint) {
     ]));
 }
 
+/** How much of a board's update slot an image takes. */
+function slotFit(release, slot) {
+  if (!slot) return null;
+  const percent = (release.size / slot) * 100;
+  const told = percent < 1 ? 'under 1%' : `${Math.round(percent)}%`;
+  return h('div', { class: 'slot-fit' },
+    h('span', {
+      class: 'slot-fit-bar',
+      'aria-hidden': 'true',
+      vars: { '--fit': `${Math.min(100, percent).toFixed(2)}%` },
+    }, h('span', { class: 'slot-fit-fill' })),
+    h('span', { class: 'slot-fit-words' }, `Takes ${told} of the ${fileSize(slot)} update slot`));
+}
+
+// The most releases the timeline shows; the list under it has them all.
+const TIMELINE_RELEASES = 6;
+
+/**
+ * The releases in the order they were uploaded, evenly spaced, with the time between
+ * them written on the line. On a true time axis two uploads an hour apart would land
+ * on top of each other next to one from last month.
+ */
+function releaseTimeline(firmware, devices, now, onInk) {
+  const { releases } = firmware;
+  const newest = releases.find((release) => release.status === 'active') ?? null;
+  const shown = releases.slice(0, TIMELINE_RELEASES).reverse();
+  const earlier = releases.length - shown.length;
+  const revoked = releases.filter((release) => release.status !== 'active').length;
+  const counted = new Map();
+  for (const device of devices ?? []) {
+    if (device.fw) counted.set(device.fw.version, (counted.get(device.fw.version) ?? 0) + 1);
+  }
+  const gap = (from, to) => {
+    const seconds = (to - Date.parse(from)) / 1000;
+    return Number.isFinite(seconds) && seconds >= 0 ? duration(seconds) : '';
+  };
+
+  return h('section', { class: `timeline-panel ${onInk ? 'panel on-ink' : 'is-on-paper'}`, key: 'timeline' },
+    h('div', { class: 'timeline-head' },
+      h('h2', { class: onInk ? 'eyebrow' : 'section-title timeline-title' }, 'Release timeline'),
+      h('p', { class: 'timeline-count dotted' },
+        h('span', null, plural(releases.length, 'release')),
+        revoked > 0 ? h('span', null, `${revoked} revoked`) : null,
+        earlier > 0 ? h('span', null, `the newest ${shown.length} shown`) : null)),
+    h('ol', { class: 'timeline', vars: { '--stations': String(shown.length) } },
+      shown.map((release, index) => {
+        const next = shown[index + 1];
+        const isNewest = release === newest;
+        const active = release.status === 'active';
+        let state = 'is-active';
+        if (isNewest) state = 'is-newest';
+        else if (!active) state = 'is-revoked';
+        let word = 'Active';
+        if (isNewest) word = 'Newest release';
+        else if (!active) word = 'Revoked';
+        const boards = counted.get(release.version) ?? 0;
+        return h('li', { key: release.version, class: `station ${state}` },
+          h('span', { class: 'station-mark' }, active ? null : icon('x')),
+          h('span', { class: 'station-version mono' }, release.version),
+          h('span', { class: 'station-state' }, word),
+          h('span', { class: 'station-when' }, when(release.uploadedAt, now)),
+          devices && boards > 0
+            ? h('span', { class: 'station-boards' }, `${plural(boards, 'board')} on it`)
+            : null,
+          h('span', {
+            class: 'station-gap',
+            title: next ? 'Time until the next upload' : 'Time since this upload',
+          },
+          h('span', { class: 'sr-only' }, next ? 'Next upload after ' : 'That was '),
+          next ? gap(release.uploadedAt, Date.parse(next.uploadedAt)) : gap(release.uploadedAt, now),
+          next ? null : h('span', { class: 'sr-only' }, ' ago')));
+      }),
+      h('li', { key: 'now', class: 'station is-now', 'aria-hidden': 'true' },
+        h('span', { class: 'station-mark' }), h('span', { class: 'station-state' }, 'Now'))));
+}
+
 function releaseRow(release, ctx) {
   const { now, me } = ctx.state;
   const { actions } = ctx;
@@ -1292,9 +2428,20 @@ function releaseRow(release, ctx) {
 
   let controls = null;
   if (me.canWrite && active) {
+    // Every row has the same two buttons. Their names say which release they act on.
     controls = [
-      button('is-small', () => actions.openDeploy(release.version), icon('send'), 'Deploy'),
-      button('is-small is-danger-quiet', () => actions.openRevoke(release), icon('ban'), 'Revoke'),
+      h('button', {
+        type: 'button',
+        class: 'btn is-small',
+        'aria-label': `Deploy ${release.version}`,
+        onClick: () => actions.openDeploy(release.version),
+      }, icon('send'), 'Deploy'),
+      h('button', {
+        type: 'button',
+        class: 'btn is-small is-danger-quiet',
+        'aria-label': `Revoke ${release.version}`,
+        onClick: () => actions.openRevoke(release),
+      }, icon('ban'), 'Revoke'),
     ];
   } else if (me.canWrite && revocation === 'incomplete') {
     controls = button('is-small is-primary', () => actions.openRevoke(release),
@@ -1307,30 +2454,35 @@ function releaseRow(release, ctx) {
 
   return h('li', { key: release.version, class: `row release ${active ? '' : 'is-revoked'}`.trim() },
     h('div', { class: 'release-main' },
-      h('div', { class: 'release-title' },
-        mono(release.version, 'release-version'),
-        releaseBadge(release)),
-      release.notes ? h('p', { class: 'release-notes' }, release.notes) : null,
-      release.revoked
-        ? h('p', { class: 'release-revoked' }, icon('ban', 'is-small'),
-          h('span', null,
-            'Revoked ', when(release.revoked.at, now), ' by ', who(release.revoked.by), ': ',
-            release.revoked.reason))
-        : null,
-      revocation === 'incomplete'
-        ? h('p', { class: 'release-revoked is-open' }, icon('alert', 'is-small'),
-          h('span', null,
-            REVOCATION_OPEN, ' Until it has, a board may still be able to download or install it. ',
-            me.canWrite ? 'Finish revoking to make sure.' : 'A release manager can finish revoking.'))
-        : null,
-      h('p', { class: 'row-note dotted' },
-        h('span', null, fileSize(release.size)),
-        h('span', null, 'Uploaded ', when(release.uploadedAt, now), ' by ', who(release.uploadedBy)),
-        h('span', { class: 'digest-row' },
+      h('div', { class: 'release-story' },
+        h('div', { class: 'release-title' },
+          mono(release.version, 'release-version'),
+          releaseBadge(release)),
+        release.notes ? h('p', { class: 'release-notes' }, release.notes) : null,
+        release.revoked
+          ? h('p', { class: 'release-revoked' }, icon('ban', 'is-small'),
+            h('span', null,
+              'Revoked ', when(release.revoked.at, now), ' by ', who(release.revoked.by), ': ',
+              release.revoked.reason))
+          : null,
+        revocation === 'incomplete'
+          ? h('p', { class: 'release-revoked is-open' }, icon('alert', 'is-small'),
+            h('span', null,
+              REVOCATION_OPEN, ' Until it has, a board may still be able to download or install it. ',
+              me.canWrite ? 'Finish revoking to make sure.' : 'A release manager can finish revoking.'))
+          : null),
+      h('div', { class: 'release-numbers' },
+        slotFit(release, ctx.state.firmware.value.slotSize),
+        h('p', { class: 'row-note dotted' },
+          h('span', null, fileSize(release.size)),
+          h('span', null, 'Uploaded ', when(release.uploadedAt, now), ' by ', who(release.uploadedBy))),
+        h('p', { class: 'row-note digest-row' },
           'SHA-256 ', mono(`${release.sha256.slice(0, 16)}…`),
-          copyButton(release.sha256, `the SHA-256 of ${release.version}`, ctx))),
-      releaseDetails(release, ctx.state.firmware.value.fingerprint)),
-    controls ? h('div', { class: 'release-actions' }, controls) : null);
+          copyButton(release.sha256, `the SHA-256 of ${release.version}`, ctx)))),
+    controls ? h('div', { class: 'release-actions' }, controls) : null,
+    // Across the whole row, below the buttons, so that the tables of all releases are
+    // equally wide and the keyboard goes through the row from top to bottom.
+    releaseDetails(release, ctx.state.firmware.value.fingerprint));
 }
 
 export function firmwareView(ctx) {
@@ -1345,14 +2497,16 @@ export function firmwareView(ctx) {
       iconName: 'package',
       title: 'No firmware has been uploaded yet.',
       text: canWrite
-        ? 'Build the firmware, then drop build/app/zephyr/zephyr.signed.bin above to register ' +
-          'the first release.'
+        ? prose('Build the firmware, then upload binaries/latest.signed.bin to register the first release.')
         : 'A release manager can upload the first signed image.',
     }));
   } else {
     releases = card({ key: 'releases', className: 'is-flush' },
       h('ul', { class: 'rows' }, firmware.releases.map((release) => releaseRow(release, ctx))));
   }
+  const timeline = firmware && firmware.releases.length > 0
+    ? releaseTimeline(firmware, state.devices.value?.devices ?? null, state.now, !canWrite)
+    : null;
   return h('div', { class: 'page' },
     pageHead({
       title: 'Firmware',
@@ -1360,26 +2514,51 @@ export function firmwareView(ctx) {
       tools: freshness(state.firmware, ctx),
     }),
     loadProblem(state.firmware, 'the releases', ctx),
-    h('section', { class: `card upload ${canWrite ? '' : 'is-readonly'}`.trim(), key: 'upload' },
-      canWrite
-        ? h('div', { class: 'upload-main' },
-          h('h2', { class: 'eyebrow' }, 'Upload a signed image'), uploadPanel(ctx))
-        : null,
-      trustPanel(ctx)),
+    // The one ink panel of the page holds what the reader is here to do: a release manager
+    // takes a file from the desk to the boards. A viewer has the releases to read.
+    canWrite
+      ? h('section', { class: 'upload panel on-ink', key: 'upload' },
+        h('div', { class: 'upload-main', tabindex: '-1', 'data-focus-home': '' },
+          h('h2', { class: 'eyebrow' }, 'Upload, verify, deploy'),
+          h('p', { class: 'sr-only', role: 'status' }, uploadSummary(ctx)),
+          uploadStages(ctx),
+          uploadPanel(ctx)),
+        state.upload.stage === 'done' && stillRegistered(ctx) ? verifiedProof(ctx) : trustPanel(ctx))
+      : null,
+    timeline,
+    canWrite ? null : h('section', { class: 'card upload is-readonly', key: 'upload' }, trustPanel(ctx)),
     h('h2', { class: 'section-title', key: 'title' }, 'Releases'),
     releases);
 }
 
 // Deployments.
 
-function countList(counts) {
-  return h('ul', { class: 'counts' }, describeCounts(counts).map((entry) =>
+function countList(counts, atButton, percent = null) {
+  return h('ul', { class: 'counts' }, describeCounts(counts, atButton).map((entry) =>
     h('li', { key: entry.name, class: `status is-${entry.tone}` },
-      icon(entry.icon), h('span', null, `${entry.count} ${entry.label}`))));
+      icon(entry.icon), h('span', null, `${entry.count} ${entry.label}`,
+        percent !== null && entry.name === 'inProgress' ? h('span', { class: 'status-value' }, ` · ${percent}%`) : null))));
 }
 
-function deploymentRow(deployment, now) {
+/** The boards that wait for a person, among those of these deployments. */
+function waitingForButton(devices, ids) {
+  return devices.filter((device) => device.online && device.ota?.state === 'awaiting_user' && ids.has(device.ota.job)).length;
+}
+
+/** How far the download is, where one board is downloading and so one number can say it. */
+function onePercent(devices, ids, updating) {
+  const moving = devices.filter((device) => device.online && device.ota?.state === 'downloading' &&
+    ids.has(device.ota.job) && Number.isFinite(device.ota.progress));
+  return updating === 1 && moving.length === 1 ? moving[0].ota.progress : null;
+}
+
+function deploymentRow(deployment, ctx) {
+  const now = ctx.state.now;
   const summary = describeDeployment(deployment);
+  // Whether a waiting board needs a person, and how far one is, is in what the boards say.
+  const devices = ctx.state.devices.value?.devices ?? [];
+  const own = new Set([deployment.id]);
+  const atButton = waitingForButton(devices, own);
   return h('li', { key: deployment.id, class: 'row deployment-row' },
     h('div', { class: 'row-main' },
       h('div', { class: 'release-title' },
@@ -1390,8 +2569,49 @@ function deploymentRow(deployment, now) {
       h('p', { class: 'row-note dotted' },
         h('span', null, startedBy(deployment, now)),
         h('span', null, plural(deployment.things.length, 'board')))),
-    countList(deployment.counts),
+    h('div', { class: 'row-outcome' },
+      // One board is not a share of anything: a full bar would read as a finished one.
+      deployment.things.length > 1
+        ? segments(countParts(deployment.counts, atButton), `Boards: ${countWords(deployment.counts, atButton)}.`, { thin: true })
+        : null,
+      countList(deployment.counts, atButton, onePercent(devices, own, deployment.counts.inProgress))),
     h('span', { class: 'row-chevron' }, icon('arrow-right')));
+}
+
+/** Every board of every deployment, by how it went, at the top of the Deployments page. */
+function deploymentsPanel(deployments, ctx) {
+  const total = {};
+  for (const { counts } of deployments) {
+    for (const [name, count] of Object.entries(counts)) total[name] = (total[name] ?? 0) + count;
+  }
+  const devices = ctx.state.devices.value?.devices ?? [];
+  const ids = new Set(deployments.map((deployment) => deployment.id));
+  const atButton = waitingForButton(devices, ids);
+  const parts = countParts(total, atButton);
+  const boards = parts.reduce((sum, part) => sum + part.amount, 0);
+  const underWay = deployments.filter(isUnderWay).length;
+  const percent = onePercent(devices, ids, total.inProgress);
+  return h('section', { class: 'panel on-ink deployments-panel', key: 'panel', 'aria-label': 'All deployments at a glance' },
+    stats([
+      ['Deployments', deployments.length],
+      ['Under way', underWay],
+    ]),
+    h('div', { class: 'outcomes' },
+      h('p', { class: 'eyebrow' }, 'Where each board’s update stands'),
+      boards > 0
+        ? [
+          // One update is not a share of anything: the words below it say all there is.
+          boards > 1
+            ? h('div', { key: 'bar' }, segments(parts, `${plural(boards, 'board update')}: ${countWords(total, atButton)}.`))
+            : null,
+          h('ul', { class: 'legend', key: 'legend' }, describeCounts(total, atButton).map((entry) =>
+            h('li', { key: entry.name, class: 'legend-item' },
+              boards > 1 ? h('span', { class: `swatch is-${entry.tone}` }) : null,
+              icon(entry.icon, 'is-small'),
+              h('span', null, boards > 1 ? entry.label : `${entry.count} ${entry.label}`,
+                percent !== null && entry.name === 'inProgress' ? ` · ${percent}%` : null)))),
+        ]
+        : h('p', { class: 'quiet', key: 'none' }, 'AWS IoT has not listed any board for these deployments yet.')));
 }
 
 export function deploymentsView(ctx) {
@@ -1414,8 +2634,11 @@ export function deploymentsView(ctx) {
     }
     body = card({ key: 'none' }, empty({ iconName: 'send', title: 'No deployments yet.', text }));
   } else {
-    body = card({ key: 'list', className: 'is-flush' },
-      h('ul', { class: 'rows' }, deployments.map((deployment) => deploymentRow(deployment, state.now))));
+    body = [
+      deploymentsPanel(deployments, ctx),
+      card({ key: 'list', className: 'is-flush' },
+        h('ul', { class: 'rows' }, deployments.map((deployment) => deploymentRow(deployment, ctx)))),
+    ];
   }
 
   // With no release that can be deployed, the way on is the Firmware page: a button
@@ -1437,17 +2660,67 @@ export function deploymentsView(ctx) {
     body);
 }
 
+function executionPresence(execution, known, unread) {
+  // Cancelled after it started: a board in the middle of a restart still counts as online
+  // for a while, and only the board list tells. Until that has been read, nothing is said.
+  if (unread && execution.status === 'CANCELED' && execution.startedAt) return badge('idle', 'clock', 'Not known yet');
+  // While the update runs its phase says so. Once it was cancelled the phase no longer
+  // does, and what the board itself last said still counts.
+  const restarting = execution.phase === 'rebooting' || (known && isRestarting(known));
+  if (execution.online && restarting) return badge('idle', 'restart', 'Restarting');
+  if (execution.online) return badge('good', 'online', 'Online');
+  if (known && !known.lastSeen) return badge('idle', 'minus-circle', 'Never connected');
+  return badge('idle', 'offline', 'Offline');
+}
+
+// With several boards, only one that is moving, waiting for a person or stopped keeps the
+// whole panel; the others take a line, in the same order, so that nothing jumps.
+const MOST_FULL_PANELS = 3;
+const FULL_TONES = new Set(['act', 'live', 'bad']);
+
+/**
+ * What a board's history says about a deployment that it is part of: see describeExecution.
+ * A copy read before the board got to what it runs now says nothing about how it got
+ * there, so it does not count as an answer: not yet read, as far as this goes.
+ */
+function historyOf(execution, ctx) {
+  const detail = ctx.state.deviceDetails.get(execution.thing)?.value ?? null;
+  if (detail === null || detail.device.fw?.version !== execution.running) return null;
+  return detail.executions;
+}
+
+/** The boards of a deployment whose own list of updates is needed to say how it ended, and cannot be read. */
+function unreadHistories(deployment, ctx) {
+  return deployment.executions
+    .filter((execution) => execution.status === 'CANCELED' && execution.running === deployment.version &&
+      historyOf(execution, ctx) === null)
+    .map((execution) => ctx.state.deviceDetails.get(execution.thing))
+    .filter((resource) => resource?.error);
+}
+
 /** One board's part in a deployment: what it is doing, in words and as steps. */
-function executionCard(execution, ctx) {
+function executionCard(execution, deployment, ctx, boards = 1) {
   const { now } = ctx.state;
-  const description = describeExecution(execution);
   const known = (ctx.state.devices.value?.devices ?? []).find((device) => device.thing === execution.thing);
+  const unread = ctx.state.devices.value === null;
+  const description = describeExecution(execution, {
+    board: known ?? null, deployment: deployment.id, version: deployment.version, history: historyOf(execution, ctx), unread,
+  });
+  const target = deployment.version ?? versionOfDeployment(deployment.id);
   const finished = !isUnfinished(execution.status);
+  const compact = boards > 1 && (boards > MOST_FULL_PANELS || !FULL_TONES.has(description.tone));
+  // What to do about an update that ended short: to offer it again, the release has to
+  // be there still and the reader has to be able to deploy.
+  const offerable = !revokedVersions(ctx).has(deployment.version);
+  // Every one of these asks for something only a release manager can do.
+  const next = description.next && ctx.state.me.canWrite && (offerable || !description.retry) ? description.next : null;
   const moments = [
-    execution.queuedAt ? ['Offered ', when(execution.queuedAt, now)] : null,
-    execution.startedAt ? ['Started ', when(execution.startedAt, now)] : null,
-    execution.startedAt && execution.lastUpdatedAt
-      ? ['Last report ', when(execution.lastUpdatedAt, now)]
+    execution.queuedAt ? ['Offered ', whenAt(execution.queuedAt, now)] : null,
+    execution.startedAt ? ['Started ', whenAt(execution.startedAt, now)] : null,
+    // AWS's record of an execution does not move with the download, so while the board
+    // is at work this would claim that the board had gone quiet.
+    finished && description.tone !== 'live' && execution.lastUpdatedAt
+      ? ['Ended ', whenAt(execution.lastUpdatedAt, now)]
       : null,
     execution.status === 'IN_PROGRESS' && execution.secondsLeft !== null
       ? `Times out in ${duration(execution.secondsLeft)}`
@@ -1456,30 +2729,93 @@ function executionCard(execution, ctx) {
     finished && !execution.running && known?.fw ? ['Board now reports ', mono(known.fw.version)] : null,
     !execution.online && known?.lastSeen ? ['Board last seen ', when(known.lastSeen, now)] : null,
   ].filter(Boolean);
+  const flash = compact ? null : slotsOfExecution(execution, known, target, description, deployment.id);
 
-  return h('article', { key: execution.thing, class: `card execution is-${description.tone}` },
+  return h('article', {
+    key: execution.thing,
+    class: `card execution is-${description.tone}${compact ? ' is-compact' : ''}`,
+  },
     h('header', { class: 'execution-head' },
       h('h2', { class: 'execution-name' },
         linkTo(deviceHref(execution.thing), { class: 'mono' }, execution.thing)),
-      execution.online ? badge('good', 'online', 'Online') : badge('idle', 'offline', 'Offline')),
+      executionPresence(execution, known, unread)),
     h('div', { class: 'execution-state' },
-      h('p', { class: `execution-title status is-${description.tone}`, role: 'status' },
-        icon(description.icon), h('span', null, description.title)),
-      h('p', { class: 'execution-text' }, description.text),
-      description.code
-        ? h('p', { class: 'execution-code' }, 'The board gave the reason ', mono(description.code))
-        : null,
-      execution.detail
-        ? h('p', { class: 'execution-code' }, 'Board’s note: ', mono(execution.detail))
-        : null,
+      h('div', { class: 'execution-words' },
+        h('p', { class: `execution-title status is-${description.tone}` },
+          icon(description.icon),
+          // The figure is for the eye, and outside the live region. The progress bar carries
+          // it for a screen reader, which would otherwise read out every change of this line.
+          h('span', null,
+            h('span', { role: 'status' }, description.said ?? description.title),
+            description.progress !== null
+              ? h('span', { class: 'said-big', 'aria-hidden': 'true' }, ` ${description.progress}%`)
+              : null)),
+        h('p', { class: 'execution-text' }, prose(description.text)),
+        next ? h('p', { class: 'execution-next' }, next) : null,
+        description.installedBy
+          ? h('p', { class: 'execution-next' },
+            linkTo(deploymentHref(description.installedBy), null, 'Open the deployment that installed it'))
+          : null,
+        description.code
+          ? h('p', { class: 'execution-code' }, 'The board gave the reason ', mono(description.code))
+          : null,
+        execution.detail
+          ? h('p', { class: 'execution-code' }, 'Board’s note: ', mono(execution.detail))
+          : null,
+        description.progress !== null
+          ? meter(description.progress, `Download on ${execution.thing}`)
+          : null),
       description.progress !== null
-        ? meter(description.progress, `Download on ${execution.thing}`)
-        : null),
-    stepList(description),
-    moments.length > 0
-      ? h('p', { class: 'execution-foot dotted' },
-        moments.map((moment, index) => h('span', { key: String(index) }, moment)))
-      : null);
+        ? h('p', { class: 'execution-figure', 'aria-hidden': 'true' },
+          String(description.progress), h('span', { class: 'execution-percent' }, '%'))
+        : null,
+      description.tone === 'act' ? buttonKeys() : null),
+    h('div', { class: 'pipeline', key: 'pipeline' },
+      returnPath(execution, description),
+      stepList(description, { compact, viewer: !ctx.state.me.canWrite })),
+    h('div', { class: 'execution-lower', key: 'lower' },
+      flash,
+      moments.length > 0
+        ? h('section', { class: 'moments', key: 'moments', 'aria-label': 'What happened when' },
+          compact ? null : h('h3', { class: 'eyebrow' }, 'What happened when'),
+          h('p', { class: 'execution-foot' },
+            moments.map((moment, index) => h('span', { key: String(index), class: 'moment' }, moment))))
+        : null));
+}
+
+/** True if the log shows this deployment cancelled before its release was revoked. */
+function cancelledFirst(entry, release) {
+  return Boolean(entry) && Date.parse(entry.at) < Date.parse(release.revoked.at);
+}
+
+/**
+ * Who cancelled a deployment and why, as far as the log and the list of releases tell.
+ * The record of the job itself says neither. That its release was revoked is said on any
+ * deployment of it, over or not.
+ */
+function cancellation(deployment, ctx) {
+  const { now } = ctx.state;
+  const cancelled = deployment.status === 'CANCELED';
+  // The log is newest first, and what counts is the cancellation that took the deployment off the list.
+  const entry = cancelled
+    ? (ctx.state.audit.value?.entries ?? []).findLast((candidate) =>
+      candidate.action === 'deployment.cancel' && candidate.outcome === 'ok' && candidate.target === deployment.id)
+    : null;
+  const release = (ctx.state.firmware.value?.releases ?? []).find((item) => item.version === deployment.version);
+  return {
+    by: entry
+      ? h('span', { key: 'cancelled' }, 'Cancelled ', whenAt(entry.at, now), ' by ', who(entry.actor))
+      : null,
+    because: release?.revoked
+      ? h('div', { key: 'revoked', class: 'page-notice' },
+        notice('idle', 'ban', [
+          mono(release.version), ' was revoked ', when(release.revoked.at, now), ' by ', who(release.revoked.by),
+          release.revoked.reason ? [': ', sentence(release.revoked.reason)] : '.',
+          // Cancelled by hand before that, the revocation is not why it stopped.
+          !cancelled || cancelledFirst(entry, release) ? null : ' Revoking cancels every open deployment of a release.',
+        ], { action: h('a', { class: 'btn is-small', href: '#/firmware' }, 'Firmware', icon('arrow-right')) }))
+      : null,
+  };
 }
 
 export function deploymentView(ctx) {
@@ -1492,6 +2828,38 @@ export function deploymentView(ctx) {
   const unfinished = deployment
     ? deployment.executions.some((execution) => isUnfinished(execution.status))
     : false;
+  // Cancelled without force, and boards are still at it: the badge alone would stand
+  // next to a board that goes on downloading, with no word on why.
+  const withdrawn = unfinished && deployment.status === 'CANCELED';
+  const atWork = withdrawn && deployment.executions.some((execution) => execution.status === 'IN_PROGRESS');
+  const { by, because } = deployment ? cancellation(deployment, ctx) : { by: null, because: null };
+  // A deployment that ended short can be offered again, if its release is still there.
+  const boards = state.devices.value?.devices ?? [];
+  const shortOfDone = deployment && !unfinished && !isUnderWay(deployment) && deployment.executions.some(
+    (execution) => describeExecution(execution, {
+      board: boards.find((device) => device.thing === execution.thing) ?? null,
+      deployment: id,
+      version: deployment.version,
+      history: historyOf(execution, ctx),
+      unread: state.devices.value === null,
+    }).retry);
+  const offerAgain = shortOfDone && state.me.canWrite && state.firmware.value !== null &&
+    !revokedVersions(ctx).has(deployment.version);
+
+  if (missing(resource)) {
+    return h('div', { class: 'page' },
+      pageHead({
+        back: { href: '#/deployments', label: 'Deployments' },
+        eyebrow: 'Deployment',
+        title: 'Not found',
+      }),
+      card({ key: 'none' }, empty({
+        iconName: 'send',
+        title: 'There is no deployment with this address.',
+        text: 'Check the address, or find it in the list of deployments.',
+        action: { href: '#/deployments', label: 'All deployments' },
+      })));
+  }
 
   const head = pageHead({
     back: { href: '#/deployments', label: 'Deployments' },
@@ -1503,18 +2871,33 @@ export function deploymentView(ctx) {
     lede: deployment?.note || null,
     meta: deployment
       ? [
-        h('span', null,
-          startedBy(deployment, state.now),
-          deployment.completedAt ? [', finished ', when(deployment.completedAt, state.now)] : null),
-        h('span', { class: 'digest-row' },
+        h('span', { key: 'started' },
+          startedBy(deployment, state.now, whenAt),
+          deployment.completedAt ? [', finished ', whenAt(deployment.completedAt, state.now)] : null),
+        by,
+        h('span', { key: 'id', class: 'digest-row' },
           mono(deployment.id), copyButton(deployment.id, 'the deployment ID', ctx)),
       ]
       : null,
     tools: [
       freshness(resource, ctx),
+      // Keyed: when a deployment ends, "Offer again" is not the cancel button under another
+      // name, and the keyboard goes to the page's title rather than on to it by accident.
       state.me.canWrite && unfinished
-        ? button('is-danger-quiet', () => ctx.actions.openCancel(deployment),
-          icon('stop'), 'Cancel deployment')
+        ? h('button', {
+          key: 'cancel',
+          type: 'button',
+          class: 'btn is-danger-quiet',
+          onClick: () => ctx.actions.openCancel(deployment),
+        }, icon('stop'), withdrawn ? 'Stop boards that have started' : 'Cancel deployment')
+        : null,
+      offerAgain
+        ? h('button', {
+          key: 'offer',
+          type: 'button',
+          class: 'btn',
+          onClick: () => ctx.actions.openDeploy(deployment.version),
+        }, icon('send'), 'Offer again')
         : null,
     ],
   });
@@ -1525,14 +2908,53 @@ export function deploymentView(ctx) {
   return h('div', { class: 'page' },
     head,
     loadProblem(resource, 'this deployment', ctx),
+    // What the page cannot say until these have been read, and does not say.
+    state.devices.value === null ? loadProblem(state.devices, 'the list of boards', ctx) : null,
+    unreadHistories(deployment, ctx).slice(0, 1).map((known) => loadProblem(known, 'the board’s list of updates', ctx)),
+    withdrawn
+      ? h('div', { key: 'withdrawn', class: 'page-notice' },
+        notice('idle', 'stop', atWork
+          ? 'This deployment was cancelled. A board that had already started carries on unless it is stopped.'
+          : 'This deployment was cancelled. AWS takes a few seconds to withdraw the offer from every board.'))
+      : null,
+    because,
     deployment.executions.length === 0
       ? card({ key: 'none' },
         h('p', { class: 'quiet' }, 'AWS IoT has not listed any board for this deployment yet.'))
-      : h('div', { class: 'executions', key: 'boards' },
-        deployment.executions.map((execution) => executionCard(execution, ctx))));
+      : [
+        deployment.executions.length > 1
+          ? h('div', { class: 'deployment-summary', key: 'summary' },
+            segments(countParts(deployment.counts), `Boards: ${countWords(deployment.counts)}.`, { thin: true }),
+            countList(deployment.counts))
+          : null,
+        h('div', { class: 'executions', key: 'boards' },
+          deployment.executions.map((execution) =>
+            executionCard(execution, deployment, ctx, deployment.executions.length))),
+      ]);
 }
 
 // Activity.
+
+/** What the entries on this page are about. It only counts what has been loaded, and says so. */
+function activityPanel(audit) {
+  const { entries } = audit;
+  const count = (test) => entries.filter(test).length;
+  const action = (name) => (entry) => entry.action === name;
+  const refused = count((entry) => entry.outcome !== 'ok');
+  const said = [
+    [count(action('firmware.upload')), 'upload', 'uploads'],
+    [count(action('deployment.create')), 'deployment', 'deployments'],
+    [count(action('deployment.cancel')), 'cancellation', 'cancellations'],
+    [count(action('firmware.revoke')), 'revocation', 'revocations'],
+  ].filter(([amount]) => amount > 0);
+  return h('p', { class: 'log-summary dotted', key: 'summary' },
+    h('span', { key: 'scope', class: 'log-scope' },
+      audit.next ? `The latest ${plural(entries.length, 'entry', 'entries')}` : `The whole log, ${plural(entries.length, 'entry', 'entries')}`),
+    said.map(([amount, one, many]) => h('span', { key: one }, plural(amount, one, many))),
+    refused > 0
+      ? h('span', { key: 'refused', class: 'status is-warn' }, icon('alert', 'is-small'), `${refused} refused or failed`)
+      : null);
+}
 
 export function activityView(ctx) {
   const { state } = ctx;
@@ -1556,10 +2978,10 @@ export function activityView(ctx) {
     }));
   } else {
     body = [
+      activityPanel(audit),
       days.map((day) => h('section', { key: day.label, class: 'log-day' },
-        h('h2', { class: 'eyebrow' }, day.label),
-        card({ className: 'is-flush' },
-          h('ul', { class: 'log' }, day.entries.map((entry) => activityLine(entry, ctx, false)))))),
+        h('h2', { class: 'log-day-title' }, day.label),
+        h('ul', { class: 'log' }, day.entries.map((entry) => activityLine(entry, ctx, false))))),
       h('div', { class: 'log-more', key: 'more' },
         audit.next
           ? h('button', {
@@ -1575,8 +2997,8 @@ export function activityView(ctx) {
   return h('div', { class: 'page' },
     pageHead({
       title: 'Activity',
-      lede: 'Every upload, deployment, cancellation and revocation, with who asked for it and ' +
-        'how it ended. Entries cannot be changed.',
+      lede: 'Every upload, deployment, cancellation and revocation, with who asked for it and whether ' +
+        'it went through. A deployment that is over shows how it ended. This console has no way to change an entry.',
       tools: freshness(state.audit, ctx),
     }),
     loadProblem(state.audit, 'the activity log', ctx),
@@ -1590,10 +3012,13 @@ function dialogFrame({ title, body, error, foot, onSubmit, onClose, busy }) {
   return h('form', {
     class: 'dialog-form',
     method: 'dialog',
+    // Where the keyboard goes if the control that had it is gone.
+    tabindex: '-1',
+    'data-focus-home': '',
     onKeydown: ignoreEnter,
     onSubmit(event) {
       event.preventDefault();
-      if (onSubmit) onSubmit();
+      if (onSubmit && !busy) onSubmit();
     },
   },
   h('header', { class: 'dialog-head' },
@@ -1613,10 +3038,16 @@ function dialogFrame({ title, body, error, foot, onSubmit, onClose, busy }) {
   h('footer', { class: 'dialog-foot' }, foot));
 }
 
-/** A button in the foot of a dialog. `submit` makes it the one the form acts on. */
+/**
+ * A button in the foot of a dialog. `submit` makes it the one the form acts on.
+ * `sending` holds it back while its request is on its way, in a way that leaves it the
+ * keyboard's focus: a button that is disabled loses it, and a failure would then be
+ * reported to a keyboard that is nowhere.
+ */
 function dialogButton(options, ...label) {
   const {
-    key, className = '', submit = false, disabled = false, autofocus = false, describedBy = null, onClick,
+    key, className = '', submit = false, disabled = false, sending = false, autofocus = false,
+    describedBy = null, onClick,
   } = options;
   return h('button', {
     key,
@@ -1624,6 +3055,7 @@ function dialogButton(options, ...label) {
     class: `btn ${className}`.trim(),
     disabled,
     autofocus,
+    'aria-disabled': sending ? 'true' : null,
     'aria-describedby': describedBy,
     onClick,
   }, label);
@@ -1633,7 +3065,7 @@ const SPACER = () => h('span', { class: 'dialog-spacer', key: 'spacer' });
 
 function consequences(items) {
   return h('ul', { class: 'consequences' },
-    items.map((item, index) => h('li', { key: String(index) }, item)));
+    items.filter(Boolean).map((item, index) => h('li', { key: String(index) }, item)));
 }
 
 function choice({ key, type, name, checked, disabled = false, onChange }, title, ...notes) {
@@ -1658,6 +3090,11 @@ function wizardRelease(release, model, now) {
   release.notes ? h('span', { class: 'choice-note' }, release.notes) : null);
 }
 
+function willRefuse() {
+  return h('span', { class: 'choice-warning' }, icon('alert', 'is-small'),
+    h('span', null, 'Reports that it already runs this version or a newer one, so it will refuse the offer.'));
+}
+
 function wizardBoard(device, model, now) {
   const busy = model.busy.get(device.thing) ?? null;
   const chosen = model.things.has(device.thing);
@@ -1668,11 +3105,12 @@ function wizardBoard(device, model, now) {
     remark = h('span', { class: 'choice-warning' }, icon('lock', 'is-small'),
       h('span', null,
         'Has an unfinished update', busy.version ? [' to ', mono(busy.version)] : null,
-        '. Finish or cancel that deployment first.'));
+        '. Finish or cancel ', linkTo(deploymentHref(busy.deployment), null, 'that deployment'), ' first.'));
   } else if (alreadyRuns(device, model.version)) {
-    remark = h('span', { class: 'choice-warning' }, icon('alert', 'is-small'),
-      h('span', null,
-        'Reports that it already runs this version or a newer one, so it will refuse the offer.'));
+    remark = willRefuse();
+  } else if (!device.online && !device.lastSeen) {
+    remark = h('span', { class: 'choice-hint' },
+      `It will see the offer when it first connects. ${NEVER_REPORTED_HELP}`);
   } else if (!device.online) {
     remark = h('span', { class: 'choice-hint' }, 'Offline: it will see the offer when it reconnects.');
   }
@@ -1691,13 +3129,15 @@ function wizardBoard(device, model, now) {
 }
 
 function wizardReview(model, release, chosen, now) {
-  const offline = chosen.filter((device) => !device.online).length;
+  const offline = chosen.filter((device) => !device.online && device.lastSeen).length;
+  const never = chosen.filter((device) => !device.online && !device.lastSeen).length;
   return [
     facts([
       ['Release', mono(model.version, 'fact-strong'),
         release ? factNote(`${fileSize(release.size)} · SHA-256 ${release.sha256.slice(0, 12)}…`) : null],
       ['Boards', h('ul', { class: 'plain-list' }, chosen.map((device) =>
-        h('li', { key: device.thing }, mono(device.thing), presence(device, now))))],
+        h('li', { key: device.thing }, mono(device.thing), presence(device, now),
+          alreadyRuns(device, model.version) ? willRefuse() : null)))],
     ]),
     h('label', { class: 'field', key: 'note' },
       h('span', { class: 'field-label' },
@@ -1718,6 +3158,10 @@ function wizardReview(model, release, chosen, now) {
           ? `${plural(offline, 'board is', 'boards are')} offline and will see the offer after ` +
             'reconnecting. The offer stays open until it is cancelled.'
           : 'The offer stays open until a board acts on it or the deployment is cancelled.',
+        never > 0
+          ? `${plural(never, 'board has', 'boards have')} never connected and will see the offer ` +
+            `when first connected. ${NEVER_REPORTED_HELP}`
+          : null,
         'A board checks the download and its bootloader checks the signature. If the new firmware ' +
           'cannot reconnect, the bootloader puts the previous one back.',
         'These boards cannot be given another deployment until this one has finished or been cancelled.',
@@ -1749,7 +3193,17 @@ export function deployDialog(model, ctx) {
   const release = releases.find((candidate) => candidate.version === model.version) ?? null;
   const chosen = devices.filter((device) => model.things.has(device.thing));
   const free = devices.filter((device) => !model.busy.has(device.thing));
+  // "All" leaves out what would only refuse: that takes a tick of its own.
+  const selectable = free.filter((device) => !alreadyRuns(device, model.version));
   const ready = !model.loading && !model.loadError;
+  // The release this dialog was opened for has been revoked in the meantime. It says so
+  // and leaves the choice to the reader: another release is not what was asked for.
+  const gone = ready && model.gone
+    ? notice('warn', 'alert', [
+      h('strong', null, mono(model.gone), ' has been revoked'), ', so it cannot be deployed any more.',
+      releases.length > 0 ? ' Choose another release if you want to deploy one.' : null,
+    ])
+    : null;
 
   let body;
   if (model.loading) {
@@ -1760,28 +3214,28 @@ export function deployDialog(model, ctx) {
       sentence(model.loadError.message),
     ], { more: problemRef(model.loadError), action: button('is-small', model.reload, 'Try again') });
   } else if (model.step === 0 && releases.length === 0) {
-    body = empty({
+    body = [gone, empty({
       iconName: 'package',
       title: 'There is no release to deploy.',
       text: 'Upload a signed image on the Firmware page first. Revoked releases cannot be deployed.',
       // The dialog closes by itself when the page changes, but not if this is the Firmware page.
       action: { href: '#/firmware', label: 'Go to Firmware', onClick: model.close },
-    });
+    })];
   } else if (model.step === 0) {
-    body = h('fieldset', { class: 'choices' },
+    body = [gone, h('fieldset', { class: 'choices', key: 'releases' },
       h('legend', null, 'Which release?'),
-      releases.map((candidate) => wizardRelease(candidate, model, now)));
+      releases.map((candidate) => wizardRelease(candidate, model, now)))];
   } else if (model.step === 1 && devices.length === 0) {
     body = empty(NO_BOARDS);
   } else if (model.step === 1) {
     body = h('fieldset', { class: 'choices' },
       h('legend', null, 'Which boards get ', mono(model.version), '?'),
       devices.map((device) => wizardBoard(device, model, now)),
-      free.length > 1
+      selectable.length > 1
         ? button('is-small is-quiet', model.toggleAll,
-          chosen.length === free.length
+          selectable.every((device) => model.things.has(device.thing))
             ? 'Clear the selection'
-            : `Select all ${free.length} available boards`)
+            : `Select all ${selectable.length} available boards`)
         : null);
   } else {
     body = wizardReview(model, release, chosen, now);
@@ -1792,7 +3246,9 @@ export function deployDialog(model, ctx) {
   const canGoOn = model.step === 0 ? release !== null : chosen.length > 0;
   // Why "Next" cannot be used yet, said next to it.
   let hint = null;
-  if (ready && model.step === 1 && devices.length > 0 && chosen.length === 0) {
+  if (ready && model.step === 0 && releases.length > 0 && !release) {
+    hint = 'Choose a release.';
+  } else if (ready && model.step === 1 && devices.length > 0 && chosen.length === 0) {
     hint = free.length === 0 ? 'Every board has an unfinished update.' : 'Choose at least one board.';
   }
   return dialogFrame({
@@ -1807,11 +3263,15 @@ export function deployDialog(model, ctx) {
         'aria-current': index === model.step ? 'step' : null,
       },
       h('span', { class: 'wizard-number' }, index < model.step ? icon('check') : String(index + 1)),
-      label))),
+      label,
+      index < model.step ? h('span', { class: 'sr-only' }, ' (done)') : null))),
       // Each step takes the focus when it appears, so the keyboard starts at its top.
+      // Its name is what a screen reader says on arriving there.
       h('div', {
         class: 'wizard-body',
         key: `step-${model.step}`,
+        role: 'group',
+        'aria-label': `Step ${model.step + 1} of ${WIZARD_STEPS.length}: ${WIZARD_STEPS[model.step]}`,
         tabindex: '-1',
         autofocus: true,
         ref(el) {
@@ -1822,7 +3282,7 @@ export function deployDialog(model, ctx) {
     ],
     error: model.error
       ? failure('The deployment was not started.', model.error,
-        refusedBoards.length > 0 ? heldBy(refusedBoards) : null)
+        refusedBoards.length > 0 ? heldBy(refusedBoards) : null, model.signIn)
       : null,
     foot: [
       dialogButton({ key: 'cancel', disabled: model.sending, onClick: model.close }, 'Cancel'),
@@ -1836,7 +3296,8 @@ export function deployDialog(model, ctx) {
           key: 'go',
           className: 'is-primary',
           submit: true,
-          disabled: model.sending || chosen.length === 0,
+          disabled: chosen.length === 0,
+          sending: model.sending,
         }, icon('send'), model.sending ? 'Starting…' : `Deploy to ${plural(chosen.length, 'board')}`)
         : dialogButton({
           key: 'next',
@@ -1847,6 +3308,12 @@ export function deployDialog(model, ctx) {
         }, 'Next'),
     ],
   });
+}
+
+function cancelLabel({ sending, withdrawn, force }) {
+  if (withdrawn) return sending ? 'Stopping…' : 'Stop boards';
+  if (sending) return 'Cancelling…';
+  return force ? 'Cancel and stop boards' : 'Cancel the deployment';
 }
 
 /**
@@ -1872,8 +3339,11 @@ export function cancelDialog(model) {
     onChange: () => model.setForce(value),
   }, title, h('span', { class: 'choice-note' }, text));
 
+  const version = mono(deployment.version ?? 'this release');
   return dialogFrame({
-    title: ['Cancel the deployment of ', mono(deployment.version ?? 'this release'), '?'],
+    title: withdrawn
+      ? ['Stop the boards that are installing ', version, '?']
+      : ['Cancel the deployment of ', version, '?'],
     busy: model.sending,
     onClose: model.close,
     onSubmit: over ? null : () => model.submit(force),
@@ -1910,13 +3380,17 @@ export function cancelDialog(model) {
           'A cancellation takes a few seconds to reach every board’s record. It cannot be undone; ',
           'to try again, start a new deployment.'),
     ],
-    error: model.error ? failure('Not cancelled.', model.error) : null,
+    // With nothing left to cancel, an earlier refusal to do so has nothing more to say.
+    error: model.error && !over
+      ? failure(withdrawn ? 'The boards were not stopped.' : 'Not cancelled.', model.error, null, model.signIn)
+      : null,
     foot: [
       dialogButton({ key: 'keep', autofocus: true, disabled: model.sending, onClick: model.close },
-        over ? 'Close' : 'Keep the deployment'),
+        over || withdrawn ? 'Close' : 'Keep the deployment'),
       SPACER(),
-      dialogButton({ key: 'go', className: 'is-danger', submit: true, disabled: model.sending || over },
-        model.sending ? 'Cancelling…' : force ? 'Cancel and stop boards' : 'Cancel the deployment'),
+      dialogButton({
+        key: 'go', className: 'is-danger', submit: true, disabled: over, sending: model.sending,
+      }, cancelLabel({ sending: model.sending, withdrawn, force })),
     ],
   });
 }
@@ -1967,12 +3441,14 @@ function revokeAgainDialog(model, ctx) {
       h('p', { class: 'quiet', key: 'same' },
         'That record stays as it is: who revoked the release, when and why.'),
     ],
-    error: model.error ? failure(open ? 'Not finished.' : 'Not applied.', model.error) : null,
+    error: model.error
+      ? failure(open ? 'Not finished.' : 'Not applied.', model.error, null, model.signIn)
+      : null,
     foot: [
       dialogButton({ key: 'keep', disabled: model.sending, onClick: model.close }, 'Close'),
       SPACER(),
       dialogButton({
-        key: 'go', className: 'is-primary', submit: true, autofocus: true, disabled: model.sending,
+        key: 'go', className: 'is-primary', submit: true, autofocus: true, sending: model.sending,
       }, icon('ban'), label),
     ],
   });
@@ -2020,14 +3496,22 @@ export function revokeDialog(model, ctx) {
               `${length} / ${REASON_LIMIT}`)]
             : null)),
     ],
-    error: model.error ? failure('Not revoked.', model.error) : null,
+    error: model.error ? failure('Not revoked.', model.error, null, model.signIn) : null,
     foot: [
       dialogButton({
         key: 'keep', autofocus: !model.focusReason, disabled: model.sending, onClick: model.close,
       }, 'Keep the release'),
       SPACER(),
-      dialogButton({ key: 'go', className: 'is-danger', submit: true, disabled: model.sending || !reason },
-        icon('ban'), model.sending ? 'Revoking…' : ['Revoke ', release.version]),
+      // The field can lie below what can be seen, and the button stands in view.
+      reason ? null : h('span', { class: 'dialog-hint', id: 'dialog-hint', key: 'hint' }, 'Give a reason first.'),
+      dialogButton({
+        key: 'go',
+        className: 'is-danger',
+        submit: true,
+        disabled: !reason,
+        sending: model.sending,
+        describedBy: reason ? null : 'dialog-hint',
+      }, icon('ban'), model.sending ? 'Revoking…' : ['Revoke ', release.version]),
     ],
   });
 }

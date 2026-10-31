@@ -216,13 +216,14 @@ function failure(promise) {
 
 test('the command line: defaults, both spellings of an option, nothing unknown', () => {
   assert.deepEqual(parseArguments([]), {
-    scenario: 'empty', viewer: false, live: false, verbose: false, help: false, host: '127.0.0.1', port: 8787,
+    scenario: 'empty', viewer: false, live: false, home: false, verbose: false, help: false, host: '127.0.0.1', port: 8787,
     repeatedCancel: 'refused',
   });
   assert.equal(parseArguments(['--scenario', 'revoked']).scenario, 'revoked');
   const options = parseArguments(['--scenario=downloading', '--viewer', '--live', '--port=9000']);
   assert.deepEqual(pick(options, 'scenario', 'viewer', 'live', 'port'),
     { scenario: 'downloading', viewer: true, live: true, port: 9000 });
+  assert.equal(parseArguments(['--home']).home, true);
   assert.equal(parseArguments(['-h']).help, true);
   assert.equal(parseArguments(['--repeated-cancel', 'accepted']).repeatedCancel, 'accepted');
   assert.equal(parseArguments(['--repeated-cancel=ignored']).repeatedCancel, 'ignored');
@@ -259,7 +260,7 @@ test('a request that is not addressed to the preview itself is turned away', asy
   assert.equal(await status(preview.loginOrigin, '/oauth2/authorize'), 403);
 });
 
-test('the gateway has the three routes of the HTTP API and nothing else', async (t) => {
+test('the gateway has the routes of the HTTP API, and the rest goes to the web function', async (t) => {
   const { origin } = await start(t);
   const page = await fetch(`${origin}/`);
   assert.equal(page.status, 200);
@@ -269,15 +270,19 @@ test('the gateway has the three routes of the HTTP API and nothing else', async 
   assert.equal(assets.length, 4);
   for (const asset of assets) assert.equal((await fetch(`${origin}${asset}`)).status, 200, asset);
 
-  // No route: API Gateway answers these itself. The deployed gateway was asked the same.
-  const routeless = [['POST', '/'], ['GET', '/assets'], ['GET', '/api'], ['GET', '/index.html'],
-    ['GET', '/favicon.ico'], ['GET', '/oauth2/authorize'], ['DELETE', '/assets/app.css']];
-  for (const [method, path] of routeless) {
+  // No route of its own: the default route takes these to the web function, which
+  // answers with its security headers. Only GET is answered, so that a HEAD gets a 405.
+  const unclaimed = [['GET', '/assets', 404], ['GET', '/api', 404], ['GET', '/index.html', 404],
+    ['GET', '/favicon.ico', 404], ['GET', '/oauth2/authorize', 404], ['POST', '/', 405],
+    ['HEAD', '/', 405], ['HEAD', '/assets/app.css', 405], ['DELETE', '/assets/app.css', 405],
+    ['DELETE', '/api/me', 405], ['PUT', '/api/firmware', 405]];
+  for (const [method, path, status] of unclaimed) {
     const answer = await fetch(`${origin}${path}`, { method });
-    assert.equal(answer.status, 404, `${method} ${path}`);
-    assert.deepEqual(await answer.json(), { message: 'Not Found' });
+    assert.equal(answer.status, status, `${method} ${path}`);
+    assert.match(answer.headers.get('content-security-policy'), /default-src 'none'/, `${method} ${path}`);
+    assert.match(answer.headers.get('strict-transport-security'), /max-age=/, `${method} ${path}`);
+    if (method !== 'HEAD') assert.match(await answer.text(), /^(?:Not found|Method not allowed)\n$/);
   }
-  assert.equal((await fetch(`${origin}/`, { method: 'HEAD' })).status, 404);
 
   // A route of the web function with a path it does not know: the function answers.
   for (const path of ['/assets/000000000000/app.css', '/assets/']) {
@@ -289,6 +294,27 @@ test('the gateway has the three routes of the HTTP API and nothing else', async 
   assert.equal((await fetch(`${origin}/api/`)).status, 401);
   const missing = await call(origin, await accessToken(origin), 'GET', '/api/');
   assert.deepEqual([missing.status, missing.body.error.code], [404, 'not_found']);
+});
+
+test('--home serves the home page through the web function, and the console stays out of it', async (t) => {
+  const { origin } = await start(t, { home: true });
+
+  const page = await fetch(`${origin}/`);
+  assert.equal(page.status, 200);
+  const policy = page.headers.get('content-security-policy');
+  assert.doesNotMatch(policy, /script-src|connect-src/);
+  const html = await page.text();
+  assert.match(html, /A DJ controller,/);
+  assert.doesNotMatch(html, /cranium-config|<script/);
+  const assets = [...html.matchAll(/(?:href|src)="(\/assets\/[^"]+)"/g)].map((match) => match[1]);
+  assert.equal(assets.length, 1);
+  assert.equal((await fetch(`${origin}${assets[0]}`)).status, 200);
+
+  const { origin: consoleOrigin } = await start(t);
+  const other = await (await fetch(`${consoleOrigin}/`)).text();
+  const consoleAssets = [...other.matchAll(/(?:href|src)="(\/assets\/[^"]+)"/g)].map((match) => match[1]);
+  assert.equal(consoleAssets.length, 4);
+  for (const asset of consoleAssets) assert.equal((await fetch(`${origin}${asset}`)).status, 404, asset);
 });
 
 test('the API is behind the authorizer: no token, no answer', async (t) => {

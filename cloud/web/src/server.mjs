@@ -1,16 +1,21 @@
 /**
- * The function that serves the web console (WebFn).
+ * The function that serves the web console and the public home page (WebFn).
  *
- * The console is a handful of static files. They are read once, when the function
- * starts, into a table of exact request path -> response, and a request is answered
- * from that table or not at all. The request path is only ever a lookup key: it is
- * never decoded, normalised or joined to a directory, so nothing outside site/ can be
- * reached whatever the path says.
+ * Both are a handful of static files. They are read once, when the function starts,
+ * into a table of exact request path -> response, and a request is answered from that
+ * table or not at all. The request path is only ever a lookup key: it is never decoded,
+ * normalised or joined to a directory, so nothing outside site/ can be reached whatever
+ * the path says.
+ *
+ * The host name decides which of the two a request gets, and each has its own table:
+ * a name in HOME_HOSTS gets the home page and its stylesheet, and every other name gets
+ * the console. The home page signs nobody in, so it carries no sign-in settings and
+ * none of the console's files can be reached from it.
  *
  * Assets are served under /assets/<build id>/, where the build id is a hash of the
- * whole site, and may be cached for ever; any other build id is a 404. The page itself
- * is revalidated on every load. It carries the public sign-in settings in a <meta>
- * tag; nothing in them is secret.
+ * files of that site, and may be cached for ever; any other build id is a 404. A page
+ * is revalidated on every load. The console's carries the public sign-in settings in a
+ * <meta> tag; nothing in them is secret.
  *
  * The query string is never read and never logged: after sign-in it carries the
  * authorization code.
@@ -26,10 +31,17 @@ const BUILD_ID_LENGTH = 12;
 const BUILD_MARK = '%BUILD%';
 const CONFIG_MARK = '%CONFIG%';
 
+const CONSOLE_PAGE = 'index.html';
+const HOME_PAGE = 'home.html';
+const HOME_STYLE = 'home.css';
+// In assets/, a file with this prefix belongs to the home page, and any other to the console.
+const HOME_PREFIX = 'home.';
+
 const ASSET_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const ASSET_TYPES = new Map([
   ['css', 'text/css; charset=utf-8'],
   ['js', 'text/javascript; charset=utf-8'],
+  ['json', 'application/json; charset=utf-8'],
 ]);
 const HTML = 'text/html; charset=utf-8';
 const PLAIN = 'text/plain; charset=utf-8';
@@ -47,16 +59,42 @@ const ORIGIN = /^https?:\/\/[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?::[0-9]{1,5}
 const LOGGED_PATH_LENGTH = 200;
 
 /**
- * Read site/ into memory: index.html and the files directly inside assets/. Anything
- * else there (a subdirectory, a link, a file type the console does not use) stops the
- * function from starting, so it is noticed by the tests instead of being shipped.
+ * The first digits of a hash that covers every file name and every byte, each prefixed
+ * with its length so that no two different sets of files feed the hash the same input.
  */
-function loadSite(base) {
-  const files = [{ name: 'index.html', bytes: readFileSync(new URL('index.html', base)) }];
+function buildIdOf(files) {
+  const hash = createHash('sha256');
+  for (const { name, bytes } of [...files].sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    hash.update(`${name}\0${bytes.length}\0`);
+    hash.update(bytes);
+  }
+  return hash.digest('hex').slice(0, BUILD_ID_LENGTH);
+}
+
+function assetTable(files, buildId) {
+  const assets = new Map();
+  for (const { file, type, bytes } of files) {
+    if (file !== undefined) assets.set(`/assets/${buildId}/${file}`, { type, body: bytes.toString('utf8') });
+  }
+  return assets;
+}
+
+/**
+ * Read site/ into memory: the two pages and the files directly inside assets/. Anything
+ * else there (a subdirectory, a link, a file type or a home page file that is not
+ * expected) stops the function from starting, so it is noticed by the tests instead of
+ * being shipped.
+ *
+ * The two sites have a build id each, so a change to the home page does not change one
+ * byte that the console serves, and expires none of its cached files.
+ */
+export function loadSite(base) {
+  const consoleFiles = [{ name: CONSOLE_PAGE, bytes: readFileSync(new URL(CONSOLE_PAGE, base)) }];
+  const homeFiles = [{ name: HOME_PAGE, bytes: readFileSync(new URL(HOME_PAGE, base)) }];
 
   for (const entry of readdirSync(base, { withFileTypes: true })) {
     if (entry.name.startsWith('.')) continue;
-    if (entry.name !== 'index.html' && entry.name !== 'assets') {
+    if (entry.name !== CONSOLE_PAGE && entry.name !== HOME_PAGE && entry.name !== 'assets') {
       throw new Error(`Unexpected entry in site/: ${entry.name}`);
     }
   }
@@ -65,10 +103,11 @@ function loadSite(base) {
   for (const entry of readdirSync(assetsDir, { withFileTypes: true })) {
     if (entry.name.startsWith('.')) continue;
     const type = ASSET_TYPES.get(entry.name.slice(entry.name.lastIndexOf('.') + 1));
-    if (!entry.isFile() || !ASSET_NAME.test(entry.name) || !type) {
+    const ofHome = entry.name.startsWith(HOME_PREFIX);
+    if (!entry.isFile() || !ASSET_NAME.test(entry.name) || !type || (ofHome && entry.name !== HOME_STYLE)) {
       throw new Error(`Unexpected entry in site/assets/: ${entry.name}`);
     }
-    files.push({
+    (ofHome ? homeFiles : consoleFiles).push({
       name: `assets/${entry.name}`,
       file: entry.name,
       type,
@@ -76,29 +115,34 @@ function loadSite(base) {
     });
   }
 
-  // The build id covers every file name and every byte, each prefixed with its length
-  // so that no two different sites feed the hash the same input.
-  files.sort((a, b) => (a.name < b.name ? -1 : 1));
-  const hash = createHash('sha256');
-  for (const { name, bytes } of files) {
-    hash.update(`${name}\0${bytes.length}\0`);
-    hash.update(bytes);
-  }
-  const buildId = hash.digest('hex').slice(0, BUILD_ID_LENGTH);
-
-  const assets = new Map();
-  let page;
-  for (const { name, file, type, bytes } of files) {
-    if (name === 'index.html') {
-      page = bytes.toString('utf8').replaceAll(BUILD_MARK, buildId).split(CONFIG_MARK);
-    } else {
-      assets.set(`/assets/${buildId}/${file}`, { type, body: bytes.toString('utf8') });
-    }
-  }
+  const consoleBuild = buildIdOf(consoleFiles);
+  const page = consoleFiles[0].bytes.toString('utf8').replaceAll(BUILD_MARK, consoleBuild).split(CONFIG_MARK);
   if (page.length !== 2) {
-    throw new Error(`index.html must contain ${CONFIG_MARK} exactly once`);
+    throw new Error(`${CONSOLE_PAGE} must contain ${CONFIG_MARK} exactly once`);
   }
-  return { buildId, assets, pageHead: page[0], pageTail: page[1] };
+
+  const homeBuild = buildIdOf(homeFiles);
+  const homePage = homeFiles[0].bytes.toString('utf8');
+  if (homePage.includes(CONFIG_MARK)) {
+    throw new Error(`${HOME_PAGE} must not contain ${CONFIG_MARK}: it signs nobody in`);
+  }
+  if (homeFiles.length !== 2) {
+    throw new Error(`site/assets/${HOME_STYLE} is missing`);
+  }
+
+  return {
+    console: {
+      buildId: consoleBuild,
+      assets: assetTable(consoleFiles, consoleBuild),
+      pageHead: page[0],
+      pageTail: page[1],
+    },
+    home: {
+      buildId: homeBuild,
+      assets: assetTable(homeFiles, homeBuild),
+      page: homePage.replaceAll(BUILD_MARK, homeBuild),
+    },
+  };
 }
 
 const site = loadSite(SITE);
@@ -116,24 +160,43 @@ function requireText(name, value) {
   }
 }
 
-function securityHeaders(loginOrigin) {
+function consolePolicy(loginOrigin) {
+  return [
+    "default-src 'none'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "img-src 'self' data:",
+    `connect-src 'self' ${loginOrigin}`,
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ];
+}
+
+// The home page has no script and calls nothing. Its only image is the icon written out
+// in its head; the drawings are inline.
+const HOME_POLICY = Object.freeze([
+  "default-src 'none'",
+  "style-src 'self'",
+  'img-src data:',
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+]);
+
+/**
+ * `serial` is who may use a serial port. Only the console has a page that does: the
+ * home page keeps it switched off.
+ */
+function securityHeaders(policy, serial) {
   return {
-    'content-security-policy': [
-      "default-src 'none'",
-      "script-src 'self'",
-      "style-src 'self'",
-      "img-src 'self' data:",
-      `connect-src 'self' ${loginOrigin}`,
-      "base-uri 'none'",
-      "form-action 'none'",
-      "frame-ancestors 'none'",
-    ].join('; '),
+    'content-security-policy': policy.join('; '),
     'strict-transport-security': 'max-age=63072000; includeSubDomains',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
     'cross-origin-opener-policy': 'same-origin',
     'cross-origin-resource-policy': 'same-origin',
-    'permissions-policy': 'camera=(), microphone=(), geolocation=(), usb=(), serial=(), payment=()',
+    'permissions-policy': `camera=(), microphone=(), geolocation=(), usb=(), serial=${serial}, payment=()`,
   };
 }
 
@@ -153,9 +216,14 @@ function writeLog(entry) {
  *                                       back to. Left out, it is https://<the domain
  *                                       name of the request>/. Only the local preview
  *                                       sets it, to a loopback address.
+ * @param {string[]} [options.homeHosts] the host names that get the home page, exactly as
+ *                                       API Gateway reports them. Every other name gets
+ *                                       the console.
  * @param {(entry: object) => void} [options.log]  receives one entry per request
  */
-export function createWebHandler({ clientId, loginOrigin, scope, redirectUri, log = writeLog } = {}) {
+export function createWebHandler({
+  clientId, loginOrigin, scope, redirectUri, homeHosts = [], log = writeLog,
+} = {}) {
   requireText('clientId', clientId);
   requireText('scope', scope);
   requireText('loginOrigin', loginOrigin);
@@ -163,10 +231,15 @@ export function createWebHandler({ clientId, loginOrigin, scope, redirectUri, lo
     throw new TypeError('loginOrigin must be an origin such as https://login.example');
   }
   if (redirectUri !== undefined) requireText('redirectUri', redirectUri);
+  if (!Array.isArray(homeHosts) || !homeHosts.every((host) => typeof host === 'string' && HOST.test(host))) {
+    throw new TypeError('homeHosts must be a list of host names in lower case');
+  }
 
-  const headers = securityHeaders(loginOrigin);
+  const homeNames = new Set(homeHosts);
+  const consoleHeaders = securityHeaders(consolePolicy(loginOrigin), '(self)');
+  const homeHeaders = securityHeaders(HOME_POLICY, '()');
 
-  function respond(statusCode, type, cacheControl, body, extra) {
+  function respond(headers, statusCode, type, cacheControl, body, extra) {
     return {
       statusCode,
       headers: { ...headers, 'content-type': type, 'cache-control': cacheControl, ...extra },
@@ -180,23 +253,27 @@ export function createWebHandler({ clientId, loginOrigin, scope, redirectUri, lo
     if (returnTo === undefined) {
       const host = event?.requestContext?.domainName;
       if (typeof host !== 'string' || !HOST.test(host)) {
-        return respond(400, PLAIN, CACHE_NEVER, 'Bad request\n');
+        return respond(consoleHeaders, 400, PLAIN, CACHE_NEVER, 'Bad request\n');
       }
       returnTo = `https://${host}/`;
     }
     const config = JSON.stringify({ clientId, loginOrigin, scope, redirectUri: returnTo });
-    return respond(200, HTML, CACHE_PAGE, site.pageHead + escapeAttribute(config) + site.pageTail);
+    const { pageHead, pageTail } = site.console;
+    return respond(consoleHeaders, 200, HTML, CACHE_PAGE, pageHead + escapeAttribute(config) + pageTail);
   }
 
   function answer(event) {
+    const home = homeNames.has(event?.requestContext?.domainName);
+    const headers = home ? homeHeaders : consoleHeaders;
     if (event?.requestContext?.http?.method !== 'GET') {
-      return respond(405, PLAIN, CACHE_NEVER, 'Method not allowed\n', { allow: 'GET' });
+      return respond(headers, 405, PLAIN, CACHE_NEVER, 'Method not allowed\n', { allow: 'GET' });
     }
     const path = event.rawPath;
-    if (path === '/') return page(event);
-    const asset = typeof path === 'string' ? site.assets.get(path) : undefined;
-    if (asset) return respond(200, asset.type, CACHE_ASSET, asset.body);
-    return respond(404, PLAIN, CACHE_NEVER, 'Not found\n');
+    if (path === '/') return home ? respond(headers, 200, HTML, CACHE_PAGE, site.home.page) : page(event);
+    const { assets } = home ? site.home : site.console;
+    const asset = typeof path === 'string' ? assets.get(path) : undefined;
+    if (asset) return respond(headers, 200, asset.type, CACHE_ASSET, asset.body);
+    return respond(headers, 404, PLAIN, CACHE_NEVER, 'Not found\n');
   }
 
   return async function webHandler(event) {
@@ -220,6 +297,9 @@ function settingsFromEnvironment(env) {
     clientId: env.USER_POOL_CLIENT_ID,
     loginOrigin: `https://${env.LOGIN_DOMAIN}`,
     scope: env.OAUTH_SCOPE,
+    // Left out or empty, every name gets the console. Commas, no spaces: a name that is
+    // not a host name is refused when the handler is made.
+    homeHosts: (env.HOME_HOSTS ?? '').split(',').filter((name) => name !== ''),
   };
 }
 

@@ -5,12 +5,19 @@
 #   AWS_PROFILE=<profile> cloud/deploy.sh [--replace-signing-key] [Parameter=Value ...]
 #
 # The profile and the Region come from AWS_PROFILE and AWS_REGION (default us-east-1).
-# Optional arguments set template parameters: SlotSize, LoadAddress, IotLogLevel and
-# UserPoolDeletionProtection. A parameter that is not given keeps its current value.
+# Optional arguments set template parameters: SlotSize, LoadAddress, IotLogLevel,
+# UserPoolDeletionProtection, RestrictIotLoggingTrust, ConsoleDomainName,
+# ConsoleCertificateArn, HomeDomainName and HomeCertificateArn. A parameter that is not
+# given keeps its current value.
 #
 # The console accepts only images signed with the key in firmware/keys/fw_signing_pub.pem.
 # Once it is deployed, a run that finds another key in that file stops and shows both
 # fingerprints. --replace-signing-key says that the key was replaced on purpose.
+#
+# The stack records which git commit it was built from and whether the files that go into
+# it matched that commit, in its outputs DeployedCommit and DeployedTree and in the
+# description of both functions. A run that finds changes outside any commit says so and
+# goes on: what it must not do is leave no trace of it.
 #
 # Needs the AWS CLI v2, Node.js 22 and openssl. Everything this script writes goes to
 # cloud/.deploy/, which git ignores.
@@ -64,6 +71,22 @@ check_tools() {
   [ "$major" -ge 22 ] || die "Node.js 22 or newer is needed (found $(node --version))"
   command -v openssl > /dev/null || die "openssl is not installed"
   command -v base64 > /dev/null || die "base64 is not installed"
+}
+
+# The full id of the commit that is checked out, or "unknown" outside a git checkout.
+source_commit() {
+  git -C "$REPO_DIR" rev-parse --verify --quiet HEAD 2> /dev/null || printf 'unknown\n'
+}
+
+# The files that end up in the stack and differ from that commit, one per line. Ignored
+# files count, because the package contains them. Only what is deployed is looked at: the
+# firmware and the tools change all the time and are no part of the console. The history
+# file is the exception, because this script writes it from the commits themselves.
+# --no-optional-locks: somebody else may be working in this checkout.
+source_changes() {
+  git --no-optional-locks -C "$REPO_DIR" status --porcelain --ignored -- \
+    cloud/api/src cloud/web/src cloud/infra firmware/keys/fw_signing_pub.pem \
+    ':(exclude)cloud/web/src/site/assets/history.json'
 }
 
 # Things that would otherwise fail halfway through, checked before anything changes.
@@ -308,7 +331,7 @@ main() {
         requested_protection="${arg#*=}"
         extra+=("$arg")
         ;;
-      SlotSize=*|LoadAddress=*|IotLogLevel=*)
+      SlotSize=*|LoadAddress=*|IotLogLevel=*|RestrictIotLoggingTrust=*|ConsoleDomainName=*|ConsoleCertificateArn=*|HomeDomainName=*|HomeCertificateArn=*)
         extra+=("$arg")
         ;;
       *)
@@ -401,11 +424,29 @@ main() {
   esac
 
   step "6/9 Package and deploy $STACK"
+  local commit changes tree=unknown
+  commit="$(source_commit)"
+  if [ "$commit" != unknown ]; then
+    changes="$(source_changes)" || die "git could not say what has changed in this checkout"
+    if [ -z "$changes" ]; then
+      tree=clean
+    else
+      tree=dirty
+      echo "Note: these files go into the deployment and differ from commit ${commit:0:12}:"
+      printf '%s\n' "$changes" | sed 's/^/  /'
+    fi
+  fi
+  echo "Built from commit $commit ($tree)"
+  # What the console's History page shows. It goes into the package, and without it the
+  # page says that there is none: not a reason to stop a deployment.
+  node "$CLOUD_DIR/web/build-history.mjs" --repo "$REPO_DIR" --commit "$commit" --tree "$tree" \
+    || echo "Note: the console's History page will say that it has no history."
   aws cloudformation package \
     --template-file "$CLOUD_DIR/infra/template.yaml" \
     --s3-bucket "$artifacts_bucket" --s3-prefix "$STACK" \
     --output-template-file "$DEPLOY_DIR/packaged.yaml" > /dev/null
-  local overrides=("SigningPublicKey=$signing_key" ${creation[@]+"${creation[@]}"} ${extra[@]+"${extra[@]}"})
+  local overrides=("SigningPublicKey=$signing_key" "DeployedCommit=$commit" "DeployedTree=$tree"
+    ${creation[@]+"${creation[@]}"} ${extra[@]+"${extra[@]}"})
   deploy_stack "$STACK" "$DEPLOY_DIR/packaged.yaml" \
     --s3-bucket "$artifacts_bucket" --s3-prefix "$STACK" \
     --capabilities CAPABILITY_IAM --parameter-overrides "${overrides[@]}"
@@ -415,10 +456,10 @@ main() {
   echo "Wrote cloud/.deploy/outputs.json"
   bound_iot_log
 
-  step "8/9 User pool deletion protection"
-  # The stack is created with the protection off, because a protected pool cannot be
-  # removed when a first creation fails and rolls back. Once the stack exists the
-  # protection is switched on, unless this run asked for a value itself.
+  step "8/9 Deletion protection of the user pool and the tables"
+  # The stack is created with the protection off, because a protected pool or table
+  # cannot be removed when a first creation fails and rolls back. Once the stack exists
+  # the protection is switched on, unless this run asked for a value itself.
   if [ -n "$requested_protection" ]; then
     echo "$requested_protection, as requested on the command line"
   elif [ "$(stack_parameter "$STACK" UserPoolDeletionProtection)" = ACTIVE ]; then
@@ -433,6 +474,7 @@ main() {
 
   step "9/9 Done"
   echo "Console: $(stack_output "$STACK" ConsoleUrl)"
+  echo "Deployed from commit $(stack_output "$STACK" DeployedCommit) ($(stack_output "$STACK" DeployedTree))"
   echo
   echo "Next steps"
   echo "  1. Give yourself an account:  cloud/users.sh add <your e-mail> release-manager"

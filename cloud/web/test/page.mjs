@@ -13,6 +13,7 @@
 import { readFileSync } from 'node:fs';
 
 const ASSETS = new URL('../src/site/assets/', import.meta.url);
+export const NEIGHBOURS = 'https://console.test/assets/build/';
 
 /**
  * The address of one of the site's scripts as a module that Node can import.
@@ -30,9 +31,12 @@ export function scriptAddress(name, imports = {}, mark = '') {
   let source = readFileSync(new URL(name, ASSETS), 'utf8');
   for (const [file, address] of Object.entries(imports)) {
     const specifier = `from './${file}'`;
-    if (!source.includes(specifier)) throw new Error(`${name} does not import ${file}`);
-    source = source.replaceAll(specifier, `from '${address}'`);
+    const onDemand = `import('./${file}')`;
+    if (!source.includes(specifier) && !source.includes(onDemand)) throw new Error(`${name} does not import ${file}`);
+    source = source.replaceAll(specifier, `from '${address}'`).replaceAll(onDemand, `import('${address}')`);
   }
+  // A data: URL has nothing beside it, so a script looks for its neighbours at an address of the tests.
+  source = source.replaceAll('import.meta.url', `'${NEIGHBOURS}${name}'`);
   if (/from '\.\//.test(source)) throw new Error(`${name} imports a script it was not given an address for`);
   if (mark !== '') source += `\n// ${mark}\n`;
   return `data:text/javascript;base64,${Buffer.from(source, 'utf8').toString('base64')}`;
@@ -40,6 +44,8 @@ export function scriptAddress(name, imports = {}, mark = '') {
 
 export const CORE = scriptAddress('core.js');
 export const VIEWS = scriptAddress('views.js', { 'core.js': CORE });
+export const SERIAL = scriptAddress('serial.js', { 'views.js': VIEWS });
+export const HISTORY = scriptAddress('history.js', { 'core.js': CORE, 'views.js': VIEWS });
 
 // The document.
 

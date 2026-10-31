@@ -6,13 +6,15 @@
  *
  *   1. identify the caller from the claims the gateway verified   (401)
  *   2. require membership of one of the console's groups         (403)
- *   3. find the route                                             (404)
- *   4. for a write: ask Cognito whether the caller is a release manager
+ *   3. for a read: ask Cognito whether the account is still active and a
+ *      member, or go by an answer from the last minute            (403)
+ *   4. find the route                                             (404)
+ *   5. for a write: ask Cognito whether the caller is a release manager
  *      right now, whatever the token says                         (403)
- *   5. validate the path and the body, then act
+ *   6. validate the path and the body, then act
  *
  * A request to a write route leaves exactly one entry in the activity log, whatever
- * its outcome, including the refusals in steps 1, 2 and 4 and a request that runs out
+ * its outcome, including the refusals in steps 1, 2 and 5 and a request that runs out
  * of time.
  *
  * Time: Lambda stops the function 20 s after a request arrived, and what it stops
@@ -233,6 +235,7 @@ export function createApp({
     const caller = authenticate(event, config.userPoolClientId);
     request.sub = caller.sub;
     requireMember(caller);
+    await context.directory.requireLiveReader(caller, request.id);
     if (found === null) throw notFound('not_found', 'There is nothing at this address.');
     return found.route.run({ caller, params: found.params, query: queryOf(event) });
   }

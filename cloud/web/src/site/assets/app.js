@@ -8,20 +8,26 @@
  */
 
 import {
-  ApiError, afterUnauthorized, createApi, createAuth, createClock, deviceActivity, isUnderWay,
-  isUnfinished, onlyChoice, parseRoute, pollInterval, readConfig, readImageHeader, recordedFilename,
-  refreshPlan, revocationInPlace, revocationNotice, routeHash, sha256Hex, shouldRenew, singleLine,
-  staleAfter, summaryActivity, toBase64, versionOfDeployment,
+  ApiError, SESSION_CHANNEL, SIGNED_OUT_SIGNAL, afterUnauthorized, alreadyRuns, boardChanges, cancelNotice, createApi,
+  createAuth, createClock, describeExecution, deviceActivity, executionActivity, isUnderWay, isUnfinished, onlyChoice, parseRoute,
+  pollInterval, readConfig, readImageHeader, recordedFilename, refreshPlan, revocationInPlace, revocationNotice,
+  routeHash, sha256Hex, shouldRenew, singleLine, staleAfter, stillFinishing, stillRunning, stillSettling, summaryActivity,
+  toBase64, uploadInHand, versionOfDeployment,
 } from './core.js';
 import {
   accountView, activityView, cancelDialog, deployDialog, deploymentView, deploymentsView, deviceView,
-  devicesView, firmwareView, gateView, navView, overviewView, render, revokeDialog,
+  devicesView, firmwareView, gateView, navView, overviewView, render, revokeDialog, scriptPending, toastView,
 } from './views.js';
 
-// Board lists are also refreshed when nothing is being installed, so that "online"
-// does not go stale. Deployments are not: they follow pollInterval() alone.
+// Board lists, and the lists that another person can change at any time, are also
+// refreshed when nothing is being installed, so that they do not go stale. Deployments
+// are not: they follow pollInterval() alone.
 const IDLE_REFRESH_MS = 30000;
 const REDRAW_MS = 15000;
+// Pressing twice on what opens a dialog is one wish. The second press lands on the backdrop.
+const DOUBLE_CLICK_MS = 350;
+// Time to read a message, by its length; never less than the time a short one stays.
+const READING_MS_PER_CHARACTER = 80;
 const SESSION_CHECK_MS = 5000;
 // A refusal this soon after signing in would repeat for ever if sign-in simply restarted.
 const FRESH_SIGN_IN_S = 30;
@@ -35,6 +41,7 @@ const main = document.getElementById('main');
 const nav = document.getElementById('nav');
 const account = document.getElementById('account');
 const toasts = document.getElementById('toasts');
+const announcer = document.getElementById('announcer');
 
 function resource() {
   return { value: null, error: null, loadedAt: 0, loading: false };
@@ -52,6 +59,8 @@ const state = {
   deployments: resource(),
   recent: resource(),
   audit: { ...resource(), loadingMore: false, moreError: null },
+  commits: resource(),
+  scriptFailed: false,
   deviceDetails: new Map(),
   deploymentDetails: new Map(),
   upload: { stage: 'idle', over: false },
@@ -65,6 +74,34 @@ let dialog = null;
 // Drawing.
 
 let drawQueued = false;
+
+/**
+ * Draw, and keep the keyboard's place if the control that had the focus goes away with
+ * what changed. It goes to the part of the page the control belonged to, or else to the
+ * page's title, instead of falling out of the page.
+ */
+function keepingFocus(drawing) {
+  const before = document.activeElement;
+  const home = before?.closest?.('[data-focus-home]') ?? null;
+  drawing();
+  if (!before || before === document.body || before.isConnected) return;
+  const now = document.activeElement;
+  if (now && now !== before && now !== document.body) return;
+  (home?.isConnected ? home : document.getElementById('page-title'))?.focus({ preventScroll: true });
+}
+
+// What the boards last said, by board, to tell a screen reader when that changes. The
+// page of a deployment has live regions of its own, one per board.
+let heard = new Map();
+
+function announceBoards() {
+  const { view, thing } = state.route;
+  const detail = view === 'device' ? state.deviceDetails.get(thing)?.value : null;
+  const devices = detail ? [detail.device] : state.devices.value?.devices ?? [];
+  const { seen, said } = boardChanges(heard, devices);
+  heard = new Map([...heard, ...seen]);
+  if (said.length > 0 && view !== 'deployment' && announcer) announcer.textContent = said.join(' ');
+}
 
 function paint() {
   drawQueued = false;
@@ -98,7 +135,9 @@ function paint() {
     });
   }
   node.key = routeHash(state.route);
-  render(main, node);
+  keepingFocus(() => render(main, node));
+  pages[state.route.view].painted?.();
+  announceBoards();
   if (dialogOpen()) dialog.redraw();
 }
 
@@ -116,12 +155,45 @@ function showGate(gate) {
   paint();
 }
 
+// The toasts on the page, by what they say: the same message twice is one message, for longer.
+const toastsShown = new Map();
+
 function notify(message, tone = 'good') {
+  const name = `${tone} ${message}`;
+  if (toastsShown.has(name)) {
+    toastsShown.get(name)();
+    return;
+  }
   const toast = document.createElement('div');
   toast.className = `toast is-${tone}`;
-  toast.textContent = message;
+  let expiry = 0;
+  // Where the keyboard came from, if it has come here: it goes back when the toast is gone.
+  let cameFrom = null;
+  const dismiss = () => {
+    clearTimeout(expiry);
+    const held = toast.contains(document.activeElement);
+    toastsShown.delete(name);
+    toast.remove();
+    if (held) (cameFrom?.isConnected ? cameFrom : document.getElementById('page-title'))?.focus({ preventScroll: true });
+  };
+  const stay = Math.max(tone === 'good' ? 5000 : 12000, message.length * READING_MS_PER_CHARACTER);
+  const countDown = () => {
+    clearTimeout(expiry);
+    expiry = setTimeout(dismiss, stay);
+  };
+  const hold = () => clearTimeout(expiry);
+  render(toast, toastView(message, dismiss));
+  // Not while it is being read, or while its button has the focus.
+  toast.addEventListener('mouseenter', hold);
+  toast.addEventListener('focusin', (event) => {
+    hold();
+    if (!toast.contains(event.relatedTarget)) cameFrom = event.relatedTarget;
+  });
+  toast.addEventListener('mouseleave', countDown);
+  toast.addEventListener('focusout', countDown);
   toasts.append(toast);
-  setTimeout(() => toast.remove(), tone === 'good' ? 5000 : 12000);
+  toastsShown.set(name, countDown);
+  countDown();
 }
 
 /** Anything thrown that is not the API's doing is a fault in the console itself. */
@@ -179,7 +251,10 @@ function due(target, full) {
 
 /** The deployments whose boards the overview follows one by one: those with a board still at it. */
 function activeDeployments() {
-  return (state.deployments.value ?? []).filter(isUnderWay).slice(0, DEPLOYMENTS_ON_OVERVIEW);
+  const devices = state.devices.value?.devices ?? [];
+  return (state.deployments.value ?? [])
+    .filter((deployment) => isUnderWay(deployment) || stillFinishing(deployment, devices, clock.now()))
+    .slice(0, DEPLOYMENTS_ON_OVERVIEW);
 }
 
 function phasesOf(deployment) {
@@ -187,9 +262,50 @@ function phasesOf(deployment) {
   return deployment.executions.map((execution) => `${execution.thing}:${execution.phase}`).join(' ');
 }
 
+/** The boards and the open deployments as pollInterval takes them. */
+function fleetActivity() {
+  const devices = state.devices.value?.devices ?? [];
+  const statuses = devices.map(deviceActivity);
+  for (const deployment of activeDeployments()) {
+    const detail = state.deploymentDetails.get(deployment.id)?.value;
+    if (detail) statuses.push(...detail.executions.map(executionActivity));
+    else statuses.push(summaryActivity(deployment, devices));
+    // Cancelled, with a board that is still restarting: AWS has nothing more to say, and it is not over.
+    if (!isUnderWay(deployment)) statuses.push('IN_PROGRESS');
+  }
+  return statuses;
+}
+
+/** Read the record of each open deployment: the list only says how many boards do what. */
+function readActiveDeployments() {
+  return each(activeDeployments(), (deployment) =>
+    load(entry(state.deploymentDetails, deployment.id), () => api.deployment(deployment.id)));
+}
+
+/** True while a cancelled deployment can still change what one of its boards runs. */
+function settling(deployment) {
+  const devices = state.devices.value?.devices ?? [];
+  return deployment.executions.some((execution) => stillSettling(execution,
+    devices.find((device) => device.thing === execution.thing), deployment.id, clock.now()));
+}
+
+/** True while the page of a deployment that is over invites somebody to offer its release again. */
+function canBeOfferedAgain(detail) {
+  const devices = state.devices.value?.devices ?? [];
+  const release = state.firmware.value?.releases.find((item) => item.version === detail.version);
+  if (release && release.status !== 'active') return false;
+  return detail.executions.some((execution) => describeExecution(execution, {
+    board: devices.find((device) => device.thing === execution.thing) ?? null,
+    deployment: detail.id,
+    version: detail.version,
+    history: null,
+    unread: state.devices.value === null,
+  }).retry);
+}
+
 // One entry per page: how it is drawn, what it loads, and how soon to load it again
 // (0 for never). `full` is false for a scheduled refresh, which skips what cannot
-// have changed much.
+// have changed much. `holdStill` says that a scheduled refresh would be in the way.
 const pages = {
   overview: {
     title: 'Overview',
@@ -204,33 +320,35 @@ const pages = {
       ]);
       // The list says how many boards are in each state, not which board is doing
       // what. That comes from each unfinished deployment's own record.
-      await each(activeDeployments(), (deployment) =>
-        load(entry(state.deploymentDetails, deployment.id), () => api.deployment(deployment.id)));
+      await readActiveDeployments();
     },
-    interval() {
-      const statuses = (state.devices.value?.devices ?? []).map(deviceActivity);
-      for (const deployment of activeDeployments()) {
-        const detail = state.deploymentDetails.get(deployment.id)?.value;
-        if (detail) statuses.push(...detail.executions.map((execution) => execution.status));
-        else statuses.push(summaryActivity(deployment));
-      }
-      return pollInterval(statuses) || IDLE_REFRESH_MS;
-    },
+    interval: () => pollInterval(fleetActivity()) || IDLE_REFRESH_MS,
   },
   devices: {
     title: 'Devices',
     view: devicesView,
     resources: () => [state.devices],
-    refresh: () => load(state.devices, api.devices),
-    interval: () => pollInterval((state.devices.value?.devices ?? []).map(deviceActivity)) || IDLE_REFRESH_MS,
+    async refresh(full) {
+      await Promise.all([
+        load(state.devices, api.devices),
+        load(state.deployments, api.deployments),
+        due(state.firmware, full) ? load(state.firmware, api.firmware) : null,
+      ]);
+      // A board that is offline cannot report an offer. Its deployment's record says it has one.
+      await readActiveDeployments();
+    },
+    interval: () => pollInterval(fleetActivity()) || IDLE_REFRESH_MS,
   },
   device: {
-    title: 'Board',
+    title: (route) => `${route.thing.slice(0, 12)}…`,
     view: deviceView,
     resources: () => [entry(state.deviceDetails, state.route.thing)],
-    refresh() {
+    async refresh(full) {
       const { thing } = state.route;
-      return load(entry(state.deviceDetails, thing), () => api.device(thing));
+      await Promise.all([
+        load(entry(state.deviceDetails, thing), () => api.device(thing)),
+        due(state.firmware, full) ? load(state.firmware, api.firmware) : null,
+      ]);
     },
     interval() {
       const detail = state.deviceDetails.get(state.route.thing)?.value;
@@ -241,8 +359,14 @@ const pages = {
     title: 'Firmware',
     view: firmwareView,
     resources: () => [state.firmware],
-    refresh: () => load(state.firmware, api.firmware),
-    interval: () => 0,
+    refresh: () => Promise.all([
+      load(state.firmware, api.firmware),
+      // Whether the release that was just uploaded has been deployed since.
+      state.upload.stage === 'done' ? load(state.deployments, api.deployments) : null,
+    ]),
+    interval: () => IDLE_REFRESH_MS,
+    // A release that changes under an open dialog or a file in hand can wait for a moment.
+    holdStill: () => dialogOpen() || uploadInHand(state.upload.stage),
   },
   deployments: {
     title: 'Deployments',
@@ -253,37 +377,116 @@ const pages = {
         load(state.deployments, api.deployments),
         due(state.firmware, full) ? load(state.firmware, api.firmware) : null,
       ]);
+      // Which waiting board needs its button pressed, and which boards are online.
+      if ((state.deployments.value ?? []).some(isUnderWay)) await load(state.devices, api.devices);
     },
-    interval: () => pollInterval((state.deployments.value ?? []).map(summaryActivity)),
+    interval() {
+      const devices = state.devices.value?.devices ?? [];
+      return pollInterval((state.deployments.value ?? []).map((item) => summaryActivity(item, devices)));
+    },
   },
   deployment: {
-    title: 'Deployment',
+    title(route) {
+      const version = versionOfDeployment(route.id);
+      return version ? `Deployment of ${version}` : 'Deployment';
+    },
     view: deploymentView,
     resources: () => [entry(state.deploymentDetails, state.route.id)],
     async refresh(full) {
       const { id } = state.route;
       const target = entry(state.deploymentDetails, id);
       const before = phasesOf(target.value);
-      await load(target, () => api.deployment(id));
+      await Promise.all([
+        load(target, () => api.deployment(id)),
+        // Whether the release is still there to be offered again, or was revoked.
+        due(state.firmware, full) ? load(state.firmware, api.firmware) : null,
+      ]);
+      const detail = target.value;
       // The board list adds when an offline board was last seen and what it runs now.
-      // It only needs reading again when a board has moved on.
-      if (full || state.devices.loadedAt === 0 || phasesOf(target.value) !== before) {
-        await load(state.devices, api.devices);
+      // It only needs reading again when a board has moved on, or may be about to.
+      const moved = phasesOf(detail) !== before || (detail !== null && settling(detail));
+      if (full || state.devices.loadedAt === 0 || moved) await load(state.devices, api.devices);
+      // A board that runs what was cancelled may have got it from another deployment.
+      // Its own list of updates says, and the deployment's record does not. A copy from
+      // before the board ran it cannot say, and a read that failed is tried again.
+      const runningIt = (detail?.executions ?? []).filter((execution) =>
+        execution.status === 'CANCELED' && execution.running === detail.version);
+      await each(runningIt, (execution) => {
+        const known = entry(state.deviceDetails, execution.thing);
+        const outdated = known.error !== null || known.value?.device.fw?.version !== execution.running;
+        return full || outdated ? load(known, () => api.device(execution.thing)) : null;
+      });
+      // Who cancelled it is in the log and not in the deployment's record.
+      if (detail?.status === 'CANCELED' && due(state.audit, full)) {
+        await load(state.audit, () => api.audit({ limit: ACTIVITY_PAGE }));
       }
     },
     interval() {
       const detail = state.deploymentDetails.get(state.route.id)?.value;
-      return detail ? pollInterval(detail.executions.map((execution) => execution.status)) : 0;
+      if (!detail) return 0;
+      const statuses = detail.executions.map(executionActivity);
+      if (settling(detail)) statuses.push('IN_PROGRESS');
+      // While it can be offered again, somebody else can revoke its release: the page would then say so.
+      return pollInterval(statuses) || (canBeOfferedAgain(detail) ? IDLE_REFRESH_MS : 0);
     },
   },
   activity: {
     title: 'Activity',
     view: activityView,
     resources: () => [state.audit],
-    refresh: () => load(state.audit, () => api.audit({ limit: ACTIVITY_PAGE })),
+    async refresh(full) {
+      await Promise.all([
+        load(state.audit, () => api.audit({ limit: ACTIVITY_PAGE })),
+        // How a deployment ended is not in the log: it follows from the deployment.
+        due(state.deployments, full) ? load(state.deployments, api.deployments) : null,
+      ]);
+    },
+    interval: () => IDLE_REFRESH_MS,
+    // Reading the first page again would take away the pages loaded by hand.
+    holdStill: () => state.audit.loadingMore || (state.audit.value?.entries.length ?? 0) > ACTIVITY_PAGE,
+  },
+  // These two load their script when they are opened, so a cold load stays at five requests.
+  // The serial console talks to a board and never to the API.
+  serial: {
+    title: 'Serial console',
+    view: (ctx) => (serialScript ? serialScript.serialView(ctx) : scriptPending(ctx, 'serial', 'Serial console')),
+    resources: () => [],
+    async refresh() {
+      serialScript ??= await pageScript(() => import('./serial.js'));
+      draw();
+    },
+    interval: () => 0,
+    painted: () => serialScript?.keepTranscriptInView(),
+  },
+  history: {
+    title: 'History',
+    view: (ctx) => (historyScript ? historyScript.historyView(ctx) : scriptPending(ctx, 'history', 'History')),
+    resources: () => [state.commits],
+    async refresh() {
+      historyScript ??= await pageScript(() => import('./history.js'));
+      if (historyScript && !state.commits.value) {
+        await load(state.commits, () => historyScript.readHistory(window.fetch.bind(window)));
+      }
+      draw();
+    },
     interval: () => 0,
   },
 };
+
+let serialScript = null;
+let historyScript = null;
+
+/** The script of a page, or null if it could not be fetched: after a deployment an old tab's is gone. */
+async function pageScript(fetching) {
+  try {
+    state.scriptFailed = false;
+    return await fetching();
+  } catch (error) {
+    console.error(error);
+    state.scriptFailed = true;
+    return null;
+  }
+}
 
 // Refreshing. One timer, armed after each refresh has finished, so requests never
 // pile up; none while the tab is hidden.
@@ -301,7 +504,7 @@ function arm() {
     visible: document.visibilityState === 'visible',
   });
   state.interval = plan.every;
-  if (plan.wait > 0) timer = setTimeout(() => refreshNow(false), plan.wait);
+  if (plan.wait > 0) timer = setTimeout(() => (page.holdStill?.() ? arm() : refreshNow(false)), plan.wait);
   draw();
 }
 
@@ -371,7 +574,15 @@ function signedOutGate({ reason, message }) {
 }
 
 function onUnauthorized() {
-  const step = afterUnauthorized({ gate: state.gate, fresh: auth.signedInWithin(FRESH_SIGN_IN_S) });
+  // Whatever time it had left: the masthead, a dialog and the next request all go by this.
+  auth.tokenRefused();
+  const step = afterUnauthorized({
+    gate: state.gate,
+    fresh: auth.signedInWithin(FRESH_SIGN_IN_S),
+    holding: dialogOpen() || uploadInHand(state.upload.stage),
+  });
+  // The masthead says that the session is over now, not at its next redraw.
+  draw();
   if (step === 'refused') showGate(signedOutGate({ reason: 'refused' }));
   else if (step === 'sign-in') beginSignIn();
 }
@@ -388,24 +599,69 @@ function checkSession() {
   if (renew) beginSignIn();
 }
 
+/**
+ * Another tab was signed out. This one ends too, whatever it holds: the point of signing
+ * out is that nobody can go on from here. What a file or a dialog had in hand is gone.
+ */
+function signedOutElsewhere() {
+  if (!auth) return;
+  auth.signedOutElsewhere();
+  chosen += 1;
+  state.upload = { stage: 'idle', over: false };
+  showGate(signedOutGate({ reason: 'signed-out' }));
+}
+
+/** The line between tabs of this address. A browser without one simply has none. */
+function openSessionChannel() {
+  if (typeof window.BroadcastChannel !== 'function') return null;
+  try {
+    const channel = new window.BroadcastChannel(SESSION_CHANNEL);
+    channel.addEventListener('message', (event) => {
+      if (event.data === SIGNED_OUT_SIGNAL) signedOutElsewhere();
+    });
+    return channel;
+  } catch {
+    return null;
+  }
+}
+
 // Routes.
 
 let routesShown = 0;
+
+// How far the reader had scrolled, by entry of the browser's history, for the Back and
+// Forward buttons. A link makes an entry without a mark, which it gets here.
+const scrolled = new Map();
+let entriesMarked = 0;
+
+function placePage() {
+  const mark = history.state?.entry ?? null;
+  window.scrollTo(0, scrolled.get(mark) ?? 0);
+  if (mark === null) {
+    entriesMarked += 1;
+    history.replaceState({ entry: `${Date.now()}-${entriesMarked}` }, '', location.pathname + location.hash);
+  }
+}
 
 function showRoute() {
   if (state.gate) return;
   const route = parseRoute(location.hash);
   if (!route) {
+    // A console that opens without an address has simply been opened. Any other address
+    // was meant to lead somewhere, and leading elsewhere without a word would be odd.
+    const lost = !['', '#', '#/'].includes(location.hash);
     history.replaceState(null, '', location.pathname + routeHash(null));
+    if (lost) notify('That address is not a page of this console. Here is the overview.');
     showRoute();
     return;
   }
   if (dialog) dialog.close(true);
   state.route = route;
   state.interval = 0;
-  document.title = `${pages[route.view].title} · Cranium`;
+  const { title } = pages[route.view];
+  document.title = `${typeof title === 'function' ? title(route) : title} · Cranium`;
   paint();
-  window.scrollTo(0, 0);
+  placePage();
   // Moving between pages puts the focus on the new page's title, where reading and
   // tabbing should go on. The first page is left alone: it starts at the top.
   routesShown += 1;
@@ -426,10 +682,11 @@ function openDialog(build) {
   document.body.append(el);
 
   let pressedOutside = false;
+  const openedAt = Date.now();
   const self = {
     busy: false,
     isOpen: () => el.open,
-    redraw: () => render(el, build()),
+    redraw: () => keepingFocus(() => render(el, build())),
     close(force = false) {
       if (!self.busy || force) el.close();
     },
@@ -441,17 +698,25 @@ function openDialog(build) {
     pressedOutside = event.target === el;
   });
   el.addEventListener('click', (event) => {
-    if (pressedOutside && event.target === el) self.close();
+    if (pressedOutside && event.target === el && Date.now() - openedAt > DOUBLE_CLICK_MS) self.close();
   });
   el.addEventListener('close', () => {
     el.remove();
     if (dialog === self) dialog = null;
+    // The browser gives the focus back to what opened the dialog, unless that is gone.
+    if (document.activeElement === document.body) {
+      document.getElementById('page-title')?.focus({ preventScroll: true });
+    }
     checkSession();
   });
 
   dialog = self;
   self.redraw();
   el.showModal();
+  // A dialog opens at its top, also where the field that gets the focus lies further down.
+  el.scrollTop = 0;
+  const body = el.querySelector?.('.dialog-body');
+  if (body) body.scrollTop = 0;
   return self;
 }
 
@@ -501,8 +766,14 @@ function openDeploy(version) {
     loadError: null,
     sending: false,
     error: null,
+    // The release that was asked for and has been revoked since.
+    gone: null,
     close: () => self.close(),
-    choose: change((picked) => { model.version = picked; }),
+    signIn: beginSignIn,
+    choose: change((picked) => {
+      model.version = picked;
+      model.gone = null;
+    }),
     next: change(() => {
       model.step += 1;
       suggest();
@@ -518,9 +789,11 @@ function openDeploy(version) {
     }),
     toggleAll: change(() => {
       model.chosenByHand = true;
-      const free = model.devices.filter((device) => !model.busy.has(device.thing));
+      // Not the boards that would only refuse: those take a tick of their own.
+      const free = model.devices.filter((device) =>
+        !model.busy.has(device.thing) && !alreadyRuns(device, model.version));
       const all = free.every((device) => model.things.has(device.thing));
-      model.things = new Set(all ? [] : free.map((device) => device.thing));
+      model.things = new Set(all ? [] : [...model.things, ...free.map((device) => device.thing)]);
     }),
     async reload() {
       model.loading = true;
@@ -528,6 +801,9 @@ function openDeploy(version) {
       self.redraw();
       try {
         const [firmware, fleet] = await Promise.all([api.firmware(), api.devices()]);
+        // What this has found out is true of the page behind the dialog as well.
+        Object.assign(state.firmware, { value: firmware, error: null, loadedAt: clock.now() });
+        draw();
         // Whether a board still has an update open is in the board's own record.
         const busy = new Map();
         await each(fleet.devices, async (device) => {
@@ -547,7 +823,10 @@ function openDeploy(version) {
           if (busy.has(thing)) model.things.delete(thing);
         }
         if (!model.releases.some((release) => release.version === model.version)) {
-          model.version = model.releases[0]?.version ?? null;
+          // Without a word on which release, the newest is the one to suggest. A release
+          // that was asked for and has gone is not silently replaced by another.
+          model.gone = model.version;
+          model.version = model.gone === null ? model.releases[0]?.version ?? null : null;
           model.step = 0;
         }
         suggest();
@@ -597,6 +876,7 @@ function openCancel(deployment) {
     sending: false,
     error: null,
     close: () => self.close(),
+    signIn: beginSignIn,
     setForce(force) {
       model.force = force;
       self.redraw();
@@ -604,12 +884,12 @@ function openCancel(deployment) {
     // `force` is what the dialog shows as chosen, which is not always what was ticked:
     // once the offer is withdrawn, stopping the boards is all that is left.
     submit: (force) => submitFrom(self, model, async () => {
+      const before = model.deployment;
+      const started = before.executions.filter((execution) => execution.status === 'IN_PROGRESS').length;
       const updated = await api.cancel(deployment.id, force);
       keep(state.deploymentDetails, updated.id, updated);
       self.close(true);
-      notify(force
-        ? 'Cancelled. Boards that had started are being stopped.'
-        : 'Cancelled. Boards that had not started are no longer offered this update.');
+      notify(cancelNotice({ force, withdrawn: before.status === 'CANCELED', started }));
       refreshNow(true);
     }),
   };
@@ -644,6 +924,7 @@ function openRevoke(release) {
     sending: false,
     error: null,
     close: () => self.close(),
+    signIn: beginSignIn,
     setReason(text) {
       model.reason = text;
       self.redraw();
@@ -668,8 +949,16 @@ function openRevoke(release) {
         if (!revocationInPlace(error)) throw error;
       }
       self.close(true);
-      notify(revocationNotice(release.version, { cancelled, again }));
       refreshNow(true);
+      // Said at once: this cannot be undone, and its confirmation does not wait for a list.
+      notify(revocationNotice(release.version, { cancelled, again }));
+      // Revoking leaves a board that runs the release as it is. Whoever revokes should know
+      // which, as soon as that is known.
+      await load(state.devices, api.devices);
+      const running = (state.devices.value?.devices ?? [])
+        .filter((device) => device.fw?.version === release.version)
+        .map((device) => device.thing);
+      if (running.length > 0) notify(stillRunning(running));
     }),
   };
   self = openDialog(() => revokeDialog(model, { state, actions }));
@@ -754,6 +1043,7 @@ async function startUpload() {
 
 const actions = {
   refresh: () => refreshNow(true),
+  redraw: draw,
   signOut: () => auth.signOut(),
   // Asked for by hand where the console does not leave by itself: with a file in hand.
   signInAgain: () => beginSignIn(),
@@ -822,7 +1112,14 @@ async function start() {
   } catch (error) {
     if (error?.status === 401) return;
     const fault = asProblem(error);
-    showGate(fault.status === 403
+    const gate = fault.code === 'account_inactive'
+      ? {
+        title: 'Your account is not active',
+        text: 'It is disabled or removed, or it has not been confirmed. Ask a teammate who manages the console.',
+        action: { label: 'Sign out', run: () => auth.signOut(), quiet: true },
+      }
+      : null;
+    showGate(gate ?? (fault.status === 403
       ? {
         title: 'Your account has no access yet',
         text: 'You are signed in, but your account is in neither the viewers nor the release ' +
@@ -841,7 +1138,7 @@ async function start() {
             start();
           },
         },
-      });
+      }));
     return;
   }
   state.gate = null;
@@ -867,6 +1164,12 @@ async function start() {
 }
 
 async function boot() {
+  // The console puts each page where it belongs: see placePage().
+  history.scrollRestoration = 'manual';
+  window.addEventListener('scroll', () => {
+    const mark = history.state?.entry;
+    if (mark) scrolled.set(mark, window.scrollY);
+  }, { passive: true });
   document.getElementById('skip')?.addEventListener('click', () => {
     (document.getElementById('page-title') ?? main).focus();
   });
@@ -887,6 +1190,7 @@ async function boot() {
     return;
   }
 
+  const channel = openSessionChannel();
   let outcome;
   try {
     auth = createAuth({
@@ -896,6 +1200,7 @@ async function boot() {
       history: window.history,
       fetch: window.fetch.bind(window),
       crypto: window.crypto,
+      tellOtherTabs: () => channel?.postMessage(SIGNED_OUT_SIGNAL),
     });
     api = createApi({
       auth,

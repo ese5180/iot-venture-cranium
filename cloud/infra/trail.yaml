@@ -1,0 +1,124 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Cranium account record - one multi-Region CloudTrail trail of management events, in a
+  bucket of its own. A separate stack so that cloud/teardown.sh leaves it alone: the record
+  of what was done to the console outlives the console. Deployed by cloud/trail.sh.
+
+# Management events only, which keeps it within the free first copy. It therefore records
+# who changed a resource (a role, a function, a bucket policy, a table's protection), and
+# not what happened to the data inside: no S3 object tags or downloads, no DynamoDB items
+# and no Lambda invocations. "An account record" in cloud/README.md has the cost.
+
+Parameters:
+  RetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 90
+    Description: >-
+      Days to keep a log file. CloudTrail's own event history already covers the last 90.
+
+Resources:
+
+  TrailBucket:
+    Type: AWS::S3::Bucket
+    # Kept when the stack is deleted, because it is the record. A failed first creation
+    # holds nothing, so that may clean up after itself.
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      # No BucketName: a generated name cannot be guessed, so nobody can create the bucket
+      # first in another account and receive the logs.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # CloudTrail never overwrites a file, so this costs nothing until somebody deletes
+      # or replaces one, and then the earlier version is still there for a while.
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-log-files
+            Status: Enabled
+            ExpirationInDays: !Ref RetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          # In a versioned bucket an expired file leaves a delete marker behind. S3 does
+          # not allow this action in the same rule as the expiry.
+          - Id: remove-expired-delete-markers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+
+  TrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyRequestsWithoutTls
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt TrailBucket.Arn
+              - !Sub '${TrailBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          # The two statements CloudTrail needs, each for this one trail only. A trail's
+          # ARN names the Region it was created in, also for a multi-Region trail.
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt TrailBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/cranium-trail'
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${TrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/cranium-trail'
+
+  Trail:
+    Type: AWS::CloudTrail::Trail
+    # CloudTrail checks the bucket policy when the trail is created.
+    DependsOn: TrailBucketPolicy
+    Properties:
+      # A fixed name: the bucket policy has to name the trail before the trail exists.
+      TrailName: cranium-trail
+      S3BucketName: !Ref TrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      # An hourly signed digest of the log files, which makes a changed or removed file
+      # detectable: aws cloudtrail validate-logs.
+      EnableLogFileValidation: true
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+
+Outputs:
+  TrailArn:
+    Description: Pass this to "aws cloudtrail validate-logs --trail-arn".
+    Value: !GetAtt Trail.Arn
+  TrailBucketName:
+    Value: !Ref TrailBucket
