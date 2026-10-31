@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision a board: Wi-Fi network, device identity, and cloud settings.
+"""Provision a board: device ID, Wi-Fi network, device identity, and cloud settings.
 
     python tools/provision_device.py              do whatever is still missing
     python tools/provision_device.py --wifi       send the Wi-Fi network again
@@ -9,13 +9,16 @@
 
 What it does, in order:
 
-1. Sends the network from ~/.cranium/wifi_secrets.h to the board, which stores it in
-   TF-M. The file is read through sudo if it is locked.
-2. Asks the board to create its own key pair. The private key never leaves the board;
+1. If the board is in factory mode, runs first-time setup with the ID from --id, or else
+   the 16 hexadecimal digits of its SoC's identifier. The board restarts.
+2. Sends the network from ~/.cranium/wifi_secrets.h to the board, which stores it in
+   TF-M. The file is read through sudo if it is locked. The console's echo is off for
+   this, so the passphrase does not come back, and it never appears in this tool's output.
+3. Asks the board to create its own key pair. The private key never leaves the board;
    the board prints a certificate signing request.
-3. Registers the board in AWS IoT: a thing named after the board's hardware ID, a
+4. Registers the board in AWS IoT: a thing named after the board's hardware ID, a
    certificate issued for that request, the device policy, the device group.
-4. Loads the certificate and the Amazon root CA into the board, and tells it which
+5. Loads the certificate and the Amazon root CA into the board, and tells it which
    AWS IoT endpoint to use and where firmware may be downloaded from.
 
 Needs the AWS CLI with a signed-in profile, and the cloud stack deployed
@@ -34,7 +37,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from board import BoardError, Console
+from board import BoardError, Console, ShellFirmware, crc16_ccitt_false
 from local import WIFI_SECRETS
 
 REPO = Path(__file__).resolve().parent.parent
@@ -42,7 +45,9 @@ OUTPUTS = REPO / "cloud" / ".deploy" / "outputs.json"
 ROOT_CA = REPO / "firmware" / "certs" / "AmazonRootCA1.pem"
 # SHA-256 of the DER form of Amazon Root CA 1, as published by Amazon Trust Services.
 ROOT_CA_SHA256 = "8ecde6884f3d87b1125ba31ac3fcb13d7016de7f57cc904fe1cb97c6ae98196e"
-CHUNK = 300
+# Bytes of a certificate per line: 256 base64 characters, well inside the line buffer.
+CHUNK = 192
+THING_PREFIX = "cranium-"
 
 
 def fail(message: str) -> None:
@@ -100,17 +105,18 @@ def read_wifi_secrets() -> tuple[str, str, str]:
 
 def provision_wifi(console: Console) -> None:
     ssid, passphrase, security = read_wifi_secrets()
-    # Base64 keeps spaces and quotes in the values away from the shell's parser.
-    console.run(f"prov wifi {b64(ssid.encode())} {security} {b64(passphrase.encode())}", wait=6)
+    if "|" in ssid:
+        fail("a network whose name contains | cannot be sent over the console")
+    # The name goes byte for byte: a phone's hotspot has a curly apostrophe in it.
+    console.run(f"WIFI_SEC|{ssid}|{security}|{passphrase}", wait=6)
     print(f"Wi-Fi network \"{ssid}\" ({security}) stored on the board")
 
 
 def load_certificate(console: Console, der: bytes, kind: str) -> None:
-    text = b64(der)
-    console.run("prov load begin")
-    for offset in range(0, len(text), CHUNK):
-        console.run(f"prov load add {text[offset:offset + CHUNK]}")
-    console.run(f"prov load commit {kind}", wait=6)
+    chunks = [der[offset:offset + CHUNK] for offset in range(0, len(der), CHUNK)]
+    console.run(f"STREAM_START|{len(der)}|{len(chunks)}|{crc16_ccitt_false(der):04x}|{kind}")
+    for index, chunk in enumerate(chunks):
+        console.run(f"STREAM_CHUNK|{index}|{b64(chunk)}", wait=8)
 
 
 def root_ca_der() -> bytes:
@@ -121,7 +127,7 @@ def root_ca_der() -> bytes:
 
 
 def request_from_board(console: Console, replace: bool) -> str:
-    lines = console.run("prov keygen replace" if replace else "prov keygen", wait=15)
+    lines = console.run("KEYGEN|REPLACE" if replace else "KEYGEN", wait=15)
     text = "\n".join(lines)
     match = re.search(r"-----BEGIN CERTIFICATE REQUEST-----.*?-----END CERTIFICATE REQUEST-----",
                       text, re.DOTALL)
@@ -182,6 +188,16 @@ def show(status: dict[str, str]) -> None:
         print(f"  {key:<14} {value}")
 
 
+def first_time_setup(console: Console, thing: str, device_id: str | None) -> dict[str, str]:
+    """Take a board out of factory mode. It erases everything, which is nothing on such a
+    board, and restarts."""
+    device_id = device_id or thing.removeprefix(THING_PREFIX)
+    console.run(f"INIT|{device_id}", wait=15)
+    print(f"First-time setup done, device ID {device_id}. The board is restarting ...")
+    console.wait_until_up()
+    return console.status()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", help="serial port of the board's console (default: auto)")
@@ -193,6 +209,10 @@ def main() -> None:
     parser.add_argument("--reset", action="store_true", help="factory reset the board")
     parser.add_argument("--new-identity", action="store_true",
                         help="replace the board's key pair and certificate")
+    parser.add_argument("--id", help="device ID for a board in factory mode: 1-32 letters or "
+                                     "digits (default: its SoC's identifier)")
+    parser.add_argument("--connect-timeout", type=float, default=90,
+                        help="seconds to wait for the board to reach AWS IoT (default: 90)")
     args = parser.parse_args()
 
     try:
@@ -205,13 +225,22 @@ def main() -> None:
                 show(status)
                 return
 
+            if "state" not in status:
+                raise ShellFirmware("old firmware")
+
             if args.reset:
-                console.run("prov reset", wait=4, quiet=True)
-                print("Board erased and restarted. Its AWS IoT certificate is still "
-                      "registered; provisioning again replaces it.")
+                if status.get("state") == "FACTORY":
+                    print("The board is in factory mode already: nothing to reset.")
+                    return
+                console.run("FACTORY_RESET", wait=15)
+                print("Board erased and restarted in factory mode. Its AWS IoT certificate "
+                      "is still registered; provisioning again replaces it.")
                 return
 
-            has_network = not status.get("wifi network", "").startswith("missing")
+            if status.get("state") == "FACTORY":
+                status = first_time_setup(console, thing, args.id)
+
+            has_network = status.get("wifi password") == "set"
             if args.wifi or (not has_network and not args.no_wifi):
                 provision_wifi(console)
                 has_network = True
@@ -221,24 +250,24 @@ def main() -> None:
             outputs = load_outputs()
             aws = Aws(args.profile, outputs["Region"])
 
-            needs_identity = (args.new_identity or status.get("private key") != "stored"
-                              or status.get("certificate") != "stored")
+            needs_identity = (args.new_identity or status.get("private key") != "set"
+                              or status.get("certificate") != "set")
             if needs_identity:
                 # A key without its certificate cannot be reused: the request is only
                 # printed when the key is created.
-                replace = status.get("private key") == "stored"
+                replace = status.get("private key") == "set"
                 csr = request_from_board(console, replace)
                 certificate = register_in_aws(aws, outputs, thing, csr)
-                load_certificate(console, certificate, "cert")
+                load_certificate(console, certificate, "CERT")
                 print("Device certificate stored on the board")
 
-            if needs_identity or status.get("root CA") != "stored":
-                load_certificate(console, root_ca_der(), "ca")
+            if needs_identity or status.get("root CA") != "set":
+                load_certificate(console, root_ca_der(), "CA")
                 print("Amazon Root CA 1 stored on the board")
 
             endpoint = aws.call("iot", "describe-endpoint", "--endpoint-type",
                                 "iot:Data-ATS")["endpointAddress"]
-            console.run(f"prov cloud {endpoint} {outputs['FirmwareDownloadPrefix']}", wait=5)
+            console.run(f"CLOUD|{endpoint}|{outputs['FirmwareDownloadPrefix']}", wait=5)
             print("Cloud settings stored on the board")
 
             if not has_network:
@@ -248,9 +277,14 @@ def main() -> None:
                 return
 
             print("Waiting for the board to connect ...")
-            deadline = time.time() + 90
+            deadline = time.time() + args.connect_timeout
             while time.time() < deadline:
-                status = console.status()
+                try:
+                    status = console.status()
+                except BoardError:
+                    # It is busy for a moment. The deadline is what counts.
+                    time.sleep(5)
+                    continue
                 if status.get("cloud") == "connected":
                     break
                 time.sleep(5)
@@ -259,6 +293,9 @@ def main() -> None:
                 fail("the board is provisioned but has not connected yet; check the Wi-Fi "
                      "network and watch the console")
             print("Done: the board is connected to AWS IoT.")
+    except ShellFirmware:
+        fail("this board runs firmware from before the console. Update it first with "
+             "scripts/ota.sh or tools/recover.py")
     except BoardError as error:
         fail(str(error))
 

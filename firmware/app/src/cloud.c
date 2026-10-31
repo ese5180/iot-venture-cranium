@@ -31,6 +31,8 @@ static struct mqtt_topic subscriptions[5];
 static K_THREAD_STACK_DEFINE(connect_stack, CONNECT_STACK);
 static struct k_work_q connect_queue;
 static struct k_work connect_work;
+/* The connection thread's own copy: the settings can change on the main loop. */
+static char connect_host[IDENTITY_ENDPOINT_MAX];
 
 static atomic_t connected;
 static atomic_t connecting;
@@ -210,20 +212,13 @@ static void on_aws_iot_event(const struct aws_iot_evt *const event)
 
 static void connect_work_handler(struct k_work *work)
 {
-	const struct identity_settings *config = identity_settings_get();
+	struct aws_iot_config aws_config = {
+		.client_id = (char *)identity_thing_name(),
+		.host_name = connect_host,
+	};
 	int err;
 
 	ARG_UNUSED(work);
-
-	if (config == NULL) {
-		atomic_set(&connecting, 0);
-		return;
-	}
-
-	struct aws_iot_config aws_config = {
-		.client_id = (char *)identity_thing_name(),
-		.host_name = (char *)config->endpoint,
-	};
 
 	LOG_INF("Connecting to AWS IoT as %s", identity_thing_name());
 
@@ -294,10 +289,13 @@ int cloud_init(void)
 
 void cloud_connect(void)
 {
-	if (atomic_get(&connected) || !atomic_cas(&connecting, 0, 1)) {
+	const struct identity_settings *config = identity_settings_get();
+
+	if (config == NULL || atomic_get(&connected) || !atomic_cas(&connecting, 0, 1)) {
 		return;
 	}
 
+	strcpy(connect_host, config->endpoint);
 	(void)k_work_submit_to_queue(&connect_queue, &connect_work);
 }
 

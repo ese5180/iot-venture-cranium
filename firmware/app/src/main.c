@@ -16,6 +16,8 @@
 
 #include "app_events.h"
 #include "cloud.h"
+#include "console.h"
+#include "device.h"
 #include "identity.h"
 #include "factory.h"
 #include "health.h"
@@ -67,6 +69,7 @@ static void update_ui(void)
 	case OTA_AWAITING_USER:
 		ui_set_state(UI_UPDATE_OFFERED);
 		return;
+	case OTA_RETRY_WAIT:
 	case OTA_REFRESHING:
 	case OTA_STARTING:
 	case OTA_DOWNLOADING:
@@ -82,7 +85,9 @@ static void update_ui(void)
 		break;
 	}
 
-	if (!provisioned()) {
+	if (device_is_factory()) {
+		ui_set_state(UI_FACTORY);
+	} else if (!provisioned()) {
 		ui_set_state(UI_UNPROVISIONED);
 	} else if (!net_is_up()) {
 		ui_set_state(UI_NETWORK_CONNECTING);
@@ -129,7 +134,11 @@ static void publish_report(void)
 static void on_tick(void)
 {
 	health_feed();
-	net_tick();
+
+	/* In factory mode the board stays off the network until INIT has been run. */
+	if (!device_is_factory()) {
+		net_tick();
+	}
 
 	if (net_is_up() && !cloud_is_connected() && identity_settings_get() != NULL &&
 	    cloud_retry_in >= 0 && --cloud_retry_in < 0) {
@@ -156,7 +165,7 @@ static void on_button(const struct app_event *event)
 		}
 
 		cloud_disconnect();
-		factory_reset();
+		(void)factory_reset();
 		LOG_PANIC();
 		sys_reboot(SYS_REBOOT_COLD);
 	}
@@ -180,17 +189,42 @@ static void on_job_message(void)
 	}
 }
 
+static void decide_mode(void)
+{
+	switch (device_boot()) {
+	case DEVICE_BOOT_MIGRATED:
+		console_event("CONSOLE", "migrated: device id set to %s", device_id());
+		break;
+	case DEVICE_BOOT_MIGRATION_FAILED:
+		LOG_ERR("The device id could not be stored; will try again at the next boot");
+		break;
+	case DEVICE_BOOT_UNREADABLE:
+		LOG_ERR("Storage could not be read; running as provisioned, nothing was written");
+		break;
+	default:
+		break;
+	}
+}
+
 static void handle(const struct app_event *event)
 {
 	switch (event->type) {
 	case APP_EVENT_NET_UP:
 		LOG_INF("Network is up");
+		net_report_up();
 		cloud_retry_in = CLOUD_SETTLE_SECONDS;
 		break;
 	case APP_EVENT_NET_DOWN:
 		LOG_INF("Network is down");
+		net_report_down();
 		cloud_disconnect();
 		cloud_retry_in = -1;
+		break;
+	case APP_EVENT_NET_JOIN:
+		(void)net_connect();
+		break;
+	case APP_EVENT_NET_JOIN_FAILED:
+		net_report_join_failed(event->join_failed.reason);
 		break;
 	case APP_EVENT_CLOUD_UP:
 		LOG_INF("Connected to AWS IoT");
@@ -205,6 +239,10 @@ static void handle(const struct app_event *event)
 			cloud_retry_in = cloud_backoff;
 			cloud_backoff = MIN(cloud_backoff * 2, CLOUD_BACKOFF_MAX);
 		}
+		break;
+	case APP_EVENT_CLOUD_CHANGED:
+		cloud_backoff = CONFIG_APP_CLOUD_RETRY_SECONDS;
+		cloud_retry_in = CLOUD_SETTLE_SECONDS;
 		break;
 	case APP_EVENT_JOB_MESSAGE:
 		on_job_message();
@@ -222,6 +260,9 @@ static void handle(const struct app_event *event)
 	case APP_EVENT_TICK:
 		on_tick();
 		return;
+	case APP_EVENT_CALL:
+		event->call.function();
+		break;
 	default:
 		break;
 	}
@@ -249,6 +290,9 @@ int main(void)
 
 	LOG_INF("Thing name: %s", identity_thing_name());
 
+	decide_mode();
+	console_start();
+
 	if (ota_init() != 0) {
 		LOG_ERR("Update manager could not start");
 	}
@@ -257,14 +301,31 @@ int main(void)
 		LOG_ERR("Networking could not start");
 	}
 
-	if (!provisioned()) {
-		LOG_WRN("This device is not provisioned yet (see tools/provision_device.py)");
-	} else {
+	if (device_is_factory()) {
+		LOG_WRN("Factory mode: send INIT|<id> on the console");
+	} else if (net_has_credentials()) {
 		(void)net_connect();
+	}
+
+	if (!device_is_factory() && !provisioned()) {
+		LOG_WRN("This device is not provisioned yet (see tools/provision_device.py)");
 	}
 
 	update_ui();
 	k_timer_start(&tick_timer, K_SECONDS(1), K_SECONDS(1));
+
+	if (IS_ENABLED(CONFIG_APP_TEST_FAULT_CRASH)) {
+		LOG_ERR("Test image: crashing on purpose");
+		LOG_PANIC();
+		k_oops();
+	}
+
+	if (IS_ENABLED(CONFIG_APP_TEST_FAULT_HANG)) {
+		LOG_ERR("Test image: hanging on purpose, the watchdog will fire");
+		while (true) {
+			k_msleep(MSEC_PER_SEC);
+		}
+	}
 
 	while (true) {
 		(void)k_msgq_get(&event_queue, &event, K_FOREVER);

@@ -33,6 +33,8 @@ LOG_MODULE_REGISTER(ota, CONFIG_APP_LOG_LEVEL);
  * long, asks once more, and restarts only if the job is still listed as in progress.
  */
 #define SETTLE_SECONDS          20
+/* The wait before another download attempt: this many seconds per attempt so far. */
+#define RETRY_WAIT_SECONDS      10
 #define REPORT_RETRY_SECONDS    30
 #define PROGRESS_STEP_PERCENT   10
 #define HASH_CHUNK_SIZE         1024
@@ -104,6 +106,7 @@ static struct {
 static const char *const state_names[] = {
 	[OTA_IDLE] = "idle",
 	[OTA_AWAITING_USER] = "awaiting_user",
+	[OTA_RETRY_WAIT] = "downloading",
 	[OTA_REFRESHING] = "downloading",
 	[OTA_STARTING] = "downloading",
 	[OTA_DOWNLOADING] = "downloading",
@@ -302,6 +305,21 @@ static void download_callback(const struct fota_download_evt *download_event)
 	(void)app_event_post(&event);
 }
 
+/* This attempt is over: wait before the next one, or give up when none is left. */
+static void download_failed(int cause)
+{
+	char detail[24];
+
+	if (ota.download_attempts < CONFIG_APP_OTA_DOWNLOAD_ATTEMPTS) {
+		LOG_WRN("Download failed (%d): trying again in %d s with a fresh URL", cause,
+			RETRY_WAIT_SECONDS * ota.download_attempts);
+		enter(OTA_RETRY_WAIT);
+	} else {
+		(void)snprintk(detail, sizeof(detail), "cause %d", cause);
+		fail_job("download_failed", detail);
+	}
+}
+
 static void start_download(void)
 {
 	int err;
@@ -321,7 +339,7 @@ static void start_download(void)
 	 */
 	err = fota_download_start(ota.job.host, ota.job.file, CONFIG_APP_DOWNLOAD_SEC_TAG, 0, 0);
 	if (err) {
-		fail_job("download_failed", "could not start");
+		download_failed(err);
 	}
 }
 
@@ -538,6 +556,7 @@ static void on_job_withdrawn(void)
 {
 	switch (ota.state) {
 	case OTA_AWAITING_USER:
+	case OTA_RETRY_WAIT:
 	case OTA_REFRESHING:
 	case OTA_STARTING:
 		abandon_job(false);
@@ -614,8 +633,9 @@ static void on_job(const struct ota_job *incoming)
 	 * AWS IoT lists a job that is in progress before any other. If it names a
 	 * different one while this device is working on a job, that job is gone.
 	 */
-	if (!same_job && (ota.state == OTA_STARTING || ota.state == OTA_DOWNLOADING ||
-			  ota.state == OTA_COMMITTING || ota.state == OTA_REBOOTING)) {
+	if (!same_job && (ota.state == OTA_RETRY_WAIT || ota.state == OTA_STARTING ||
+			  ota.state == OTA_DOWNLOADING || ota.state == OTA_COMMITTING ||
+			  ota.state == OTA_REBOOTING)) {
 		on_job_withdrawn();
 	}
 
@@ -739,7 +759,7 @@ int ota_init(void)
 
 void ota_on_cloud_up(void)
 {
-	if (ota.state == OTA_TESTING) {
+	if (ota.state == OTA_TESTING && !IS_ENABLED(CONFIG_APP_TEST_FAULT_NO_CONFIRM)) {
 		/*
 		 * The trial: this image booted, joined Wi-Fi, authenticated to AWS IoT with the
 		 * device certificate and subscribed to its topics. It can therefore receive a
@@ -863,6 +883,8 @@ void ota_on_job_ack(char kind, uint16_t sequence, bool accepted, bool permanent)
 			 */
 			LOG_INF("Final update report %s by the cloud",
 				accepted ? "accepted" : "rejected");
+			/* A list of jobs that was already on its way may still name this one. */
+			close_job(ota.record.job_id);
 			record_clear();
 			ota.changed = true;
 		}
@@ -894,8 +916,6 @@ void ota_on_button(enum app_button button)
 
 void ota_on_download(enum app_download_event what, int value)
 {
-	char detail[24];
-
 	if (ota.state != OTA_DOWNLOADING) {
 		return;
 	}
@@ -911,13 +931,7 @@ void ota_on_download(enum app_download_event what, int value)
 		check_download();
 		break;
 	case APP_DOWNLOAD_ERROR:
-		if (ota.download_attempts < CONFIG_APP_OTA_DOWNLOAD_ATTEMPTS) {
-			LOG_WRN("Download failed (cause %d): trying again with a fresh URL", value);
-			refresh_document();
-		} else {
-			(void)snprintk(detail, sizeof(detail), "cause %d", value);
-			fail_job("download_failed", detail);
-		}
+		download_failed(value);
 		break;
 	case APP_DOWNLOAD_CANCELLED:
 	default:
@@ -930,6 +944,11 @@ void ota_on_tick(void)
 	ota.seconds_in_state++;
 
 	switch (ota.state) {
+	case OTA_RETRY_WAIT:
+		if (ota.seconds_in_state >= RETRY_WAIT_SECONDS * ota.download_attempts) {
+			refresh_document();
+		}
+		break;
 	case OTA_REFRESHING:
 		if (ota.seconds_in_state >= REFRESH_TIMEOUT_SECONDS) {
 			ota.seconds_in_state = 0;

@@ -103,6 +103,11 @@ const char *identity_thing_name(void)
 	return thing_name;
 }
 
+const char *identity_soc_id(void)
+{
+	return thing_name[0] == '\0' ? "" : thing_name + strlen(CONFIG_APP_THING_NAME_PREFIX);
+}
+
 const struct identity_settings *identity_settings_get(void)
 {
 	return provisioned ? &record.config : NULL;

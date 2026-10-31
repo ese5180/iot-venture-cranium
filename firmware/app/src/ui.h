@@ -9,7 +9,9 @@
 #define UI_H_
 
 enum ui_state {
-	/* Short flash every two seconds: the device has not been provisioned. */
+	/* Long flash every two seconds: factory mode, waiting for INIT. */
+	UI_FACTORY,
+	/* Short flash every two seconds: set up, but not provisioned yet. */
 	UI_UNPROVISIONED,
 	/* Slow blink: joining Wi-Fi. */
 	UI_NETWORK_CONNECTING,

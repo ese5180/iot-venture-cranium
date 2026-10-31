@@ -14,9 +14,12 @@
 
 /*
  * Erase the Wi-Fi network, the cloud settings, the device certificate and private key,
- * the root CAs and any pending update record. The firmware itself is not touched.
+ * the root CAs, any pending update record, the device ID and the init-complete flag.
+ * The firmware itself is not touched. The next boot is in factory mode, also after a
+ * power cut half way through or an erase that failed. Everything is tried; returns the
+ * first error, or 0.
  */
-void factory_reset(void);
+int factory_reset(void);
 
 /* Whether a credential of the given kind is stored, without reading it out. */
 bool factory_has_root_ca(void);

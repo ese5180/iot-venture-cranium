@@ -14,18 +14,33 @@
 #include <zephyr/sys/atomic.h>
 
 #include "app_events.h"
+#include "console.h"
 
 LOG_MODULE_REGISTER(net, CONFIG_APP_LOG_LEVEL);
 
-#define L4_EVENTS    (NET_EVENT_L4_CONNECTED | NET_EVENT_L4_DISCONNECTED)
+/*
+ * Up means IPv4, which is what the cloud is reached over. NET_EVENT_L4_CONNECTED is not
+ * good enough: it comes with whichever address arrives first, DHCP waits up to ten seconds
+ * before it even starts, and it does not come again when the IPv4 address follows.
+ */
+#define L4_EVENTS    (NET_EVENT_L4_IPV4_CONNECTED | NET_EVENT_L4_IPV4_DISCONNECTED)
 #define CONN_EVENTS  (NET_EVENT_CONN_IF_FATAL_ERROR)
+#define WIFI_EVENTS  (NET_EVENT_WIFI_CONNECT_RESULT)
 #define RETRY_SECONDS 30
 #define MAX_STORED_NETWORKS CONFIG_WIFI_CREDENTIALS_MAX_ENTRIES
 
+/* Why a join failed, next to the connect results that the Wi-Fi stack reports. */
+#define JOIN_FAILED_SECURITY (WIFI_STATUS_CONN_LAST_STATUS + 1)
+#define JOIN_FAILED_NO_ANSWER (WIFI_STATUS_CONN_LAST_STATUS + 2)
+#define JOIN_FAILED_REQUEST (WIFI_STATUS_CONN_LAST_STATUS + 3)
+
 static struct net_mgmt_event_callback l4_callback;
 static struct net_mgmt_event_callback conn_callback;
+static struct net_mgmt_event_callback wifi_callback;
 
 static atomic_t link_up;
+/* The reason last reported since the last attempt began: it is said only once. */
+static atomic_t last_failure;
 static int seconds_down;
 
 static bool security_allowed(enum wifi_security_type type)
@@ -77,19 +92,34 @@ static bool link_is_acceptable(void)
 	return true;
 }
 
+/* From any thread: only hand it over. The main loop says it on the console. */
+static void post_join_failed(int reason)
+{
+	const struct app_event event = {
+		.type = APP_EVENT_NET_JOIN_FAILED,
+		.join_failed.reason = (int16_t)reason,
+	};
+
+	if (atomic_set(&last_failure, reason) != reason) {
+		(void)app_event_post(&event);
+	}
+}
+
 static void on_l4_event(struct net_mgmt_event_callback *callback, uint64_t event,
 			struct net_if *iface)
 {
 	ARG_UNUSED(callback);
 	ARG_UNUSED(iface);
 
-	if (event == NET_EVENT_L4_CONNECTED) {
+	if (event == NET_EVENT_L4_IPV4_CONNECTED) {
 		if (!link_is_acceptable()) {
+			post_join_failed(JOIN_FAILED_SECURITY);
 			return;
 		}
 		atomic_set(&link_up, 1);
+		atomic_set(&last_failure, 0);
 		(void)app_event_post_simple(APP_EVENT_NET_UP);
-	} else if (event == NET_EVENT_L4_DISCONNECTED) {
+	} else if (event == NET_EVENT_L4_IPV4_DISCONNECTED) {
 		if (atomic_set(&link_up, 0)) {
 			(void)app_event_post_simple(APP_EVENT_NET_DOWN);
 		}
@@ -105,6 +135,23 @@ static void on_conn_event(struct net_mgmt_event_callback *callback, uint64_t eve
 	if (event == NET_EVENT_CONN_IF_FATAL_ERROR) {
 		/* Not fatal for the application: net_tick() tries again. */
 		LOG_WRN("Network interface reported a connection error");
+	}
+}
+
+/*
+ * A wrong password never gets as far as an L4 event. This is where it shows, together
+ * with a network that cannot be found. The Wi-Fi stack retries by itself, so the same
+ * reason can come many times.
+ */
+static void on_wifi_event(struct net_mgmt_event_callback *callback, uint64_t event,
+			  struct net_if *iface)
+{
+	const struct wifi_status *status = callback->info;
+
+	ARG_UNUSED(iface);
+
+	if (event == NET_EVENT_WIFI_CONNECT_RESULT && status != NULL && status->status != 0) {
+		post_join_failed(status->status);
 	}
 }
 
@@ -156,6 +203,9 @@ int net_init(void)
 	net_mgmt_init_event_callback(&conn_callback, on_conn_event, CONN_EVENTS);
 	net_mgmt_add_event_callback(&conn_callback);
 
+	net_mgmt_init_event_callback(&wifi_callback, on_wifi_event, WIFI_EVENTS);
+	net_mgmt_add_event_callback(&wifi_callback);
+
 	err = conn_mgr_all_if_up(true);
 	if (err) {
 		LOG_ERR("Network interface could not be brought up: %d", err);
@@ -175,9 +225,12 @@ int net_connect(void)
 	}
 
 	seconds_down = 0;
+	atomic_set(&last_failure, 0);
+
 	err = conn_mgr_all_if_connect(true);
 	if (err) {
 		LOG_WRN("Connection request failed: %d", err);
+		post_join_failed(JOIN_FAILED_REQUEST);
 	}
 
 	return err;
@@ -191,9 +244,66 @@ void net_tick(void)
 	}
 
 	if (++seconds_down >= RETRY_SECONDS) {
+		/* Neither a result nor a connection: nobody has said anything about it yet. */
+		if (atomic_get(&last_failure) == 0) {
+			net_report_join_failed(JOIN_FAILED_NO_ANSWER);
+		}
+
 		LOG_INF("Still offline: trying to join the network again");
 		(void)net_connect();
 	}
+}
+
+static const char *join_failure_text(int reason)
+{
+	switch (reason) {
+	case WIFI_STATUS_CONN_WRONG_PASSWORD:
+		return "wrong password";
+	case WIFI_STATUS_CONN_AP_NOT_FOUND:
+		return "network not found";
+	case WIFI_STATUS_CONN_TIMEOUT:
+	case -ETIMEDOUT:
+		return "timeout";
+	case JOIN_FAILED_SECURITY:
+		return "security mode not allowed";
+	case JOIN_FAILED_NO_ANSWER:
+		return "no answer";
+	case JOIN_FAILED_REQUEST:
+		return "request refused";
+	default:
+		return "connection failed";
+	}
+}
+
+void net_report_join_failed(int reason)
+{
+	console_event("WIFI", "failed reason=%s", join_failure_text(reason));
+}
+
+/* The address as text, or an empty string when there is none. */
+static void ip_address(char *buf, size_t len)
+{
+	struct net_if *iface = net_if_get_first_wifi();
+	struct net_in_addr *address =
+		iface != NULL ? net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED) : NULL;
+
+	buf[0] = '\0';
+	if (address != NULL) {
+		(void)net_addr_ntop(NET_AF_INET, address, buf, len);
+	}
+}
+
+void net_report_up(void)
+{
+	char ip[NET_IPV4_ADDR_LEN];
+
+	ip_address(ip, sizeof(ip));
+	console_event("WIFI", "connected ip=%s rssi=%d", ip[0] != '\0' ? ip : "none", net_rssi());
+}
+
+void net_report_down(void)
+{
+	console_event("WIFI", "disconnected");
 }
 
 bool net_is_up(void)
@@ -295,4 +405,33 @@ int net_rssi(void)
 	}
 
 	return status.rssi;
+}
+
+static void copy_stored_ssid(void *arg, const char *ssid, size_t ssid_len)
+{
+	struct net_status *status = arg;
+
+	/* One network per device: if there ever are more, the first is the one to show. */
+	if (!status->stored && ssid_len <= NET_SSID_MAX) {
+		memcpy(status->ssid, ssid, ssid_len);
+		status->ssid[ssid_len] = '\0';
+		status->stored = true;
+	}
+}
+
+void net_status_get(struct net_status *status)
+{
+	memset(status, 0, sizeof(*status));
+
+	wifi_credentials_for_each_ssid(copy_stored_ssid, status);
+
+	status->connected = net_is_up();
+	if (status->connected) {
+		ip_address(status->ip, sizeof(status->ip));
+		status->rssi = net_rssi();
+	}
+
+	if (net_mac_address(status->mac, sizeof(status->mac)) != 0) {
+		status->mac[0] = '\0';
+	}
 }

@@ -90,8 +90,10 @@ def wifi(unlocked: bool = False) -> None:
     ensure_local_dir()
 
     if unlocked:
-        # Owner-only, without root: the provisioning tool can then run unattended.
-        descriptor = os.open(WIFI, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Owner-only, without root: the provisioning tool can then run unattended. A file that
+        # was locked before belongs to root, and this folder is the only thing that is ours.
+        WIFI.unlink(missing_ok=True)
+        descriptor = os.open(WIFI, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w") as file:
             file.write(content)
         print(f"Wrote {WIFI} (owner you, mode 600, outside the repository)")

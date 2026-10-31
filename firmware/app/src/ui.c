@@ -18,6 +18,7 @@ static const struct gpio_dt_spec status_led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), g
 
 /* One bit per 125 ms step, least significant bit first: a two-second cycle. */
 static const uint16_t patterns[] = {
+	[UI_FACTORY] = 0x000f,
 	[UI_UNPROVISIONED] = 0x0001,
 	[UI_NETWORK_CONNECTING] = 0x00ff,
 	[UI_CLOUD_CONNECTING] = 0x0f0f,

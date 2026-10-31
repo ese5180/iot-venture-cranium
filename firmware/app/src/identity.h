@@ -31,7 +31,13 @@ int identity_init(void);
 /* "cranium-" followed by the SoC's factory-programmed 64-bit identifier. */
 const char *identity_thing_name(void);
 
-/* NULL until the device has been provisioned. */
+/* That identifier alone, in 16 hexadecimal digits. Empty if it is not available. */
+const char *identity_soc_id(void);
+
+/*
+ * NULL until the device has been provisioned. The settings belong to the main loop:
+ * call these three from there, because the pointer is only good until the next change.
+ */
 const struct identity_settings *identity_settings_get(void);
 int identity_settings_set(const char *endpoint, const char *download_url_prefix);
 int identity_settings_clear(void);

@@ -2,8 +2,8 @@
  * Events handled by the application's single event loop.
  *
  * Library callbacks run on several threads (MQTT, downloader, input, network
- * management). They only post one of these events; every state change then happens
- * on the main thread, one event at a time.
+ * management), and the serial console has a task of its own. They only post one of
+ * these events; every state change then happens on the main thread, one event at a time.
  */
 
 #ifndef APP_EVENTS_H_
@@ -15,8 +15,14 @@
 enum app_event_type {
 	APP_EVENT_NET_UP,
 	APP_EVENT_NET_DOWN,
+	/* Start joining the stored network. */
+	APP_EVENT_NET_JOIN,
+	/* An attempt to join did not work out. */
+	APP_EVENT_NET_JOIN_FAILED,
 	APP_EVENT_CLOUD_UP,
 	APP_EVENT_CLOUD_DOWN,
+	/* The cloud settings have changed: connect again soon, with the new ones. */
+	APP_EVENT_CLOUD_CHANGED,
 	/* A jobs message (the next job, or the reply to a request for it) is waiting. */
 	APP_EVENT_JOB_MESSAGE,
 	/* AWS IoT answered a job status update that the update logic is waiting on. */
@@ -25,6 +31,8 @@ enum app_event_type {
 	APP_EVENT_DOWNLOAD,
 	/* Once a second. */
 	APP_EVENT_TICK,
+	/* Run a function here: how the console task reads and changes what this loop owns. */
+	APP_EVENT_CALL,
 };
 
 enum app_button {
@@ -59,6 +67,12 @@ struct app_event {
 			/* Rejected for a reason that sending it again cannot change. */
 			bool permanent;
 		} job_ack;
+		struct {
+			int16_t reason;
+		} join_failed;
+		struct {
+			void (*function)(void);
+		} call;
 	};
 };
 

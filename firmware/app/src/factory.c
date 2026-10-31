@@ -5,6 +5,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/net/tls_credentials.h>
 
+#include "device.h"
 #include "identity.h"
 #include "net.h"
 #include "store.h"
@@ -35,16 +36,39 @@ bool factory_has_private_key(void)
 	return has_credential(FACTORY_CLOUD_SEC_TAG, TLS_CREDENTIAL_PRIVATE_KEY);
 }
 
-void factory_reset(void)
+/* Keep going whatever happens, and remember the first thing that went wrong. */
+static void note_error(int *first, int err)
 {
+	if (err != 0 && *first == 0) {
+		*first = err;
+	}
+}
+
+static void delete_credential(int *first, sec_tag_t tag, enum tls_credential_type type)
+{
+	int err = tls_credential_delete(tag, type);
+
+	note_error(first, err == -ENOENT ? 0 : err);
+}
+
+int factory_reset(void)
+{
+	int first = 0;
+
 	LOG_WRN("Factory reset: erasing all provisioned data");
 
-	(void)net_credentials_clear();
-	(void)identity_settings_clear();
-	(void)store_erase(STORE_OTA_RECORD);
+	note_error(&first, device_wipe_begin());
 
-	(void)tls_credential_delete(FACTORY_CLOUD_SEC_TAG, TLS_CREDENTIAL_PRIVATE_KEY);
-	(void)tls_credential_delete(FACTORY_CLOUD_SEC_TAG, TLS_CREDENTIAL_PUBLIC_CERTIFICATE);
-	(void)tls_credential_delete(FACTORY_CLOUD_SEC_TAG, TLS_CREDENTIAL_CA_CERTIFICATE);
-	(void)tls_credential_delete(FACTORY_DOWNLOAD_SEC_TAG, TLS_CREDENTIAL_CA_CERTIFICATE);
+	note_error(&first, net_credentials_clear());
+	note_error(&first, identity_settings_clear());
+	note_error(&first, store_erase(STORE_OTA_RECORD));
+
+	delete_credential(&first, FACTORY_CLOUD_SEC_TAG, TLS_CREDENTIAL_PRIVATE_KEY);
+	delete_credential(&first, FACTORY_CLOUD_SEC_TAG, TLS_CREDENTIAL_PUBLIC_CERTIFICATE);
+	delete_credential(&first, FACTORY_CLOUD_SEC_TAG, TLS_CREDENTIAL_CA_CERTIFICATE);
+	delete_credential(&first, FACTORY_DOWNLOAD_SEC_TAG, TLS_CREDENTIAL_CA_CERTIFICATE);
+
+	note_error(&first, device_wipe_end(first == 0));
+
+	return first;
 }

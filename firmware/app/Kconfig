@@ -57,24 +57,100 @@ config APP_OTA_SELF_TEST_TIMEOUT_SECONDS
 
 config APP_OTA_DOWNLOAD_ATTEMPTS
 	int "Download attempts per update before it is reported as failed"
-	default 3
+	default 5
 	range 1 10
-
-config APP_PROVISIONING_SHELL
-	bool "Provisioning commands on the serial console"
-	depends on SHELL
-	default y
-	select BASE64
 	help
-	  Commands that store the Wi-Fi network, the cloud settings and the device
-	  credentials. For development and provisioning builds only; a release build
-	  has no shell.
+	  The wait before another attempt grows with each one: 10 s, 20 s, 30 s and 40 s
+	  with the default, so that an update survives a short outage of the network.
+
+config APP_CONSOLE
+	bool "Serial console for setup and debugging"
+	depends on SERIAL && LOG
+	default y
+	select UART_INTERRUPT_DRIVEN
+	select RING_BUFFER
+	select BASE64
+	select SYS_HEAP_RUNTIME_STATS
+	help
+	  One command per line on uart0: set the device ID, the Wi-Fi network and the
+	  cloud settings, load the device credentials, check the status and reset the
+	  board, without a host application or a reflash. Log messages come out here as
+	  well. For development and provisioning builds only; a release build turns this
+	  off with -Dapp_CONFIG_APP_CONSOLE=n, and its log messages then go nowhere. Nothing
+	  here can read a secret back out of the device.
+
+if APP_CONSOLE
+
+config APP_CONSOLE_STACK_SIZE
+	int "Stack of the console task"
+	default 6144
+	help
+	  Creating the device key and its signing request runs on this stack.
+
+config APP_CONSOLE_THREAD_PRIORITY
+	int "Priority of the console task"
+	default 12
+	help
+	  Lower than everything that keeps the product running, and higher than the log
+	  thread, so that a reply goes out before the log lines it caused.
+
+config APP_CONSOLE_TX_BUFFER_SIZE
+	int "Bytes of output that can wait to be sent"
+	default 4096
+	range 1024 16384
+	help
+	  The console task waits for room here. Other threads never do: their line is
+	  dropped and counted when it does not fit.
+
+config APP_CONSOLE_LOG_HOLD_SIZE
+	int "Bytes of log lines that can wait for a reply to finish"
+	default 1024
+	range 256 4096
+	help
+	  They go out all at once, so this cannot be larger than the transmit buffer.
+
+config APP_CONSOLE_RX_BUFFER_SIZE
+	int "Bytes of input that can wait for the console task"
+	default 512
+	range 128 2048
+
+endif # APP_CONSOLE
 
 config APP_VERSION_FROM_BUILD
 	bool
 	default y
 	help
 	  Take the firmware version from the VERSION file. Off only in host-side tests.
+
+choice APP_TEST_FAULT
+	prompt "Fault built into a test image"
+	default APP_TEST_FAULT_NONE
+	help
+	  For testing the way back. An image with a fault is signed and installs like any
+	  other, then misbehaves on trial, so the bootloader has to restore the previous
+	  image. Build one with, for example, -Dapp_CONFIG_APP_TEST_FAULT_HANG=y. Never in
+	  a release.
+
+config APP_TEST_FAULT_NONE
+	bool "No fault"
+
+config APP_TEST_FAULT_NO_CONFIRM
+	bool "Runs and reaches the cloud, but never confirms itself"
+
+config APP_TEST_FAULT_HANG
+	bool "The main loop hangs, so the watchdog fires"
+
+config APP_TEST_FAULT_CRASH
+	bool "A fatal error right after start"
+
+config APP_TEST_FAULT_INIT_POWER_LOSS
+	bool "INIT restarts just before it writes the init-complete flag"
+	depends on APP_CONSOLE
+	help
+	  A power cut at the worst moment of first-time setup, for
+	  firmware/tests/hil/console_bench.py.
+
+endchoice
 
 module = APP
 module-str = Cranium application

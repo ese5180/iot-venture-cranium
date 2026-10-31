@@ -5,6 +5,10 @@
  * they are never part of the firmware image. Only WPA2-PSK and WPA3-SAE networks are
  * accepted: open, WEP and WPA (TKIP) networks are refused both when credentials are
  * stored and after association.
+ *
+ * Joining never blocks anyone: net_connect() starts it, and the result arrives later as
+ * APP_EVENT_NET_UP or APP_EVENT_NET_JOIN_FAILED. Each one ends up as a [WIFI] line on the
+ * console. Passwords go into storage and nowhere else.
  */
 
 #ifndef NET_H_
@@ -13,10 +17,24 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#define NET_SSID_MAX     32
+#define NET_PASSWORD_MIN 8
+#define NET_PASSWORD_MAX 63
+
 enum net_security {
 	NET_SECURITY_WPA2_PSK,
 	NET_SECURITY_WPA2_PSK_SHA256,
 	NET_SECURITY_WPA3_SAE,
+};
+
+/* What the console shows. Nothing here is secret. */
+struct net_status {
+	bool stored;
+	bool connected;
+	char ssid[NET_SSID_MAX + 1];
+	char ip[16];
+	int rssi;
+	char mac[18];
 };
 
 /* Bring the interface up and remove stored networks that policy does not allow. */
@@ -27,6 +45,11 @@ int net_connect(void);
 
 /* Called once a second: retries the connection when it has been down for a while. */
 void net_tick(void);
+
+/* Say on the console what happened. Called by the main loop for the events above. */
+void net_report_up(void);
+void net_report_down(void);
+void net_report_join_failed(int reason);
 
 bool net_is_up(void);
 bool net_has_credentials(void);
@@ -44,5 +67,8 @@ int net_rssi(void);
  * that admit devices by address. buf needs 18 bytes.
  */
 int net_mac_address(char *buf, size_t len);
+
+/* What is stored and what the link is doing. Safe from any thread. */
+void net_status_get(struct net_status *status);
 
 #endif /* NET_H_ */

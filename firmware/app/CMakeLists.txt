@@ -13,6 +13,7 @@ project(cranium_app)
 target_sources(app PRIVATE
   src/main.c
   src/cloud.c
+  src/device.c
   src/factory.c
   src/health.c
   src/identity.c
@@ -24,6 +25,16 @@ target_sources(app PRIVATE
   src/version.c
 )
 
-target_sources_ifdef(CONFIG_APP_PROVISIONING_SHELL app PRIVATE src/provision.c)
+target_sources_ifdef(CONFIG_APP_CONSOLE app PRIVATE
+  src/console.c
+  src/console_cmd.c
+  src/console_keys.c
+  src/console_parser.c
+  src/console_stream.c
+)
+
+target_sources_ifndef(CONFIG_APP_CONSOLE app PRIVATE src/log_discard.c)
+
+zephyr_linker_sources_ifdef(CONFIG_LOG SECTIONS src/log_backend_check.ld)
 
 target_include_directories(app PRIVATE src)

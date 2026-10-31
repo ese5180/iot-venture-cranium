@@ -16,6 +16,10 @@ enum store_id {
 	STORE_DEVICE_CONFIG = 1,
 	/* struct ota_record: an update that was started and not yet reported. */
 	STORE_OTA_RECORD = 2,
+	/* The settable device ID. Not secret. See device.h. */
+	STORE_DEVICE_ID = 3,
+	/* First-time setup has finished. Written last, so see device.h for the order. */
+	STORE_INIT_FLAG = 4,
 };
 
 /* Read a record of exactly size bytes. -ENOENT if it does not exist. */

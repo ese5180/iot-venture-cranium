@@ -29,6 +29,10 @@ enum ota_state {
 	OTA_IDLE,
 	/* A valid update is on offer and waits for Button 1 (install) or 2 (decline). */
 	OTA_AWAITING_USER,
+	/* A download failed. Waiting before the next attempt, so that a short outage of
+	 * the network does not use up all the attempts.
+	 */
+	OTA_RETRY_WAIT,
 	/* Asked the cloud for the job document again, to get a fresh download URL. */
 	OTA_REFRESHING,
 	/* Told the cloud that the update starts; waiting for it to agree. */
