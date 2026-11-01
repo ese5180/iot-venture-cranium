@@ -1,5 +1,7 @@
 # ESE5180: IoT Venture
 
+## 3.1 Team Formation
+
 **Team Number: T07**
 
 **Team Name: Cranium**
@@ -13,18 +15,13 @@
 
 **GitHub Repository URL: https://github.com/ese5180/f26-t07-the-cranium**
 
-## Concept Development
+## 3.2 Concept Development
 
-- **Create a device block diagram that details the power architecture, microcontroller, & peripherals**
-  ![Block diagram](<./pics/Block Diagram.png>)
-- **Create a communication diagram**
-  ![Communication diagram](<./pics/Communication Diagram.png>)
-
-### Product Function
+### 3.2.2 Product Name & Function
 
 We are developing a mounted attachment to beginner DJ controllers in order to remove reliance on a laptop. This solution will be more familiar, cost-effective, and sustainable than directly upgrading these popular controllers to all-in-one DJ systems. The device will utilize BLE audio to challenge typical issues with wireless audio as well as a secondary board in a Raspberry Pi to develop more robust display support at our price and time range.
 
-### Target Market & Demographics
+### 3.2.3 Target Market & Demographics
 
 - **Who will be using your product?** New and intermediate FLX4 DJs.
 - **Who will be purchasing your product?** FLX4 owners seeking standalone capability + their friends and family as gifts.
@@ -33,16 +30,21 @@ We are developing a mounted attachment to beginner DJ controllers in order to re
 - **How much do you expect to capture?** ~$1M/year by Year 3 (given 1% adoption at $200/unit).
 - **What competitors are already in the space?** Pioneer’s XDJ systems as the traditional standalone alternative, less desirable standalone systems from Numark and Denon, and DeckShark as an early-stage add-on startup.
 
-### Stakeholders Contacted
+### 3.2.4 Stakeholders
 
 - Adam:  Customer perspectives of 3 exact target customers (intermediate level Pioneer FLX4 owners who play small/medium live events)
   - Already held interviews, obtained specific pricing perspectives and target DJ controllers.
 - (via Chris) Subject Matter Expert: Garrett Treanor (Indiana University - Expertise in Digital Audio Processing, Research in Immersive/Spatial Audio)
 - Competitor's (DeckShark) Community Discord - finding additional consumer perspectives and specific failure points of direct competitors.
 
-### System-Level Diagrams
+### 3.2.5 System-Level Diagrams
 
-### Security Requirements Specification
+- **Create a device block diagram that details the power architecture, microcontroller, & peripherals**
+  ![Block diagram](<./pics/Block Diagram.png>)
+- **Create a communication diagram**
+  ![Communication diagram](<./pics/Communication Diagram.png>)
+
+### 3.2.6 Security Requirements Specification
 
 | Code   | Name                  | Definition                                                                                                                                                                                                                                                       |
 | ------ | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -73,7 +75,7 @@ threat model and the known limits.
   enclosure yet. A product build would have to lock the port (APPROTECT). This repository has no such
   build yet.
 
-### Hardware Requirements Specification
+### 3.2.7 Hardware Requirements Specification
 
 | Code  | Name                    | Definition                                                                                                                                                                        |
 | ----- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -83,7 +85,7 @@ threat model and the known limits.
 | HW 04 | Wired Audio Outputs     | Dual XLR output, RCA output, and 3.5mm headphone jack.                                                                                                                            |
 | HW 05 | Mechanical              | The unit shall mount on the FLX4 with zero mechanical load on the controller's USB and RCA ports.                                                                                 |
 
-### Software Requirement Specifications
+### 3.2.8 Software Requirements Specification
 
 | Code   | Name                      | Definition                                                                                                                                                                                                                                 |
 | ------ | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -93,9 +95,11 @@ threat model and the known limits.
 | SRS 04 | Library Support           | The system shall support libraries prepared directly from a USB drive, keeping the user's playlists and saved track markers.                                                                                                               |
 | SRS 05 | Data Integrity            | The MCU shall trigger a graceful shutdown, with no filesystem corruption, when the battery drops below 5%.                                                                                                                                 |
 
-## Secure Firmware Updates
+## 3.5 Wireless Demo & Secure Firmware Updates
 
-### Bootloading process
+### 3.5.5 Firmware Security Implementation
+
+#### (3.5.1) Bootloading process
 
 ![Boot process](<./pics/Boot Process.png>)
 
@@ -125,7 +129,7 @@ An update is offered as an AWS IoT job. Nothing is downloaded until Button 1 on 
 | Reset or power loss during an update | During a download the running image is not touched, and the board reports the job as interrupted. During a swap, MCUboot's swap-using-move continues on the next boot. |
 | No update can reach the board, or no valid image is left | [Serial recovery](#serial-recovery-extra-credit). A person at the board can also hold Button 2 through a reset to restore a frozen [golden image](firmware/README.md#golden-image). |
 
-### FOTA implementation
+#### FOTA implementation
 
 | Requirement | How it is met |
 | --- | --- |
@@ -136,7 +140,7 @@ An update is offered as an AWS IoT job. Nothing is downloaded until Button 1 on 
 
 The code is in [`firmware/`](firmware/README.md).
 
-### Serial recovery (extra credit)
+#### Serial recovery (extra credit)
 
 MCUboot takes a signed image over UART as a failsafe when an image cannot reach the network. It uses `uart0`, the board's second virtual COM port, so close any terminal on that port first. Run `tools/recover.py` from an nRF Connect SDK terminal, which provides pyserial and cbor2.
 
