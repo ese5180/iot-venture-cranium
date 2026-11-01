@@ -158,8 +158,8 @@ choice APP_TEST_FAULT
 	help
 	  For testing the way back. An image with a fault is signed and installs like any
 	  other, then misbehaves on trial, so the bootloader has to restore the previous
-	  image. Build one with, for example, -Dapp_CONFIG_APP_TEST_FAULT_HANG=y. Never in
-	  a release.
+	  image, unless its help says otherwise. Build one with, for example,
+	  -Dapp_CONFIG_APP_TEST_FAULT_HANG=y. Never in a release.
 
 config APP_TEST_FAULT_NONE
 	bool "No fault"
@@ -179,6 +179,17 @@ config APP_TEST_FAULT_INIT_POWER_LOSS
 	help
 	  A power cut at the worst moment of first-time setup, for
 	  firmware/tests/hil/console_bench.py.
+
+config APP_TEST_FAULT_WIFI_DEAD
+	bool "A console command stops the Wi-Fi chip's power, once"
+	depends on APP_CONSOLE
+	help
+	  Nothing happens until TEST_WIFI_DEAD is sent, so this image passes its trial and is
+	  confirmed like any other. The command drives BUCKEN low and leaves IOVDD on, and from
+	  then on the chip answers nothing. A restart brings it back. Build it with
+	  -Dapp_CONFIG_NRF_WIFI_RPU_RECOVERY=n as well, or the driver powers the chip up again
+	  and the timers in src/stuck.c never fire. For the chip-dead scenario of
+	  firmware/tests/hil/ota_bench.py.
 
 config APP_TEST_FAULT_WRECK_SLOTS
 	bool "Damages both image slots and restarts"

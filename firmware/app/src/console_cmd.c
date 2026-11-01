@@ -20,6 +20,7 @@
 #include "identity.h"
 #include "net.h"
 #include "ota.h"
+#include "stuck.h"
 #include "version.h"
 
 #define REPLY_MAX       256
@@ -649,6 +650,7 @@ static struct {
 	char download_url_prefix[IDENTITY_URL_PREFIX_MAX];
 	const char *update_state;
 	char update_last[16];
+	uint8_t stuck_count;
 } main_view;
 
 static int read_main_view(void *arg)
@@ -666,6 +668,7 @@ static int read_main_view(void *arg)
 
 	main_view.update_state = ota_state_name();
 	strncpy(main_view.update_last, ota_last_result(), sizeof(main_view.update_last) - 1);
+	main_view.stuck_count = stuck_count();
 	return 0;
 }
 
@@ -685,6 +688,7 @@ static void print_device(void)
 	console_reply_line(KEY_VALUE, "id", device_id());
 	console_reply_line(KEY_VALUE, "thing name", identity_thing_name());
 	console_reply_line(KEY_VALUE, "firmware", fw_version_running_string());
+	console_reply_line("%-14s %u", "stuck count", (unsigned int)main_view.stuck_count);
 }
 
 static void print_wifi(void)
@@ -1063,6 +1067,48 @@ static void cmd_button(int argc, char **argv)
 	reply_ok("button %s", argv[0]);
 }
 
+#if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
+static int do_wifi_dead(void *arg)
+{
+	ARG_UNUSED(arg);
+	return console_port_wifi_dead();
+}
+
+/*
+ * For a test image only: firmware/tests/hil/ota_bench.py chip-dead chooses the moment with this.
+ * Not during an update or a trial, when every timer stands aside anyway.
+ */
+static void cmd_test_wifi_dead(int argc, char **argv)
+{
+	int err = on_main_guarded(do_wifi_dead, NULL);
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (refused_by_update(err)) {
+		return;
+	}
+
+	if (err == -EALREADY) {
+		reply_err("done already: a restart brings the chip back");
+		return;
+	}
+
+	if (err == -ENOTSUP) {
+		reply_err("this image has no trailer, so a revert could not show: "
+			  "install it over the air first");
+		return;
+	}
+
+	if (err) {
+		reply_err("the pin could not be driven (%d)", err);
+		return;
+	}
+
+	reply_ok("BUCKEN is low, IOVDD is on, and only a restart brings the chip back");
+}
+#endif /* CONFIG_APP_TEST_FAULT_WIFI_DEAD */
+
 /* ---- the table ------------------------------------------------------------------ */
 
 static const struct console_command commands[] = {
@@ -1121,6 +1167,10 @@ static const struct console_command commands[] = {
 
 	{ "BUTTON", NULL, "BUTTON|<1 or 2>", "act as if the button was pressed", SECTION_TEST, false,
 	  1, 1, cmd_button },
+#if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
+	{ "TEST_WIFI_DEAD", NULL, "TEST_WIFI_DEAD", "stop the Wi-Fi chip's power, until a restart",
+	  SECTION_TEST, false, 0, 0, cmd_test_wifi_dead },
+#endif
 };
 
 #define COMMAND_COUNT (sizeof(commands) / sizeof(commands[0]))

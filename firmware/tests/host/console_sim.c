@@ -16,6 +16,15 @@
  * a restart, as a console that fails to discard it would. SIM_BOOT_TIME_MS says how long a
  * restart takes. SIGUSR1 installs the test image that loses power before the init flag, and
  * SIGUSR2 the normal one.
+ *
+ * SIM_CHIP_HANGS makes the first wrong password hang the Wi-Fi chip: the driver's lines come, no
+ * join gets anywhere, and after this many milliseconds the board says so and restarts. 0 means
+ * that it never does, as on firmware without the timers, until somebody sends REBOOT.
+ *
+ * Built with CONFIG_APP_TEST_FAULT_WIFI_DEAD, TEST_WIFI_DEAD stops the chip with the board on the
+ * cloud. SIM_DEAD_REASON says which timer gets it: no_cloud, or wifi_silent if the link goes as
+ * well. SIM_DEAD_DOWN_MS says when the cloud or the link goes, and SIM_DEAD_STUCK_MS how long after
+ * that the board restarts. Any restart counts as a software reset, or as SIM_RESET_REASON says.
  */
 
 #include <signal.h>
@@ -37,8 +46,11 @@
 #define BOOT_TIME_MS 50
 #define JOIN_TIME_MS 150
 #define LOG_EVERY_MS 400
+#define DRIVER_LINE_EVERY_MS 50
 
 static volatile sig_atomic_t image_installed;
+/* What the last restart was for, which the next boot reports. */
+static const char *stuck_reason;
 
 static void on_install(int number)
 {
@@ -106,6 +118,12 @@ static void boot(void)
 	console_event("app", "Cranium firmware %s", fw_version_running_string());
 	console_cmd_boot_box();
 
+	if (stuck_reason != NULL) {
+		console_event("stuck", "WRN: Restarted earlier for being stuck: reason=%s count=%u",
+			      stuck_reason, (unsigned int)fake.stuck_count);
+		stuck_reason = NULL;
+	}
+
 	if (device_is_factory()) {
 		console_event("app", "WRN: Factory mode: send INIT|<id> on the console");
 	}
@@ -127,6 +145,19 @@ static const char *next_reason(const char **cursor)
 	return reason;
 }
 
+static void say_the_driver_times_out(void)
+{
+	console_port_event("[wifi_nrf_bus] ERR: hal_rpu_ready_wait: Timed out waiting (msg_type = 0)", 71);
+}
+
+static void restart_for_being_stuck(const char *reason)
+{
+	fake.stuck_count++;
+	stuck_reason = reason;
+	console_event("STUCK", "restarting reason=%s count=%u", reason, (unsigned int)fake.stuck_count);
+	fake.reboots = 1;
+}
+
 int main(void)
 {
 	struct termios raw;
@@ -140,6 +171,13 @@ int main(void)
 	static char kept[1024];
 	size_t kept_used = 0;
 	bool link_was_up = false;
+	const char *chip_hangs = getenv("SIM_CHIP_HANGS");
+	bool chip_has_hung = false;
+	long long hung_at = -1;
+	long long next_driver_line = 0;
+	/* The test image's stopped chip: when it stopped, and whether the cloud or link has gone. */
+	long long dead_at = -1;
+	long long down_at = -1;
 
 	if (reasons == NULL) {
 		reasons = "wrong password";
@@ -192,7 +230,12 @@ int main(void)
 		if (fake.reboots > 0) {
 			fake.reboots = 0;
 			fake.joins = 0;
+			fake.reset_reason = getenv("SIM_RESET_REASON") != NULL ? getenv("SIM_RESET_REASON")
+									       : "software";
 			join_at = -1;
+			hung_at = -1;
+			dead_at = -1;
+			down_at = -1;
 			boot_at = now + (boot_time != NULL ? atoi(boot_time) : BOOT_TIME_MS);
 		}
 
@@ -232,7 +275,13 @@ int main(void)
 		if (join_at >= 0 && now >= join_at) {
 			join_at = -1;
 
-			if (strncmp(fake.wifi_password, "wrong", 5) == 0) {
+			if (strncmp(fake.wifi_password, "wrong", 5) == 0 && chip_hangs != NULL &&
+			    !chip_has_hung) {
+				chip_has_hung = true;
+				hung_at = now;
+			} else if (hung_at >= 0) {
+				/* It says nothing about any join while it hangs. */
+			} else if (strncmp(fake.wifi_password, "wrong", 5) == 0) {
 				const char *reason = next_reason(&reason_cursor);
 
 				/* One attempt after the other, until the list ends. */
@@ -248,6 +297,45 @@ int main(void)
 				    fake.certificate) {
 					fake.cloud_connected = true;
 				}
+			}
+		}
+
+		if (hung_at >= 0 && now >= next_driver_line) {
+			next_driver_line = now + DRIVER_LINE_EVERY_MS;
+			say_the_driver_times_out();
+		}
+
+		if (hung_at >= 0 && atoi(chip_hangs) > 0 && now - hung_at >= atoi(chip_hangs)) {
+			restart_for_being_stuck("wifi_silent");
+		}
+
+		if (fake.wifi_dead_calls > 0 && dead_at < 0) {
+			dead_at = now;
+			fake.wifi_dead_calls = 0;
+			console_event("WIFI", "test image: chip power cut");
+		}
+
+		if (dead_at >= 0) {
+			const char *reason = getenv("SIM_DEAD_REASON");
+			const char *down = getenv("SIM_DEAD_DOWN_MS");
+			const char *stuck = getenv("SIM_DEAD_STUCK_MS");
+
+			reason = reason != NULL ? reason : "no_cloud";
+
+			if (now >= next_driver_line) {
+				next_driver_line = now + DRIVER_LINE_EVERY_MS;
+				say_the_driver_times_out();
+			}
+
+			if (down_at < 0 && now - dead_at >= (down != NULL ? atoi(down) : 100)) {
+				down_at = now;
+				fake.cloud_connected = false;
+				console_event("app", "Disconnected from AWS IoT");
+				fake.link_up = strcmp(reason, "wifi_silent") != 0;
+			}
+
+			if (down_at >= 0 && now - down_at >= (stuck != NULL ? atoi(stuck) : 500)) {
+				restart_for_being_stuck(reason);
 			}
 		}
 

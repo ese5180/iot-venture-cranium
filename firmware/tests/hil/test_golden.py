@@ -797,7 +797,7 @@ class SettingsTest(unittest.TestCase):
     def test_the_new_faults_are_kept_out_of_binaries(self):
         with tempfile.TemporaryDirectory() as folder:
             config = Path(folder) / ".config"
-            for fault in ("WRECK_SLOTS", "GOLDEN_FLIP"):
+            for fault in ("WRECK_SLOTS", "GOLDEN_FLIP", "WIFI_DEAD"):
                 config.write_text(f"CONFIG_APP_TEST_FAULT_{fault}=y\n")
                 self.assertTrue(store_binary.has_test_fault(config), fault)
 

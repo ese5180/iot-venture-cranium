@@ -5,8 +5,9 @@ came from are in the table below.
 
 **Which firmware.** The golden image, the one a person can always go back to, is firmware 1.5.0. It is
 frozen: [`firmware/golden.json`](../firmware/golden.json) names it, and the bootloader holds its digest.
-The planned release is 1.6.0, which is what `firmware/app/VERSION` says and what a build of this
-checkout makes.
+The planned release is 1.7.0, which is what `firmware/app/VERSION` says and what a build of this
+checkout makes. It is 1.6.0 with [what restarts a stuck board](../firmware/README.md#when-the-board-is-stuck)
+and a few small fixes next to that. Test images for the bench are 1.6.x, below it.
 
 Every run below was on one nRF7002 DK. The benches write one line per run to a local
 `results.jsonl`, which is not in git. A result is about the firmware and the bootloader it ran on:
@@ -21,19 +22,21 @@ Every run below was on one nRF7002 DK. The benches write one line per run to a l
 | [Serial console, by the bench](#the-serial-console-on-firmware-130) | 1.3.0 | From before the golden image | 2026-10-31 |
 | [Over the air, and serial recovery](#over-the-air-on-the-older-shell-firmware) | 1.1.x and 1.2.0, with the older Zephyr shell | From before the golden image | 2026-10-31 |
 | Firmware update over Bluetooth | None: it has not been tried on the air | | |
+| [What restarts a stuck board](../firmware/README.md#when-the-board-is-stuck) | None: 1.7.0 has been built and has only run in host tests | | |
 
 <!-- OVER-THE-AIR REGRESSION: the section under this comment is the one place that says whether the over-the-air regression on the final firmware has run. Other documents link to it. When it has run, replace its text with the date, the firmware, the bootloader, the results and what failed on the way, and add a row to the table above. -->
 
 ## Over the air on the final firmware
 
-**This has not run.** No update over the air has finished on firmware 1.5.0 or 1.6.0, or on the bootloader
+**This has not run.** No update over the air has finished on firmware 1.5.0, 1.6.0 or 1.7.0, or on the bootloader
 that holds the pin. The closest are G15 and G16 below: a real job took each image from the frozen 1.5.0
 over Wi-Fi and into the bootloader's swap, and the gesture then went back to 1.5.0 on purpose. On the night of 2026-11-01 the AWS CLI session expired and the phone hotspot went
 down. The run started again at 08:16 that morning and was stopped before its first update, because the
 Wi-Fi chip hung in a console check: see [the serial console on 1.5.0](#the-serial-console-on-firmware-150).
-It will run on the next release, which restarts the board when the chip hangs like that. The plan is ten
-updates in a row, the failure scenarios, G15 and G16, a release through `scripts/ota.sh`, and the console
-checks that need Wi-Fi or erase the board. So 1.6.0 has been built, and no test has run it on a board.
+It will run on 1.7.0, which is written to restart the board when the chip hangs like that, and which has not
+shown that on a board yet. The plan is ten updates in a row, the failure scenarios, `ota_bench.py chip-dead`,
+a release through `scripts/ota.sh`, and the console checks that need Wi-Fi or erase the board. 1.6.0 and
+1.7.0 have been built, and no test has run either of them on a board.
 Until then, the only over-the-air results are those
 [on the older shell firmware](#over-the-air-on-the-older-shell-firmware), below.
 
@@ -137,7 +140,8 @@ failures: they show nothing about the firmware.
 
 This has been seen once. Its root cause is not known, and it has not been reproduced, on purpose: a loop
 that forces it keeps the board off the hotspot. 1.5.0 is frozen and keeps this behaviour, so on the golden
-image a hang like this needs a restart by hand. `settings-kept` and `back-online` have not been rerun, and
+image a hang like this needs a restart by hand. 1.7.0 has
+[timers for it](../firmware/README.md#when-the-board-is-stuck), which so far have only run in host tests. `settings-kept` and `back-online` have not been rerun, and
 `check-5-wrong-password` has not passed on this firmware.
 
 The checks that erase the board have not run on 1.5.0.

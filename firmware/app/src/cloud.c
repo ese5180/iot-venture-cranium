@@ -198,7 +198,8 @@ static void on_aws_iot_event(const struct aws_iot_evt *const event)
 		break;
 	case AWS_IOT_EVT_ERROR:
 		/* The library has already closed the connection. Reconnecting is the main
-		 * loop's decision; a cloud problem must never reboot the device.
+		 * loop's decision. A cloud problem does not restart the device from here: only
+		 * STUCK_NO_CLOUD_SECONDS of link-up time with no connection does, in stuck.c.
 		 */
 		LOG_WRN("AWS IoT library error %d", event->data.err);
 		if (atomic_set(&connected, 0)) {
@@ -309,6 +310,11 @@ void cloud_disconnect(void)
 bool cloud_is_connected(void)
 {
 	return atomic_get(&connected) != 0;
+}
+
+bool cloud_is_connecting(void)
+{
+	return atomic_get(&connecting) != 0;
 }
 
 static int publish(const char *topic, enum aws_iot_shadow_topic_type shadow_topic,

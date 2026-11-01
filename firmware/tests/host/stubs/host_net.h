@@ -17,6 +17,7 @@
 #define NET_EVENT_L4_IPV6_CONNECTED    (1ULL << 4)
 #define NET_EVENT_CONN_IF_FATAL_ERROR  (1ULL << 5)
 #define NET_EVENT_WIFI_CONNECT_RESULT  (1ULL << 6)
+#define NET_EVENT_SUPPLICANT_READY     (1ULL << 7)
 
 struct net_if {
 	int unused;
@@ -35,14 +36,28 @@ void net_mgmt_init_event_callback(struct net_mgmt_event_callback *callback,
 				  uint64_t mask);
 void net_mgmt_add_event_callback(struct net_mgmt_event_callback *callback);
 
+/* On the real thing the linker collects these. A test calls the one it wants. */
+struct net_mgmt_event_static_handler {
+	uint64_t event_mask;
+	void (*handler)(uint64_t event, struct net_if *iface, void *info, size_t length,
+			void *user_data);
+	void *user_data;
+};
+#define NET_MGMT_REGISTER_EVENT_HANDLER(_name, _event_mask, _func, _user_data)                \
+	const struct net_mgmt_event_static_handler _name = {                                  \
+		.event_mask = _event_mask,                                                    \
+		.handler = _func,                                                             \
+		.user_data = (void *)_user_data,                                              \
+	}
+
 enum net_request {
 	NET_REQUEST_WIFI_IFACE_STATUS,
 	NET_REQUEST_WIFI_DISCONNECT,
 };
 int net_mgmt(enum net_request request, struct net_if *iface, void *data, size_t length);
 
-int conn_mgr_all_if_up(bool blocking);
-int conn_mgr_all_if_connect(bool blocking);
+int conn_mgr_all_if_up(bool skip_ignored);
+int conn_mgr_all_if_connect(bool skip_ignored);
 
 struct net_in_addr {
 	uint8_t bytes[4];

@@ -16,6 +16,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #define NET_SSID_MAX     32
 #define NET_PASSWORD_MIN 8
@@ -37,10 +38,16 @@ struct net_status {
 	char mac[18];
 };
 
-/* Bring the interface up and remove stored networks that policy does not allow. */
+/*
+ * Bring the interface up and remove stored networks that policy does not allow. This does not wait
+ * for the Wi-Fi stack, so it also returns on a chip that does not come up.
+ */
 int net_init(void);
 
-/* Start joining a stored network. Returns -ENOENT when none is stored. */
+/*
+ * Start joining a stored network. Returns -ENOENT when none is stored, and -EAGAIN when the Wi-Fi
+ * stack is not ready yet, in which case the join starts by itself when it is.
+ */
 int net_connect(void);
 
 /* Called once a second: retries the connection when it has been down for a while. */
@@ -53,6 +60,15 @@ void net_report_join_failed(int reason);
 
 bool net_is_up(void);
 bool net_has_credentials(void);
+
+/*
+ * How many results of join attempts the Wi-Fi stack has reported since this image started, good
+ * or bad. "network not found" only comes after a scan that finished, which took the driver, the
+ * chip's firmware and the supplicant. A failed request does not count, and neither does the
+ * console's "no answer", which is what the absence of a result looks like. Not every join that
+ * fails gets a result, and not every result took the chip: see STUCK_WIFI_SILENT_SECONDS.
+ */
+uint32_t net_wifi_answers(void);
 
 #if defined(CONFIG_APP_BT_OTA)
 /* The Wi-Fi stack has reported the result of a join attempt, good or bad, since this image started. */

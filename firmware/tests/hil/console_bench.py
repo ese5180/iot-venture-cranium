@@ -14,7 +14,8 @@ alone, and `run` wants to hear whether it may erase.
 The Wi-Fi network comes from ~/.cranium/wifi_secrets.h, as in tools/provision_device.py,
 and neither the network nor its password is printed. Everything both serial ports print
 goes to --out, with the password taken out. Each step ends with PASS or FAIL and appends
-one line to results.jsonl there, in the same form as ota_bench.py.
+one line to results.jsonl there, in the same form as ota_bench.py. Neither that file nor what
+this prints holds the network's name, or what names the AWS account.
 
 A step that erases the board is followed by restoring it with tools/provision_device.py
 --profile <profile>, which provisions it again unattended: it needs that script's AWS
@@ -48,7 +49,9 @@ sys.path.insert(0, str(REPO / "tools"))
 from board import (BoardError, Console, FINAL_LINE, ShellFirmware, crc16_ccitt_false,  # noqa: E402
                    find_console_port, parse_key_values)
 from local import WIFI_SECRETS  # noqa: E402
-from ota_bench import Aws, LoggedPort, TestFailed, image_version, note  # noqa: E402
+from ota_bench import (ACCOUNT_SHOWN, STUCK_RESTART, Aws, ChipStuck, LoggedPort,  # noqa: E402
+                       TestFailed, WifiWatch, account_names_in, hang_context, image_version,
+                       judge_stuck_during_join, note, scrub)
 from provision_device import OUTPUTS, read_wifi_secrets  # noqa: E402
 from serial.tools import list_ports  # noqa: E402
 
@@ -169,8 +172,11 @@ class ConsoleBench:
         self.out = Path(args.out)
         self.out.mkdir(parents=True, exist_ok=True)
         self.lines = []
+        # When each of those came. It is added to first, so it is never the shorter one.
+        self.line_times = []
         self.secret_values = []
         self.credentials = None
+        self.watch = WifiWatch()
         self.device = args.port or find_console_port()
         self.boot_device = args.boot_port or self._other_port()
         self.boot = None
@@ -190,7 +196,7 @@ class ConsoleBench:
     def open_ports(self) -> None:
         if self.boot_device:
             self.boot = LoggedPort(self.boot_device, self.out / "vcom0-boot.log")
-        self.link = LoggedPort(self.device, self.out / "vcom1-app.log", self.lines.append,
+        self.link = LoggedPort(self.device, self.out / "vcom1-app.log", self.on_line,
                                self.redact)
         self.console = Console(self.device, self.link)
 
@@ -214,6 +220,29 @@ class ConsoleBench:
     def _save_undone(self) -> None:
         (self.out / UNDONE_FILE).write_text(json.dumps(sorted(self.undone)))
 
+    # ---- what the board says about its Wi-Fi chip -------------------------------------
+
+    def on_line(self, line: str) -> None:
+        self.line_times.append(time.time())
+        self.lines.append(line)
+        self.watch.feed(line)
+
+    def status_or_nothing(self) -> dict | None:
+        try:
+            return self.console.status()
+        except BoardError:
+            return None
+
+    def rescue_from_hang(self) -> None:
+        """A hung chip stays hung until a restart. Nothing after this could join a network."""
+        note("the Wi-Fi chip has stopped answering and the board has not restarted: restarting it")
+        try:
+            self.console.exchange("REBOOT")
+            self.console.wait_until_up(BOOT_SECONDS)
+        except BoardError as error:
+            note(f"restarting it: {error}")
+        self.watch.clear()
+
     # ---- what is known about the network ---------------------------------------------
 
     def redact(self, text: str) -> str:
@@ -227,6 +256,14 @@ class ConsoleBench:
             self.credentials = read_wifi_secrets()
             self.secret_values.append(self.credentials[1])
         return self.credentials
+
+    def safe_for_results(self, value):
+        """What goes into results.jsonl and on the screen: no password, not the network's name,
+        which the logs hold and which a result that gets quoted should not, and no name of the
+        account's."""
+        names = [self.credentials[0]] if self.credentials else []
+        value = scrub(value, self.secret_values, REDACTED)
+        return scrub(scrub(value, account_names_in(OUTPUTS), ACCOUNT_SHOWN), names)
 
     def wifi_command(self, password: str | None = None) -> str:
         ssid, right_password, security = self.network()
@@ -256,6 +293,7 @@ class ConsoleBench:
                 match = pattern.search(line)
                 if match:
                     return match
+            self.watch.check()
             if time.time() > deadline:
                 raise TestFailed(f"no line like {pattern.pattern} within {timeout:.0f} s")
             time.sleep(0.05)
@@ -336,8 +374,12 @@ class ConsoleBench:
         for _ in range(NETWORK_ATTEMPTS):
             try:
                 return self.join_right_network()
+            except ChipStuck as error:
+                note(f"putting the right network back: {error}")
+                self.rescue_from_hang()
+                continue
             except (TestFailed, BoardError, OSError) as error:
-                note(f"putting the right network back: {self.redact(str(error))}")
+                note(f"putting the right network back: {self.safe_for_results(str(error))}")
             if WRONG_NETWORK not in self.undone:
                 break
         return None
@@ -682,7 +724,9 @@ class ConsoleBench:
         wrong = "wrong-" + os.urandom(8).hex()
         self.secret_values.append(wrong)
         mark = self.mark()
+        started = time.time()
         slowest = 0.0
+        outages = 0
         final = self.console.exchange(self.wifi_command(wrong), 8)[1]
         if not final.startswith("OK saved, connecting to "):
             raise TestFailed(f"WIFI answered: {self.redact(final)}")
@@ -690,16 +734,33 @@ class ConsoleBench:
         def reasons() -> list[str]:
             return [WIFI_FAILED.search(line).group(1) for line in self.seen_since(WIFI_FAILED, mark)]
 
+        def stuck_restarts() -> list[str]:
+            return [STUCK_RESTART.match(line).group(1) for line in self.seen_since(STUCK_RESTART, mark)]
+
         # Check 4 has just shown that the network is there, so a failure that has nothing to
-        # say about the password only means that it has not been tried yet.
+        # say about the password only means that it has not been tried yet. The chip has hung
+        # here once: a restart for that is what firmware with the timers does, and then the
+        # wrong password has to be reported all the same. The result says that it happened.
         deadline = time.time() + self.args.join_timeout
         while all(reason in NOT_ABOUT_THE_PASSWORD for reason in reasons()):
+            self.watch.check()
             if time.time() > deadline:
                 raise TestFailed(f"the password was never tried, the board only said: {reasons()}")
-            started = time.time()
-            self.console.get_id()
-            slowest = max(slowest, time.time() - started)
+            asked = time.time()
+            try:
+                self.console.get_id()
+                slowest = max(slowest, time.time() - asked)
+            except BoardError:
+                # The console has to keep answering, which is what this check is for. A board that
+                # said why it went gets its boot, as any board does, and only that one.
+                if outages >= len(stuck_restarts()):
+                    raise
+                outages += 1
+                self.console.wait_until_up(BOOT_SECONDS)
             time.sleep(0.5)
+
+        restarts = judge_stuck_during_join(list(zip(self.line_times[mark:], self.lines[mark:])),
+                                           started)
 
         if self.seen_since(WIFI_CONNECTED, mark):
             raise TestFailed("the board says it connected with a wrong password")
@@ -707,7 +768,8 @@ class ConsoleBench:
         status = self.console.status()
         if status["wifi link"] != "down":
             raise TestFailed(f"the link is {status['wifi link']} with a wrong password")
-        return {"reasons": reasons(), "slowest_reply_seconds": round(slowest, 2)}
+        return {"reasons": reasons(), "slowest_reply_seconds": round(slowest, 2),
+                "stuck_restarts": restarts, "console_outages": outages}
 
     def settings_kept(self) -> dict:
         """SET_ID and CLEAR_WIFI on a board that is on the network: what they are for changes,
@@ -807,7 +869,7 @@ class ConsoleBench:
         self.wait_for_boot(mark, "FACTORY")
         status = self.console.status()
         if status["state"] != "FACTORY" or status["id"] != "":
-            raise TestFailed(f"after FACTORY_RESET: {status}")
+            raise TestFailed(f"after FACTORY_RESET: state {status['state']}, id {status['id']}")
         return {"state": status["state"]}
 
     def check_1(self) -> dict:
@@ -1017,6 +1079,7 @@ class ConsoleBench:
         deadline = time.time() + self.args.join_timeout
         status = {}
         while time.time() < deadline:
+            self.watch.check()
             try:
                 status = self.console.status()
             except BoardError:
@@ -1044,14 +1107,23 @@ class ConsoleBench:
             record["reason"] = str(reason)
         except (TestFailed, BoardError) as error:
             record["outcome"] = "FAIL"
-            record["error"] = self.redact(str(error))
+            record["error"] = str(error)
+            if isinstance(error, ChipStuck):
+                record["chip_stuck"] = True
+                if self.watch.hung():
+                    record["error"] += hang_context(self.status_or_nothing())
+                    self.rescue_from_hang()
         except Exception as error:  # noqa: BLE001  Nothing a step does may stop the rest.
             record["outcome"] = "FAIL"
-            record["error"] = self.redact(f"{type(error).__name__}: {error}")
+            record["error"] = f"{type(error).__name__}: {error}"
+        # What the board or a command said. Not the record's own fields: a short name would ruin them.
+        for key in ("error", "result", "reason"):
+            if key in record:
+                record[key] = self.safe_for_results(record[key])
         record["duration"] = round(time.time() - started)
         self.results.append(record)
         with open(self.out / "results.jsonl", "a") as file:
-            file.write(self.redact(json.dumps(record)) + "\n")
+            file.write(json.dumps(record) + "\n")
         note(f"=== {record['outcome']} {step.name} ({record['duration']} s)"
              + (f": {record['error']}" if "error" in record else ""))
         return record["outcome"] != "FAIL"
@@ -1075,8 +1147,10 @@ STEPS = [
      "WIFI reports the join, and the board reconnects after REBOOT. Rewrites the stored "
      "network with the same one", False),
     ("check-5-wrong-password", "check_5",
-     "a wrong password reports a failure and the console keeps answering. Stores a wrong "
-     "password for a while, then puts the right one back", False),
+     "a wrong password reports a failure and the console keeps answering. One restart for a hung "
+     "Wi-Fi chip on the way passes, if the driver said so first, it came at the timer's limit, and "
+     "that report follows it, and the result says so. Stores a wrong password for a while, then "
+     "puts the right one back", False),
     ("settings-kept", "settings_kept",
      "SET_ID and CLEAR_WIFI on a board on the network: the link drops, everything else stays. "
      "Erases the network for a while, then puts it back", False),

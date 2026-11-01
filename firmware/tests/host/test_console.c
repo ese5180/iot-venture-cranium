@@ -1325,6 +1325,7 @@ static void test_factory_reset(void)
 #if defined(CONFIG_APP_BT_OTA)
 	fake.records[STORE_BT_OTA_RECORD].present = true;
 #endif
+	fake.records[STORE_STUCK].present = true;
 	command("FACTORY_RESET");
 	CHECK_TEXT(final_line(), "OK erased, rebooting into factory mode");
 	CHECK(fake.reboots == 1);
@@ -1337,6 +1338,7 @@ static void test_factory_reset(void)
 #if defined(CONFIG_APP_BT_OTA)
 	CHECK(!fake.records[STORE_BT_OTA_RECORD].present);
 #endif
+	CHECK(!fake.records[STORE_STUCK].present);
 	CHECK(!fake.wifi_stored);
 	CHECK(!fake.private_key);
 	CHECK(!fake.certificate);
@@ -1810,6 +1812,7 @@ static void test_status(void)
 	CHECK_TEXT(value_of("private key"), "set");
 	CHECK_TEXT(value_of("certificate"), "set");
 	CHECK_TEXT(value_of("update"), "idle (last: none)");
+	CHECK_TEXT(value_of("stuck count"), "0");
 
 	/* One section. */
 	command("STATUS|wifi");
@@ -1821,6 +1824,10 @@ static void test_status(void)
 	CHECK_TEXT(value_of("wifi link"), "<none>");
 	command("status|device");
 	CHECK_TEXT(value_of("thing name"), "cranium-" SOC_ID);
+	fake.stuck_count = 3;
+	command("STATUS|device");
+	CHECK_TEXT(value_of("stuck count"), "3");
+	fake.stuck_count = 0;
 	command("STATUS|certs");
 	CHECK_TEXT(value_of("private key"), "set");
 	command("STATUS|update");
@@ -2422,6 +2429,76 @@ static void test_stream_idle_timeout(void)
 	CHECK_TEXT(fake.events, "");
 }
 
+/* ---- the test image that can stop the Wi-Fi chip -------------------------------------- */
+
+#if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
+static void test_the_chip_stops_once_on_command(void)
+{
+	operating_board();
+	fake.wifi_dead_result = 0;
+	command("TEST_WIFI_DEAD");
+	CHECK_TEXT(final_line(), "OK BUCKEN is low, IOVDD is on, and only a restart brings the chip back");
+	CHECK(fake.wifi_dead_calls == 1);
+	CHECK(fake.main_calls >= 1);
+
+	/* In any case, like any other command, and with no arguments. */
+	command("test_wifi_dead");
+	CHECK(fake.wifi_dead_calls == 2);
+	command("TEST_WIFI_DEAD|now");
+	CHECK_TEXT(final_line(), "ERR usage: TEST_WIFI_DEAD");
+	CHECK(fake.wifi_dead_calls == 2);
+
+	/* Once. */
+	operating_board();
+	fake.wifi_dead_result = -EALREADY;
+	command("TEST_WIFI_DEAD");
+	CHECK_TEXT(final_line(), "ERR done already: a restart brings the chip back");
+
+	/* Only on an image that got here by a swap: on any other, no revert could ever show. */
+	operating_board();
+	fake.wifi_dead_result = -ENOTSUP;
+	command("TEST_WIFI_DEAD");
+	CHECK_TEXT(final_line(),
+		   "ERR this image has no trailer, so a revert could not show: install it over the air first");
+
+	operating_board();
+	fake.wifi_dead_result = -EIO;
+	command("TEST_WIFI_DEAD");
+	CHECK_TEXT(final_line(), "ERR the pin could not be driven (-5)");
+
+	/* Every timer stands aside during an update or a trial, so it would show nothing then. */
+	operating_board();
+	fake.wifi_dead_result = 0;
+	fake.ota = OTA_TESTING;
+	command("TEST_WIFI_DEAD");
+	CHECK_TEXT(final_line(), "ERR update in progress");
+	CHECK(fake.wifi_dead_calls == 0);
+	fake.ota = OTA_IDLE;
+
+	/* Not in factory mode, which has no network to lose. */
+	fake_reset();
+	CHECK(device_boot() == DEVICE_BOOT_FACTORY);
+	command("TEST_WIFI_DEAD");
+	CHECK_TEXT(final_line(), "ERR factory mode, send INIT|<id> first");
+	CHECK(fake.wifi_dead_calls == 0);
+
+	/* It goes in HELP with the rest of the test bench. */
+	operating_board();
+	command("HELP");
+	CHECK(strstr(fake.output, "TEST_WIFI_DEAD") != NULL);
+}
+#else
+static void test_there_is_no_such_command_in_any_other_image(void)
+{
+	operating_board();
+	command("TEST_WIFI_DEAD");
+	CHECK_TEXT(final_line(), "ERR unknown command TEST_WIFI_DEAD, type HELP");
+	CHECK(fake.wifi_dead_calls == 0);
+	command("HELP");
+	CHECK(strstr(fake.output, "TEST_WIFI_DEAD") == NULL);
+}
+#endif
+
 int main(void)
 {
 	fake_reset();
@@ -2464,6 +2541,11 @@ int main(void)
 	test_stream_in_order();
 	test_stream_failures();
 	test_stream_idle_timeout();
+#if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
+	test_the_chip_stops_once_on_command();
+#else
+	test_there_is_no_such_command_in_any_other_image();
+#endif
 
 	printf("%d console checks, %d failed\n", checks, failures);
 	return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

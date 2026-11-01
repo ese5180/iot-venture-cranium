@@ -4,11 +4,20 @@
 
 #include <psa/internal_trusted_storage.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/toolchain.h>
 
 LOG_MODULE_REGISTER(store, CONFIG_APP_LOG_LEVEL);
 
 /* "CRAN" in the upper half keeps these identifiers apart from any other user. */
 #define STORE_UID(id) ((psa_storage_uid_t)0x4352414e00000000ULL | (psa_storage_uid_t)(id))
+
+/*
+ * Every record in store.h takes one asset in TF-M's internal trusted storage, and so does each
+ * stored Wi-Fi network, which the credentials library keeps as a persistent PSA key. Certificates
+ * and the device key are in protected storage, which counts its own. A write past the limit fails.
+ */
+BUILD_ASSERT(STORE_STUCK + CONFIG_WIFI_CREDENTIALS_MAX_ENTRIES <= CONFIG_TFM_ITS_NUM_ASSETS,
+	     "more records than TF-M's internal trusted storage can hold");
 
 int store_read(enum store_id id, void *data, size_t size)
 {

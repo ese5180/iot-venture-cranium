@@ -13,6 +13,8 @@
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/sys/atomic.h>
 
+#include <supp_events.h>
+
 #include "app_events.h"
 #include "console.h"
 
@@ -39,13 +41,15 @@ static struct net_mgmt_event_callback conn_callback;
 static struct net_mgmt_event_callback wifi_callback;
 
 static atomic_t link_up;
-#if defined(CONFIG_APP_BT_OTA)
-/* The Wi-Fi stack has reported on a join attempt since this image started. */
-static atomic_t wifi_answered;
-#endif
+/* See net_wifi_answers(). net_connect() does not touch it, unlike the two below. */
+static atomic_t wifi_answers;
 /* The reason last reported since the last attempt began: it is said only once. */
 static atomic_t last_failure;
 static int seconds_down;
+/* The supplicant has said that it is ready, once. See net_connect(). */
+static atomic_t stack_ready;
+/* net_connect() was called before that, and it is to be called again when it comes. */
+static atomic_t join_waiting;
 
 static bool security_allowed(enum wifi_security_type type)
 {
@@ -154,16 +158,40 @@ static void on_wifi_event(struct net_mgmt_event_callback *callback, uint64_t eve
 
 	ARG_UNUSED(iface);
 
-#if defined(CONFIG_APP_BT_OTA)
 	if (event == NET_EVENT_WIFI_CONNECT_RESULT) {
-		atomic_set(&wifi_answered, 1);
+		atomic_inc(&wifi_answers);
 	}
-#endif
 
 	if (event == NET_EVENT_WIFI_CONNECT_RESULT && status != NULL && status->status != 0) {
 		post_join_failed(status->status);
 	}
 }
+
+/*
+ * Registered at build time and not in net_init(), which may run after the event has come. It can
+ * come again later, after the driver's recovery, when nobody is waiting for it.
+ */
+static void on_supplicant_ready(uint64_t event, struct net_if *iface, void *info, size_t length,
+				void *user_data)
+{
+	ARG_UNUSED(iface);
+	ARG_UNUSED(info);
+	ARG_UNUSED(length);
+	ARG_UNUSED(user_data);
+
+	if (event != NET_EVENT_SUPPLICANT_READY) {
+		return;
+	}
+
+	atomic_set(&stack_ready, 1);
+
+	if (atomic_set(&join_waiting, 0)) {
+		(void)app_event_post_simple(APP_EVENT_NET_JOIN);
+	}
+}
+
+NET_MGMT_REGISTER_EVENT_HANDLER(supplicant_ready_handler, NET_EVENT_SUPPLICANT_READY,
+				on_supplicant_ready, NULL);
 
 struct prune_context {
 	char ssids[MAX_STORED_NETWORKS][WIFI_SSID_MAX_LEN];
@@ -216,7 +244,8 @@ int net_init(void)
 	net_mgmt_init_event_callback(&wifi_callback, on_wifi_event, WIFI_EVENTS);
 	net_mgmt_add_event_callback(&wifi_callback);
 
-	err = conn_mgr_all_if_up(true);
+	/* false: see net_connect(). This must not wait for the Wi-Fi stack. */
+	err = conn_mgr_all_if_up(false);
 	if (err) {
 		LOG_ERR("Network interface could not be brought up: %d", err);
 		return err;
@@ -224,6 +253,20 @@ int net_init(void)
 
 	prune_disallowed_networks();
 	return 0;
+}
+
+/*
+ * False: on_supplicant_ready() posts APP_EVENT_NET_JOIN when the event comes, so this gets called
+ * again. If the event comes during this call, whoever takes the flag acts on it: one join, not two.
+ */
+static bool stack_ready_or_join_later(void)
+{
+	if (atomic_get(&stack_ready)) {
+		return true;
+	}
+
+	atomic_set(&join_waiting, 1);
+	return atomic_get(&stack_ready) && atomic_set(&join_waiting, 0);
 }
 
 int net_connect(void)
@@ -237,7 +280,30 @@ int net_connect(void)
 	seconds_down = 0;
 	atomic_set(&last_failure, 0);
 
-	err = conn_mgr_all_if_connect(true);
+	/*
+	 * A chip that did not come up must not stop the main thread here. Until the supplicant is
+	 * ready, conn_mgr's thread holds conn_mgr_mon_lock and the binding's lock, and waits for it
+	 * with no limit in net_l2_wifi_init(). The main thread would then stop with it, with no tick,
+	 * and only the watchdog could restart the board, with no reason and no back-off.
+	 *
+	 * So the interface comes first, with skip_ignored false: true looks at what is ignored under
+	 * conn_mgr_mon_lock. False goes straight to net_if_up(), which returns the driver's error. On
+	 * an interface that is up already, it does nothing.
+	 *
+	 * conn_mgr_all_if_connect() takes both locks whatever it is given, so it has to wait for the
+	 * supplicant. On a healthy chip the join then starts when the supplicant is ready, which is
+	 * when it started while the main thread waited here, and nothing is said on the console. If
+	 * that does not happen, net_tick() says `no answer`, which is what it is.
+	 */
+	err = conn_mgr_all_if_up(false);
+	if (err == 0 || err == -EALREADY) {
+		if (!stack_ready_or_join_later()) {
+			return -EAGAIN;
+		}
+
+		err = conn_mgr_all_if_connect(true);
+	}
+
 	if (err) {
 		LOG_WRN("Connection request failed: %d", err);
 		post_join_failed(JOIN_FAILED_REQUEST);
@@ -321,10 +387,15 @@ bool net_is_up(void)
 	return atomic_get(&link_up) != 0;
 }
 
+uint32_t net_wifi_answers(void)
+{
+	return (uint32_t)atomic_get(&wifi_answers);
+}
+
 #if defined(CONFIG_APP_BT_OTA)
 bool net_wifi_answered(void)
 {
-	return atomic_get(&wifi_answered) != 0;
+	return atomic_get(&wifi_answers) != 0;
 }
 
 bool net_wifi_associated(void)

@@ -21,6 +21,8 @@ target_sources(app PRIVATE
   src/ota.c
   src/ota_job.c
   src/store.c
+  src/stuck.c
+  src/stuck_policy.c
   src/ui.c
   src/version.c
 )
@@ -50,6 +52,12 @@ if(CONFIG_BT AND NOT CONFIG_APP_BT_OTA)
 endif()
 
 target_sources_ifndef(CONFIG_APP_CONSOLE app PRIVATE src/log_discard.c)
+
+# The driver's recovery would power the chip back up, so the timer under test would never fire.
+target_sources_ifdef(CONFIG_APP_TEST_FAULT_WIFI_DEAD app PRIVATE src/fault_wifi.c)
+if(CONFIG_APP_TEST_FAULT_WIFI_DEAD AND CONFIG_NRF_WIFI_RPU_RECOVERY)
+  message(FATAL_ERROR "APP_TEST_FAULT_WIFI_DEAD needs -Dapp_CONFIG_NRF_WIFI_RPU_RECOVERY=n as well")
+endif()
 
 zephyr_linker_sources_ifdef(CONFIG_LOG SECTIONS src/log_backend_check.ld)
 

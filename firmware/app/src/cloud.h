@@ -28,6 +28,9 @@ void cloud_connect(void);
 void cloud_disconnect(void);
 bool cloud_is_connected(void);
 
+/* An attempt is running: APP_EVENT_CLOUD_UP or _DOWN is still to come. */
+bool cloud_is_connecting(void);
+
 /* Publish the reported state. json is the object that goes under state.reported. */
 int cloud_shadow_report(const char *reported_json);
 

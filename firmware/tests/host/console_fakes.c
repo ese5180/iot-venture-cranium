@@ -11,6 +11,7 @@
 #include "console_cmd.h"
 #include "console_port.h"
 #include "store.h"
+#include "stuck.h"
 
 struct fake_board fake;
 
@@ -234,6 +235,11 @@ const char *ota_last_result(void)
 	return "none";
 }
 
+uint8_t stuck_count(void)
+{
+	return fake.stuck_count;
+}
+
 int app_event_post(const struct app_event *event)
 {
 	if (fake.event_queue_full) {
@@ -352,6 +358,15 @@ void console_port_before_init_flag(void)
 	}
 }
 
+#if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
+int console_port_wifi_dead(void)
+{
+	fake.wifi_dead_calls++;
+	fake_note_op("wifi-dead");
+	return fake.wifi_dead_result;
+}
+#endif
+
 int64_t console_port_uptime_ms(void)
 {
 	return fake.now_ms;
@@ -364,7 +379,7 @@ size_t console_port_free_heap(void)
 
 const char *console_port_reset_reason(void)
 {
-	return "reset pin";
+	return fake.reset_reason != NULL ? fake.reset_reason : "reset pin";
 }
 
 int console_port_keygen_create(const char **reason)

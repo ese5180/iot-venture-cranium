@@ -37,6 +37,14 @@ void console_port_reboot(void);
 /* A place for a test image to lose power: just before the init-complete flag. */
 void console_port_before_init_flag(void);
 
+#if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
+/*
+ * Stop the Wi-Fi chip's power: see src/fault_wifi.c. Runs on the main loop. -EALREADY if that has
+ * been done, -ENOTSUP if the running image has no trailer, so that no revert could ever show.
+ */
+int console_port_wifi_dead(void);
+#endif
+
 int64_t console_port_uptime_ms(void);
 size_t console_port_free_heap(void);
 const char *console_port_reset_reason(void);

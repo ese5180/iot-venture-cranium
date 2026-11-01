@@ -87,6 +87,16 @@ static inline atomic_val_t atomic_set(atomic_t *target, atomic_val_t value)
 	return old;
 }
 
+static inline bool atomic_cas(atomic_t *target, atomic_val_t expected, atomic_val_t value)
+{
+	if (*target != expected) {
+		return false;
+	}
+
+	*target = value;
+	return true;
+}
+
 static inline atomic_val_t atomic_inc(atomic_t *target)
 {
 	return (*target)++;

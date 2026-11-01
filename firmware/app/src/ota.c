@@ -11,6 +11,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/storage/flash_map.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/reboot.h>
 
 #if defined(CONFIG_APP_BT_OTA)
@@ -109,6 +110,9 @@ static struct {
 	char last_error[24];
 	bool changed;
 } ota;
+
+/* See ota_stuck_progress(). The downloader's thread adds to it as well. */
+static atomic_t stuck_progress;
 
 static const char *const state_names[] = {
 	[OTA_IDLE] = "idle",
@@ -285,6 +289,12 @@ static void download_callback(const struct fota_download_evt *download_event)
 	static int last_step = -1;
 	struct app_event event = { .type = APP_EVENT_DOWNLOAD };
 
+	/*
+	 * Any event counts, also the pieces that the filter below keeps from the main loop. An error
+	 * counts too: attempts are limited, and a stall is not what that is.
+	 */
+	atomic_inc(&stuck_progress);
+
 	/* Runs on the downloader thread: only translate and hand over. */
 	switch (download_event->id) {
 	case FOTA_DOWNLOAD_EVT_PROGRESS:
@@ -336,6 +346,7 @@ static void start_download(void)
 
 	ota.download_attempts++;
 	ota.progress = 0;
+	atomic_inc(&stuck_progress);
 	enter(OTA_DOWNLOADING);
 
 	LOG_INF("Downloading %u bytes of firmware %u.%u.%u+%u (attempt %u)", ota.job.size,
@@ -488,6 +499,7 @@ static void check_download(void)
 	}
 
 	LOG_INF("Image verified");
+	atomic_inc(&stuck_progress);
 	enter(OTA_COMMITTING);
 	announce_commit();
 }
@@ -497,6 +509,7 @@ static void begin_settling(void)
 {
 	LOG_INF("Installation accepted. Looking at the job once more in %d s", SETTLE_SECONDS);
 	ota.last_look = false;
+	atomic_inc(&stuck_progress);
 	enter(OTA_REBOOTING);
 }
 
@@ -732,6 +745,16 @@ int ota_init(void)
 
 	strcpy(ota.last_result, "none");
 
+	/*
+	 * REVERT means: this image runs on trial and is swapped out again at the next restart unless
+	 * it is confirmed. Its deadline starts here, before anything below can return early: an image
+	 * that cannot even start this module has to go back as well.
+	 */
+	on_trial = mcuboot_swap_type_multi(0) == BOOT_SWAP_TYPE_REVERT;
+	if (on_trial) {
+		health_trial_begin();
+	}
+
 	if (psa_crypto_init() != PSA_SUCCESS) {
 		LOG_ERR("PSA crypto is not available");
 		return -EIO;
@@ -742,11 +765,6 @@ int ota_init(void)
 		LOG_ERR("Download library could not be initialised: %d", err);
 		return err;
 	}
-
-	/* REVERT means: this image runs on trial and is swapped out again at the next
-	 * restart unless it is confirmed.
-	 */
-	on_trial = mcuboot_swap_type_multi(0) == BOOT_SWAP_TYPE_REVERT;
 
 	if (store_read(STORE_OTA_RECORD, &stored, sizeof(stored)) == 0 &&
 	    stored.magic == RECORD_MAGIC) {
@@ -764,7 +782,6 @@ int ota_init(void)
 			LOG_INF("Running new firmware %s on trial", fw_version_running_string());
 			ota.record.phase = RECORD_TESTING;
 			(void)store_write(STORE_OTA_RECORD, &ota.record, sizeof(ota.record));
-			health_trial_begin();
 			enter(OTA_TESTING);
 			break;
 		case OTA_RESTART_CONFIRMED:
@@ -795,7 +812,6 @@ int ota_init(void)
 		/* On trial with no record of an update: the record was lost, or something other
 		 * than this code asked for the swap. It still has to prove itself.
 		 */
-		health_trial_begin();
 		enter(OTA_TESTING);
 	} else if (!boot_is_img_confirmed()) {
 		/* A trailer that says neither confirmed nor on trial. An image with no trailer does
@@ -1034,8 +1050,9 @@ void ota_on_tick(void)
 		break;
 	case OTA_REBOOTING:
 		/* After the settle time, look at the job once more. The reply decides: see
-		 * on_job() and on_job_withdrawn(). Without a connection there is no reply,
-		 * and so no restart, until the cloud is reachable again.
+		 * on_job() and on_job_withdrawn(). Without a connection there is no reply, and so
+		 * no installation, until the cloud is reachable again. If that takes longer than
+		 * STUCK_UPDATE_STALL_SECONDS, stuck.c restarts the board with nothing installed.
 		 */
 		if (!ota.last_look && ota.seconds_in_state >= SETTLE_SECONDS) {
 			if (cloud_jobs_request_next() == 0) {
@@ -1107,6 +1124,18 @@ bool ota_take_changed(void)
 	ota.changed = false;
 	return changed;
 }
+
+uint32_t ota_stuck_progress(void)
+{
+	return (uint32_t)atomic_get(&stuck_progress);
+}
+
+#if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
+bool ota_image_has_trailer(void)
+{
+	return primary_has_trailer();
+}
+#endif
 
 #if defined(CONFIG_APP_BT_OTA)
 bool ota_bt_has_job(void)

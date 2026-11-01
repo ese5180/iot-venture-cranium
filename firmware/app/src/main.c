@@ -12,6 +12,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/reboot.h>
 
 #include "app_events.h"
@@ -27,6 +28,7 @@
 #include "net.h"
 #include "ota.h"
 #include "ota_job.h"
+#include "stuck.h"
 #include "ui.h"
 #include "version.h"
 
@@ -51,6 +53,8 @@ K_MSGQ_DEFINE(event_queue, sizeof(struct app_event), 32, 4);
 static int cloud_retry_in = -1;
 static int cloud_backoff = CONFIG_APP_CLOUD_RETRY_SECONDS;
 static int seconds_since_report;
+/* A tick is in the queue. A main loop that is held up must not come back to a queue full of them. */
+static atomic_t tick_queued;
 
 int app_event_post(const struct app_event *event)
 {
@@ -67,7 +71,11 @@ int app_event_post_simple(enum app_event_type type)
 static void on_tick_timer(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
-	(void)app_event_post_simple(APP_EVENT_TICK);
+
+	/* Other events are lost if they find the queue full. What counts time goes by uptime. */
+	if (atomic_cas(&tick_queued, 0, 1) && app_event_post_simple(APP_EVENT_TICK) != 0) {
+		atomic_set(&tick_queued, 0);
+	}
 }
 
 K_TIMER_DEFINE(tick_timer, on_tick_timer, NULL);
@@ -161,9 +169,15 @@ static void on_tick(void)
 		net_tick();
 	}
 
-	if (net_is_up() && !cloud_is_connected() && identity_settings_get() != NULL &&
-	    cloud_retry_in >= 0 && --cloud_retry_in < 0) {
-		cloud_connect();
+	if (net_is_up() && !cloud_is_connected() && identity_settings_get() != NULL) {
+		/* The events that set this can be lost. Nobody would try again until the link drops. */
+		if (cloud_retry_in < 0 && !cloud_is_connecting()) {
+			cloud_retry_in = cloud_backoff;
+		}
+
+		if (cloud_retry_in >= 0 && --cloud_retry_in < 0) {
+			cloud_connect();
+		}
 	}
 
 	ota_on_tick();
@@ -179,6 +193,8 @@ static void on_tick(void)
 	} else if (++seconds_since_report >= CONFIG_APP_SHADOW_INTERVAL_SECONDS) {
 		publish_report();
 	}
+
+	stuck_on_tick();
 }
 
 static void on_button(const struct app_event *event)
@@ -253,6 +269,7 @@ static void handle(const struct app_event *event)
 		cloud_retry_in = -1;
 		break;
 	case APP_EVENT_NET_JOIN:
+		stuck_on_new_settings();
 		(void)net_connect();
 		break;
 	case APP_EVENT_NET_JOIN_FAILED:
@@ -273,6 +290,7 @@ static void handle(const struct app_event *event)
 		}
 		break;
 	case APP_EVENT_CLOUD_CHANGED:
+		stuck_on_new_settings();
 		cloud_backoff = CONFIG_APP_CLOUD_RETRY_SECONDS;
 		cloud_retry_in = CLOUD_SETTLE_SECONDS;
 		break;
@@ -290,6 +308,7 @@ static void handle(const struct app_event *event)
 		ota_on_download(event->download.what, event->download.value);
 		break;
 	case APP_EVENT_TICK:
+		atomic_set(&tick_queued, 0);
 		on_tick();
 		return;
 	case APP_EVENT_CALL:
@@ -445,13 +464,23 @@ int main(void)
 
 	decide_mode();
 	console_start();
+	stuck_init();
 
 	if (ota_init() != 0) {
 		LOG_ERR("Update manager could not start");
 	}
 
-	if (net_init() != 0 || cloud_init() != 0) {
+	if (net_init() != 0) {
 		LOG_ERR("Networking could not start");
+	}
+
+	/*
+	 * Whatever came of that. net_init() does not wait for the Wi-Fi stack, so this runs on a chip
+	 * that did not come up as well. net_connect() tries the interface again from the tick, and
+	 * the stuck timers restart the board if it stays that way.
+	 */
+	if (cloud_init() != 0) {
+		LOG_ERR("The cloud connection could not start");
 	}
 
 	if (device_is_factory()) {

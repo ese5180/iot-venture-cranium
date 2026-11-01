@@ -94,6 +94,13 @@ struct fake_board {
 	int certificates_stored;
 	bool certificate_store_fails;
 
+	uint8_t stuck_count;
+	/* NULL for what the tests of STATS go by. */
+	const char *reset_reason;
+	/* The test image's TEST_WIFI_DEAD: how often it was asked, and what it answers. */
+	int wifi_dead_calls;
+	int wifi_dead_result;
+
 	int64_t now_ms;
 };
 

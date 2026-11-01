@@ -22,6 +22,8 @@ enum store_id {
 	STORE_INIT_FLAG = 4,
 	/* struct bt_ota_record: the last update over Bluetooth, with CONFIG_APP_BT_OTA only. */
 	STORE_BT_OTA_RECORD = 5,
+	/* struct stuck_record: how many restarts in a row for being stuck, and the last reason. */
+	STORE_STUCK = 6,
 };
 
 /* Read a record of exactly size bytes. -ENOENT if it does not exist. */

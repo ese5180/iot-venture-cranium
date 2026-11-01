@@ -21,6 +21,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "app_events.h"
 #include "cloud.h"
@@ -77,6 +78,19 @@ const char *ota_last_error(void);
 
 /* True once after something the shadow reports has changed. */
 bool ota_take_changed(void);
+
+/*
+ * How many times an update under way has moved: any event from the downloader, a download started,
+ * the image was found good, or the cloud agreed to its installation. From any thread. stuck.c
+ * restarts the board if this has not changed for STUCK_UPDATE_STALL_SECONDS. A downloader that
+ * reports errors keeps this moving, but its attempts are limited, so that has an end too.
+ */
+uint32_t ota_stuck_progress(void);
+
+#if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
+/* The running image got here by a swap, so a trial is behind it and a revert would show. */
+bool ota_image_has_trailer(void);
+#endif
 
 #if defined(CONFIG_APP_BT_OTA)
 /* For bt_ota.c. A record of a cloud job exists: it is on trial, or its report is waiting. */
