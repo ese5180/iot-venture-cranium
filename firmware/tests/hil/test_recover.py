@@ -386,13 +386,34 @@ class RecoverTest(unittest.TestCase):
         began = time.time()
 
         def read(size):
-            if time.time() - began < 0.1:
+            age = time.time() - began
+            if age < 0.1:
                 return b"the end of a line from before the restart\r\n"
+            # The bootloader says nothing on this port until it is done checking the image.
+            if age < 0.35:
+                return b""
             fake.running_application = False
             return real_read(size)
 
         fake.read = read
         self.assertEqual(self.restarts(fake, settle=0.2), 1)
+
+    def test_the_wait_starts_again_with_each_restart(self):
+        # The second restart has an answer on its way as well, and then the application is there.
+        fake = self.a_board(listens_at_restart=2, seconds=0.8)
+        real_read = fake.read
+        first_answer = []
+
+        def read(size):
+            if not fake.running_application:
+                first_answer.append(time.time())
+                if time.time() - first_answer[0] > 0.03:
+                    fake.running_application = True
+            return real_read(size)
+
+        fake.read = read
+        with self.assertRaisesRegex(BoardError, "not listening"):
+            self.restarts(fake, settle=0.2)
 
     def test_a_silent_board_is_left_alone_as_it_may_be_in_a_swap(self):
         calls = []
