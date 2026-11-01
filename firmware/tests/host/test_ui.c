@@ -29,7 +29,7 @@ static int64_t uptime_ms;
 static struct app_event posted[8];
 static int posted_count;
 
-int64_t k_uptime_get(void)
+long long k_uptime_get(void)
 {
 	return uptime_ms;
 }

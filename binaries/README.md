@@ -30,6 +30,22 @@ uploaded twice, so it is refused once it has been uploaded, or once anything hig
 `latest.signed.bin` needs a higher build first: raise the version in `firmware/app/VERSION`, run
 `west build`, and check the version in `latest.json`. Do this before the demo starts.
 
+## From GitHub
+
+A published release on [GitHub](https://github.com/ese5180/f26-t07-the-cranium/releases) holds a signed
+image, its `latest.json` and `SHA256SUMS`, made by whoever holds the signing key with
+`scripts/github-release.sh`. None has been published yet at the time of this writing. A board and the
+console take such an image like one from this folder. To fetch one, for example `v1.7.0`:
+
+```sh
+gh release download v1.7.0 --dir release && cd release && shasum -a 256 -c SHA256SUMS
+```
+
+The artifacts of the workflow runs in the Actions tab are named `...-ci-key-not-installable`, and
+that is what they are. GitHub Actions never has the signing key, so it signs what it builds with a
+throwaway key, and MCUboot and the console both refuse those images. They show that a commit builds
+and what size it is. [`docs/ci.md`](../docs/ci.md) has the rest.
+
 ## `scripts/ota.sh`
 
 ```sh

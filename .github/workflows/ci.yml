@@ -1,0 +1,292 @@
+# What runs here, what it proves and what it does not: docs/ci.md.
+#
+# The project's firmware signing key is never in a job of this workflow. Anyone with push access can
+# write a workflow that sends a secret somewhere, and that key is trusted by every board. A firmware
+# job makes a throwaway key and never saves it, so what it builds cannot be installed.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A run that checks a published release is the only one there will be for it.
+  cancel-in-progress: ${{ github.event_name != 'release' }}
+
+# Named, because GitHub Actions gives a step without a shell `bash -e`, with no pipefail: a test piped
+# into tee would then pass whatever it did. It is also how the toolchain image gets its tools: see below.
+defaults:
+  run:
+    shell: bash
+
+env:
+  NCS_VERSION: v3.4.0
+  # The commit of that tag in sdk-nrf. firmware/tests/fetch-sdk-files.sh names it as well.
+  NCS_COMMIT: 99553055607b2e9885fbc80ccd11fa9da81c2df0
+  # Raise this to start from an empty cache.
+  NCS_CACHE_GENERATION: 1
+  BOARD: nrf7002dk/nrf5340/cpuapp/ns
+
+jobs:
+  scan:
+    name: No private key in git
+    if: github.event_name != 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Look for private keys and wifi_secrets.h in the tracked files
+        run: scripts/scan-tracked-files.sh
+
+  host-tests:
+    name: Host tests
+    if: github.event_name != 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch the files of the SDK that the tests read
+        run: |
+          firmware/tests/fetch-sdk-files.sh "$RUNNER_TEMP/sdk"
+          echo "ZEPHYR_BASE=$RUNNER_TEMP/sdk/zephyr" >> "$GITHUB_ENV"
+      - name: Run the tests, with the address and undefined-behaviour sanitizers
+        run: make -C firmware/tests/host
+
+  python-tests:
+    name: Python tests
+    if: github.event_name != 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12' # As in the toolchain image.
+      - name: Install what the tools and imgtool need
+        run: python3 -m pip install --quiet --requirement firmware/tests/requirements.txt
+      - name: Fetch the files of the SDK that the tests read
+        run: |
+          firmware/tests/fetch-sdk-files.sh "$RUNNER_TEMP/sdk"
+          echo "ZEPHYR_BASE=$RUNNER_TEMP/sdk/zephyr" >> "$GITHUB_ENV"
+      # Without it test_board.py would skip two thirds of itself and call that a pass.
+      - name: Build the console's real code for a pseudo-terminal
+        run: make -C firmware/tests/host build/console_sim
+      - name: Run the tests, and fail on any skip that is not listed here
+        run: |
+          # The one skip: test_golden.py checks the kept image of firmware 1.3.0 if binaries/ has it,
+          # and binaries/ is not in git.
+          run_test() {
+            local log
+            log=$(mktemp)
+            python3 "firmware/tests/hil/$1" 2>&1 | tee "$log"
+            if [ "$(grep -E '^(OK|FAILED)' "$log" | tail -n 1)" != "$2" ]; then
+              echo "::error file=firmware/tests/hil/$1::Expected the result \"$2\". A new skip has to be listed in ci.yml, with its reason."
+              exit 1
+            fi
+          }
+          run_test test_board.py 'OK'
+          run_test test_recover.py 'OK'
+          run_test test_golden.py 'OK (skipped=1)'
+          run_test test_build_report.py 'OK'
+
+  cloud-tests:
+    name: Cloud tests
+    if: github.event_name != 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: API
+        working-directory: cloud/api
+        run: node --test
+      - name: Website
+        working-directory: cloud/web
+        run: node --test
+      - name: Local preview
+        working-directory: cloud/dev
+        run: node --test
+
+  firmware:
+    name: Firmware (${{ matrix.configuration }})
+    if: github.event_name != 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # Runs as root with HOME=/github/home, which the runner sets over the image's HOME=/opt. The runner
+    # replaces the image's entry point, so a step that runs in bash is what gets the toolchain: the image
+    # sets BASH_ENV to a script that puts it on the PATH, and a step that does not run in bash, such as
+    # an action, sees none of it. sysbuild.cmake looks for the signing key under this HOME.
+    container:
+      image: ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.4.0@sha256:f1dca44678dae83e37404e33f369786f5b2ffe2ed497eec1815f66c3a868bace
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configuration: default
+            cmake-args: ''
+          - configuration: Bluetooth
+            cmake-args: -DSB_EXTRA_CONF_FILE=bt_ota_sysbuild.conf
+    env:
+      CMAKE_ARGS: ${{ matrix.cmake-args }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the toolchain, and let git work on what is not this user's
+        run: |
+          # The runner made the workspace, and this container runs as root. Git would refuse the checkout,
+          # and tools/store_binary.py would then record the commit as "unknown". Nordic's README for this
+          # image gives this same line.
+          git config --global --add safe.directory '*'
+          echo "user $(id -un), HOME $HOME"
+          west --version
+          python3 --version
+          arm-zephyr-eabi-gcc --version | sed -n 1p
+
+      # No restore-keys: only a cache of exactly this SDK may be used. The next two steps show that it
+      # is that SDK, and the cache is saved before the build, so it holds no build output.
+      - name: Restore the SDK from the cache
+        id: ncs-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/ncs
+          key: ncs-${{ env.NCS_VERSION }}-${{ env.NCS_COMMIT }}-${{ env.NCS_CACHE_GENERATION }}
+
+      - name: Fetch the SDK, or bring the cached one up to its manifest
+        run: |
+          if [ ! -d "$HOME/ncs/.west" ]; then
+            west init -m https://github.com/nrfconnect/sdk-nrf --mr "$NCS_VERSION" --clone-opt=--depth=1 "$HOME/ncs"
+          fi
+          cd "$HOME/ncs"
+          # Over fifty fetches from GitHub, so allow for one of them to fail.
+          for attempt in 1 2 3; do
+            west update --narrow --fetch-opt=--depth=1 && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            sleep 30
+          done
+          echo "ZEPHYR_BASE=$HOME/ncs/zephyr" >> "$GITHUB_ENV"
+
+      - name: Check that the SDK is exactly the one it should be
+        run: scripts/check-west-workspace.sh "$HOME/ncs" "$NCS_COMMIT"
+
+      - name: Save the SDK to the cache
+        if: steps.ncs-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/ncs
+          key: ncs-${{ env.NCS_VERSION }}-${{ env.NCS_COMMIT }}-${{ env.NCS_CACHE_GENERATION }}
+
+      # imgtool directly, not tools/keys.py, which would write the throwaway public key over
+      # firmware/keys/fw_signing_pub.pem and leave the tree changed.
+      - name: Make a throwaway signing key, outside the cache and the artifact
+        run: |
+          umask 077
+          mkdir -p "$HOME/.cranium"
+          if [ -e "$HOME/.cranium/mcuboot_signing_key.pem" ]; then
+            echo "::error::A signing key is already here, and this job must only ever have its own."
+            exit 1
+          fi
+          python3 "$ZEPHYR_BASE/../bootloader/mcuboot/scripts/imgtool.py" keygen -t ecdsa-p256 -k "$HOME/.cranium/mcuboot_signing_key.pem"
+
+      - name: Build
+        run: |
+          arguments=()
+          if [ -n "$CMAKE_ARGS" ]; then arguments=(-- "$CMAKE_ARGS"); fi
+          cd "$HOME/ncs"
+          west build -d "$GITHUB_WORKSPACE/build" -b "$BOARD" --sysbuild --pristine=always "$GITHUB_WORKSPACE/firmware/app" "${arguments[@]}"
+
+      # An image that does not verify against this job's key is not from this job.
+      - name: Check the image and report its size
+        id: report
+        if: matrix.configuration == 'default'
+        run: |
+          imgtool="$ZEPHYR_BASE/../bootloader/mcuboot/scripts/imgtool.py"
+          python3 "$imgtool" verify -k "$HOME/.cranium/mcuboot_signing_key.pem" binaries/latest.signed.bin
+          if python3 "$imgtool" verify -k firmware/keys/fw_signing_pub.pem binaries/latest.signed.bin; then
+            echo "::error::This image verifies against the project's own key. CI must never have that key."
+            exit 1
+          fi
+          if grep -qx 'CONFIG_APP_BT_OTA=y' build/app/zephyr/.config; then
+            echo "::error::The default configuration has the Bluetooth option on."
+            exit 1
+          fi
+          python3 -I tools/build_report.py --build build --repo . \
+            --summary "$GITHUB_STEP_SUMMARY" --artifact ci-artifact --output "$GITHUB_OUTPUT"
+
+      - name: Check that the Bluetooth option took effect
+        if: matrix.configuration == 'Bluetooth'
+        run: |
+          grep -qx 'CONFIG_APP_BT_OTA=y' build/app/zephyr/.config
+          grep -qx 'CONFIG_BT=y' build/app/zephyr/.config
+          test -s build/app/zephyr/zephyr.signed.bin
+          # tools/store_binary.py keeps no Bluetooth image, so that scripts/ota.sh cannot find one.
+          test ! -e binaries/latest.signed.bin
+          {
+            echo "## Firmware build with the Bluetooth option"
+            echo
+            echo "It compiled and linked. Nothing on Actions has run it, and no artifact is kept."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the throwaway key
+        if: always()
+        run: rm -f "$HOME/.cranium/mcuboot_signing_key.pem"
+
+      - name: Upload the image, which cannot be installed
+        if: matrix.configuration == 'default'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.report.outputs.artifact }}
+          path: ci-artifact/
+          if-no-files-found: error
+          retention-days: 30
+
+  release-assets:
+    name: Check the release's files
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Read-only, like the whole workflow: this job can look at a release and cannot change it.
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: Download the release's files
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\+[0-9]+)?$ ]]; then
+            echo "::error::This tag does not look like v1.6.0 or v1.6.0+2."
+            exit 1
+          fi
+          mkdir "$RUNNER_TEMP/release"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/release"
+      - name: Check the signature, the version and SHA256SUMS
+        run: scripts/verify-github-release.sh "$TAG" "$RUNNER_TEMP/release"

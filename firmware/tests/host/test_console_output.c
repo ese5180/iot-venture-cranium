@@ -223,7 +223,7 @@ void k_busy_wait(uint32_t us)
 	ARG_UNUSED(us);
 }
 
-int64_t k_uptime_get(void)
+long long k_uptime_get(void)
 {
 	return 0;
 }

@@ -167,7 +167,7 @@ int32_t k_msleep(int32_t ms)
 	return 0;
 }
 
-int64_t k_uptime_get(void)
+long long k_uptime_get(void)
 {
 	return uptime_ms;
 }

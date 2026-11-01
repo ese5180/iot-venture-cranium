@@ -42,8 +42,9 @@ export function tagsOf(paths) {
     else if (path.startsWith('firmware/')) found.add('firmware');
     else if (path.startsWith('cloud/')) found.add('cloud');
     else if (path.startsWith('tools/')) found.add('tools');
+    else if (path.startsWith('.github/')) found.add('ci');
   }
-  return ['website', 'firmware', 'cloud', 'tools', 'docs'].filter((tag) => found.has(tag));
+  return ['website', 'firmware', 'cloud', 'tools', 'ci', 'docs'].filter((tag) => found.has(tag));
 }
 
 /** A subject as it may be shown: no address in it, and of a sensible length. */

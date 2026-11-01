@@ -24,6 +24,7 @@ export const TAGS = Object.freeze([
   ['firmware', 'Firmware'],
   ['cloud', 'Cloud'],
   ['tools', 'Tools'],
+  ['ci', 'CI'],
   ['docs', 'Docs'],
 ]);
 const TAG_NAMES = new Map(TAGS);

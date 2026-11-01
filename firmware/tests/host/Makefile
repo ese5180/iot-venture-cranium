@@ -6,7 +6,7 @@
 #   make -C firmware/tests/host
 #
 # cJSON and the base64 library are taken from the nRF Connect SDK checkout (the same source
-# the firmware uses).
+# the firmware uses), or from what firmware/tests/fetch-sdk-files.sh fetches of it.
 
 ZEPHYR_BASE ?= $(error ZEPHYR_BASE is not set: run this from an nRF Connect SDK terminal)
 CJSON_DIR ?= $(ZEPHYR_BASE)/../modules/lib/cjson
@@ -143,6 +143,7 @@ $(BUILD)/console_fault_tests: test_console.c $(CONSOLE_SOURCES) $(BUILD)/base64.
 # The console on a pseudo-terminal, for firmware/tests/hil/test_board.py. No sanitizers
 # are needed for that, and the tools' tests do not have to run with their runtime.
 $(BUILD)/console_sim: console_sim.c $(CONSOLE_SOURCES) $(ZEPHYR_BASE)/lib/utils/base64.c $(CONSOLE_HEADERS)
+	@mkdir -p $(BUILD)
 	$(CC) -std=c11 -O1 -g -I$(SRC) -Istubs $(WARNINGS) $(CONSOLE_DEFINES) -o $@ $(filter %.c,$^)
 
 $(BUILD)/console_sim_fault: console_sim.c $(CONSOLE_SOURCES) $(ZEPHYR_BASE)/lib/utils/base64.c $(CONSOLE_HEADERS)

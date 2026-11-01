@@ -49,7 +49,9 @@ int k_thread_name_set(struct k_thread *thread, const char *name);
 
 int32_t k_msleep(int32_t ms);
 void k_busy_wait(uint32_t us);
-int64_t k_uptime_get(void);
+/* long long, not int64_t: that is what int64_t is on the target, and main.c prints this with %lld.
+ * On a 64-bit Linux int64_t is long, and the compiler would refuse the format. */
+long long k_uptime_get(void);
 void k_oops(void);
 
 struct k_msgq {

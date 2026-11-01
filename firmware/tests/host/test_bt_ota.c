@@ -139,7 +139,7 @@ static void op(const char *what)
 
 /* ---- the kernel and the rest of the application ----------------------------------- */
 
-int64_t k_uptime_get(void)
+long long k_uptime_get(void)
 {
 	return fake.uptime_ms;
 }

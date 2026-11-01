@@ -530,7 +530,8 @@ infra/template.yaml    the console: API, sign-in, storage, AWS IoT
 infra/budget.yaml      cost alert, separate stack
 infra/trail.yaml       record of what is done in the account, separate stack
 api/                   the API function (src/) and its tests (test/); verify-audit.mjs,
-                       which compares the activity log with its digests, is not deployed
+                       which compares the activity log with its digests, and verify-image.mjs,
+                       which makes the console's check on an image, are not deployed
 web/                   the function that serves the console and the home page (src/), and
                        its tests (test/)
 dev/                   local preview and its tests, never deployed

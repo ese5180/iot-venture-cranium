@@ -57,6 +57,7 @@ keys/fw_signing_pub.pem  public half of the signing key
 golden.json              the frozen golden image, firmware 1.5.0, written by tools/golden.py
 tests/host/              host tests of the job parser, the version code, the console and Bluetooth updates
 tests/hil/               hardware test benches, and tests of the tools that talk to a board
+tests/fetch-sdk-files.sh the files of the SDK that those tests read, for running them without it
 ```
 
 The host tests need no board. Run them from an nRF Connect SDK terminal, which
@@ -69,6 +70,10 @@ console's real code on a pseudo-terminal. The host tests compile the console's C
 stack (`test_console.c`, `test_console_output.c`, `test_app.c`). What those fakes do is the
 limit of what they show: what the real driver and the real Wi-Fi stack do is for
 `tests/hil/console_bench.py` to find out.
+
+Neither kind of test needs a full SDK. `firmware/tests/fetch-sdk-files.sh` fetches the few files of
+it that they read, and [`docs/ci.md`](../docs/ci.md) shows how they run that way, as they do on
+GitHub Actions.
 
 ## Memory map
 

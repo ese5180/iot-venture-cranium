@@ -77,14 +77,15 @@ test('what a commit touched is worked out from its paths, in a fixed order', () 
   assert.deepEqual(tagsOf(['cloud/api/src/app.mjs', 'cloud/deploy.sh', 'cloud/dev/preview.mjs']), ['cloud']);
   assert.deepEqual(tagsOf(['firmware/app/src/main.c']), ['firmware']);
   assert.deepEqual(tagsOf(['tools/board.py']), ['tools']);
-  assert.deepEqual(tagsOf(['docs/x.txt', 'README.md', 'cloud/README.md', 'firmware/README.md']), ['docs']);
-  assert.deepEqual(tagsOf(['docs/a.md', 'tools/b.py', 'cloud/c.sh', 'firmware/d.c', 'cloud/web/e.js']),
-    ['website', 'firmware', 'cloud', 'tools', 'docs']);
+  assert.deepEqual(tagsOf(['.github/workflows/ci.yml']), ['ci']);
+  assert.deepEqual(tagsOf(['docs/x.txt', 'README.md', 'cloud/README.md', 'firmware/README.md', '.github/x.md']), ['docs']);
+  assert.deepEqual(tagsOf(['docs/a.md', '.github/f.yml', 'tools/b.py', 'cloud/c.sh', 'firmware/d.c', 'cloud/web/e.js']),
+    ['website', 'firmware', 'cloud', 'tools', 'ci', 'docs']);
   assert.deepEqual(tagsOf(['.gitignore', 'binaries/x.bin']), []);
 });
 
 test('the page and the script list the same tags in the same order', () => {
-  const everything = tagsOf(['cloud/web/a', 'firmware/b', 'cloud/c', 'tools/d', 'docs/e']);
+  const everything = tagsOf(['cloud/web/a', 'firmware/b', 'cloud/c', 'tools/d', '.github/f', 'docs/e']);
   assert.deepEqual(history.TAGS.map(([tag]) => tag), everything);
 });
 
