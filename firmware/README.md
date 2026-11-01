@@ -849,8 +849,8 @@ the frozen bootloader both numbers got error 3.
 
 G15 and G16 do the gesture during a real update: G15 while a new image runs on trial, G16 in the middle
 of the swap. In both, the board has to end up on the golden image with no revert and no resumed swap,
-and the update must not report success. They need Wi-Fi and AWS, G15 also `--trial-image`, and **they
-have not run yet**. Whether the rest of the over-the-air regression has run is in the
+and the update must not report success. They need Wi-Fi and AWS, and G15 also `--trial-image`. Both
+passed on the frozen image. Whether the rest of the over-the-air regression has run is in the
 [test results](../docs/test-results.md#over-the-air-on-the-final-firmware).
 
 That stand-in has limits, and a test it cannot finish ends as `PARTIAL`, not `PASS`, with the part that
@@ -874,6 +874,6 @@ sealing. On a board that is already sealed it fails, and that says nothing about
 Add `--out <folder>` to choose where the logs and `results.jsonl` go: by default that is
 `build-hil-golden/`.
 
-`python tools/golden.py qualify` has not been used, because that needs that run, G15, G16 and the
-over-the-air regression. `qualifying_bench_run` in `golden.json` is empty until then, and
+`python tools/golden.py qualify` has not been used, because that needs that run and the over-the-air
+regression. `qualifying_bench_run` in `golden.json` is empty until then, and
 `golden.py check --qualified` refuses.

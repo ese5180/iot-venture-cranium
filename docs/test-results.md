@@ -25,8 +25,9 @@ Every run below was on one nRF7002 DK. The benches write one line per run to a l
 
 ## Over the air on the final firmware
 
-**This has not run.** No update over the air has run on firmware 1.5.0 or 1.6.0, or on the bootloader
-that holds the pin. On the night of 2026-11-01 the AWS CLI session expired and the phone hotspot went
+**This has not run.** No update over the air has finished on firmware 1.5.0 or 1.6.0, or on the bootloader
+that holds the pin. The closest are G15 and G16 below: a real job took each image from the frozen 1.5.0
+over Wi-Fi and into the bootloader's swap, and the gesture then went back to 1.5.0 on purpose. On the night of 2026-11-01 the AWS CLI session expired and the phone hotspot went
 down. The run started again at 08:16 that morning and was stopped before its first update, because the
 Wi-Fi chip hung in a console check: see [the serial console on 1.5.0](#the-serial-console-on-firmware-150).
 It will run on the next release, which restarts the board when the chip hangs like that. The plan is ten
@@ -38,10 +39,10 @@ Until then, the only over-the-air results are those
 ## The golden image, on firmware 1.5.0
 
 All of this is from [`firmware/tests/hil/golden_bench.py`](../firmware/tests/hil/golden_bench.py), on the
-frozen image and its bootloader, with no Wi-Fi. `results.jsonl` has the SHA-256 of both in each line.
+frozen image and its bootloader, with no Wi-Fi but for G15 and G16. `results.jsonl` has the SHA-256 of both in each line.
 Each row is the last run of that test. In G5a to G5e a person held Button 2 and pulled the USB cable. In
 every other test the debug port held Button 2 down, and the bootloader has no test code for this. Of 22
-tests, 19 passed, 1 is `PARTIAL` because a part needs a person, and 2 have not run.
+tests, 21 passed and 1 is `PARTIAL` because a part needs a person.
 
 | Test | Outcome | What it did, and what it showed |
 | --- | --- | --- |
@@ -65,7 +66,12 @@ tests, 19 passed, 1 is `PARTIAL` because a part needs a person, and 2 have not r
 | G12 | PASS | Over serial recovery, with no tool in the way: an image signed with another key, and the golden image with a flipped byte. Each was refused at two boots: `Image in the primary slot is not valid!`. |
 | G13 | PASS | Serial recovery moved the board forward from 1.5.0 to 1.5.40. The gesture then restored 1.5.0, in 63 s. |
 | G14 | PASS | An upload for another image number: refused. See below. |
-| G15, G16 | **Not run** | The gesture during an update's trial and during its swap. They need Wi-Fi and AWS. |
+| G15 | PASS | A real job from 1.5.0, over Wi-Fi and AWS, put an image that never confirms itself on trial, as firmware 1.5.20. The gesture restored 1.5.0 in 61 s, with no swap and no revert after it. The job closed as `FAILED` with `rolled_back`. |
+| G16 | PASS | The same, with the forward image, and the gesture 6 s into the bootloader's swap. It restored 1.5.0 in 61 s, and the swap did not resume. The job closed as `FAILED` with `not_installed`. |
+
+G15 and G16 ran at 08:53 to 09:02 on 2026-11-01, from commit cf9a591 with a clean tree, and the debug port
+held the button. They stored the image in S3 and created the job directly with AWS credentials, so they
+did not go through the console.
 
 The run by a person was at 08:34 to 08:41 on 2026-11-01, from commit 53b0049 with a clean tree: 5 of 5
 passed. G5a took 15 s, G5b 71 s, G5c 121 s, G5d 139 s and G5e 115 s. G4 and G11 were not part of it: G4 by
@@ -73,8 +79,8 @@ a person needs a golden copy that is not sealed yet, and this board's is. Nobody
 
 The times include the gesture. After each restore the firmware was 1.5.0, and the root CA, the private
 key and the certificate were still set. `tools/golden.py qualify` has not been used, so
-`firmware/golden.json` names no qualifying run. That needs the power cuts of G11 by a person, G15, G16
-and the over-the-air regression. [`firmware/README.md`](../firmware/README.md#tests) has the command for the
+`firmware/golden.json` names no qualifying run. That needs the power cuts of G11 by a person and the
+over-the-air regression. [`firmware/README.md`](../firmware/README.md#tests) has the command for the
 person's part.
 
 **A hole in serial recovery, found and closed.** An upload over serial recovery names an image
