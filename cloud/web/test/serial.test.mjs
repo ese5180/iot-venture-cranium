@@ -625,6 +625,100 @@ test('what erases the board, and turning the echo back on, cannot be typed here'
   assert.equal(checkTyped(`  WIFI|Lab|${PASSWORD}  `).line, `WIFI|Lab|${PASSWORD}  `);
 });
 
+test('the case of a command or a keyword changes nothing about what the page allows', async () => {
+  const cases = (word) => [word.toUpperCase(), word.toLowerCase(), word[0].toUpperCase() + word.slice(1).toLowerCase(),
+    [...word].map((c, i) => (i % 2 ? c.toLowerCase() : c.toUpperCase())).join('')];
+
+  // What erases the board needs its form, in any case.
+  for (const [name, why] of [['FACTORY_RESET', /typed confirmation/], ['INIT', /typed confirmation/]]) {
+    for (const spelled of cases(name)) {
+      assert.match(checkTyped(spelled).refused, why, spelled);
+      assert.match(checkTyped(`${spelled}|ABC123`).refused, why, spelled);
+    }
+  }
+
+  // Echo stays off, in any case of either word.
+  for (const name of cases('ECHO')) {
+    for (const on of cases('ON')) assert.match(checkTyped(`${name}|${on}`).refused, /Echo stays off/, `${name}|${on}`);
+    for (const off of cases('OFF')) assert.equal(checkTyped(`${name}|${off}`).line, `${name}|${off}`);
+  }
+
+  // What may go, goes as it was typed, and the board reads it in any case.
+  for (const line of ['net', 'Stats', 'status|WIFI', 'STATUS|Certs', 'keygen|replace', 'KeyGen|Replace',
+    'stream_start|550|3|abcd|ca', 'STREAM_START|550|3|ABCD|Cert', 'wifi_sec|Lab|wpa3_sae|MiXeD-PaSs', 'help', '?']) {
+    assert.equal(checkTyped(line).line, line, line);
+    assert.equal(checkTyped(line).refused, undefined, line);
+  }
+
+  // A name it does not know stays out of the history, whatever the case of the ones it does know.
+  assert.equal(checkTyped('net').keep, true);
+  assert.equal(checkTyped('NETT').keep, false);
+  assert.equal(checkTyped('wifi|Lab|MiXeD-PaSs').keep, false);
+});
+
+test('what a page asks of a board works the same with a command in small letters', async (t) => {
+  const { board, session } = await connected(t);
+  const { box, redraw } = drawn(session);
+  const input = field(box, 'serial-typed');
+  input.value = 'get_id';
+  one(box, 'form.serial-prompt').dispatchEvent({ type: 'submit' });
+  await settle();
+  redraw();
+  assert.equal(board.lines.at(-1), 'get_id', 'as it was typed');
+  assert.deepEqual(session.board, { id: 'ABC123', version: '1.2.3+5' });
+  assert.equal(all(box, 'li.serial-line.is-ok').length >= 1, true);
+});
+
+// HELP's table, as the firmware's cmd_help() writes it: a mark, then three columns.
+const HELP_TABLE = [
+  'Cranium console, firmware 1.2.3+5',
+  'Send COMMAND|arg|arg, one per line. Names and keywords work in any case;',
+  'IDs, network names, passwords, URLs and data stay exactly as typed.',
+  '* also works in factory mode. The rest needs INIT first.',
+  '  COMMAND           ARGUMENTS                WHAT IT DOES',
+  '+-- Wi-Fi ---------------------------------------------------------------------+',
+  '  WIFI              <ssid>|<password>        save a WPA2 network and join it',
+  '  WIFI_SEC          <ssid>|<WPA2_PSK or      the same, with the security mode',
+  '                    WPA2_PSK_SHA256 or       named',
+  '                    WPA3_SAE>|<password>',
+  '* ECHO              <ON or OFF>              send typed characters back, or not',
+  '+------------------------------------------------------------------------------+',
+];
+
+test('HELP\'s table keeps its columns, and what holds a time is what is above and below it', async (t) => {
+  const { board, session } = await connected(t, { reply: (line) => (line === 'help' ? `${HELP_TABLE.join('\r\n')}\r\nOK\r\n` : 'OK\r\n') });
+  session.clear();
+  await session.send('help');
+  await settle();
+
+  // Each of its lines is there, as it was sent. Nothing was taken for an echo, a log or a secret.
+  assert.deepEqual(session.lines.filter((line) => line.kind === 'output').map((line) => line.text), HELP_TABLE);
+  assert.equal(session.lines.some((line) => line.kind === 'tag' || line.kind === 'err'), false);
+  assert.equal(session.lines.filter((line) => line.kind === 'ok').length, 1);
+  assert.equal(session.lines.at(-1).kind, 'ok');
+
+  const { box } = drawn(session);
+  const rows = all(box, 'li.serial-line.is-output');
+  assert.equal(rows.length, HELP_TABLE.length);
+  rows.forEach((row, index) => {
+    const table = index >= 3;
+    const text = one(row, 'span.serial-text');
+    assert.equal(text.getAttribute('class').includes('is-box'), table, HELP_TABLE[index]);
+    assert.equal(all(row, 'time').length, table ? 0 : 1, HELP_TABLE[index]);
+    assert.equal(text.textContent, HELP_TABLE[index], 'not one blank is lost');
+  });
+  assert.equal(all(one(box, 'li.serial-line.is-sent'), 'time').length, 1);
+  assert.equal(all(all(box, 'li.serial-line.is-ok').at(-1), 'time').length, 1);
+
+  // Plain lines of a reply go on as they were: they wrap, and they have their time.
+  session.clear();
+  board.send('state connected\r\nOK\r\n');
+  await settle();
+  const plain = drawn(session).box;
+  assert.equal(one(one(plain, 'li.serial-line.is-output'), 'span.serial-text').getAttribute('class').includes('is-box'), false);
+  assert.equal(all(one(plain, 'li.serial-line.is-output'), 'time').length, 1);
+});
+
 test('the free input sends, keeps commands for the arrow keys, and refuses in words', async (t) => {
   const { board, session } = await connected(t);
   const { box, redraw } = drawn(session);

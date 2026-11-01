@@ -68,6 +68,10 @@ MODULE_LOG_LINE = re.compile(r"^\[([a-z][\w.-]*)\] ")
 FIRMWARE_LOG_LINE = re.compile(r"^\[app\] Cranium firmware \S+$")
 FACTORY_LOG_LINE = re.compile(r"^\[app\] WRN: Factory mode")
 HELP_FIRST_LINE = "Cranium console, firmware"
+HELP_COMMANDS = ("HELP", "INIT", "GET_ID", "THING", "ECHO", "REBOOT", "ENTER_BOOTLOADER", "SET_ID",
+                 "RESET_CONFIG", "FACTORY_RESET", "WIFI", "WIFI_SEC", "CLEAR_WIFI", "NET", "CLOUD",
+                 "KEYGEN", "STATS", "STATUS", "STREAM_START", "STREAM_CHUNK", "STREAM_STATUS",
+                 "STREAM_CANCEL", "BUTTON")
 FACTORY_REFUSAL = "ERR factory mode, send INIT|<id> first"
 ID_RULE = "ERR id must be 1-32 letters or digits"
 NORMAL_ONLY = ("SET_ID|X1", "WIFI|a|b", "WIFI_SEC|a|WPA2_PSK|b", "CLEAR_WIFI", "NET", "STATS",
@@ -114,6 +118,13 @@ def strange_lines(lines: list[str]) -> list[str]:
     return [line for line in cleaned
             if line not in "ECHO|OFF" and not FINAL_LINE.match(line)
             and not ANY_TAGGED_LINE.match(line)]
+
+
+def commands_missing_from_help(lines: list[str]) -> list[str]:
+    """The commands that have no row in a reply to HELP. What comes in here has lost its leading
+    blanks, so a row is the name of its command, behind the mark if it has one."""
+    rows = {line.removeprefix("* ").split()[0] for line in lines if line.strip()}
+    return [name for name in HELP_COMMANDS if name not in rows]
 
 
 def log_lines_around_help(lines: list[str]) -> tuple[list[str], int]:
@@ -543,20 +554,19 @@ class ConsoleBench:
             raise TestFailed("with echo on, GET_ID did not come back and get a reply")
         self.expect_final("ECHO|OFF", "OK echo off")
 
-        # HELP lists every command, grouped, with the version.
+        # HELP is a table of every command, grouped, with the version.
         reply, final = self.console.exchange("HELP")
         text = "\n".join(reply)
         firmware = self.console.get_id()[1]
         if final != "OK" or firmware not in text:
             raise TestFailed("HELP is not complete")
-        for name in ("INIT|", "GET_ID", "ECHO|", "REBOOT", "ENTER_BOOTLOADER", "SET_ID|", "WIFI|",
-                     "WIFI_SEC|", "CLEAR_WIFI", "NET", "STATS", "STATUS", "RESET_CONFIG",
-                     "FACTORY_RESET", "CLOUD|", "KEYGEN", "BUTTON|", "STREAM_START|",
-                     "STREAM_CHUNK|", "STREAM_STATUS", "STREAM_CANCEL"):
-            if name not in text:
-                raise TestFailed(f"HELP does not list {name}")
+        missing = commands_missing_from_help(reply)
+        if missing:
+            raise TestFailed(f"HELP does not list {missing}")
         if self.console.exchange("?") != (reply, final):
             raise TestFailed("? is not the same as HELP")
+        if self.console.exchange("help") != (reply, final):
+            raise TestFailed("help in small letters is not the same as HELP")
 
         # Status commands, which never show a secret.
         status = self.console.status()

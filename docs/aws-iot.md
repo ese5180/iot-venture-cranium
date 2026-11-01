@@ -80,8 +80,8 @@ topic, and has no last-will message.
 
 ## Shadow: what the console shows about a board
 
-The board writes its state to its classic shadow when something changes and at least
-once a minute:
+The board writes its state to its classic shadow when something changes and, as its heartbeat, every
+30 seconds (`CONFIG_APP_SHADOW_INTERVAL_SECONDS`):
 
 ```json
 { "state": { "reported": {
@@ -93,9 +93,25 @@ once a minute:
 
 `ota.state` is `idle`, `awaiting_user`, `downloading`, `verifying`, `rebooting` or
 `testing`. A build for firmware update over Bluetooth can also report `bluetooth`, which the console
-does not know and leaves out. The console treats a board as online when its last report is younger than
-150 seconds. Everything in a shadow comes from the board, so the console validates each
+does not know and leaves out. Everything in a shadow comes from the board, so the console validates each
 field before showing it and never bases a decision on it.
+
+### The heartbeat
+
+This report is the heartbeat. There is no second message, and no last will: the device policy allows a board to
+publish to its own shadow and jobs topics only, and a connection that announces any other topic is refused. AWS IoT
+stamps the time at which it received `uptime`, and a board is online when that is less than 90 seconds ago
+(`ONLINE_WINDOW_MS` in `cloud/api/src/lib/shadow.mjs`). A board that dies shows offline within 90 seconds. A board on
+the golden image, which reports every 60 seconds, stays online with one report that is late. The API sends the
+flag and the time, and the page shows them, as `Online, heartbeat 6 s ago` or `Offline, last heartbeat 3 min ago`,
+without working out the flag again.
+
+A heartbeat costs 2,880 messages a day per board.
+
+Nothing else goes out with it, and nothing comes back: the board subscribes to its jobs topics only, so it gets no
+`update/accepted` for it. It goes out from the main loop on the MQTT connection, which a download does not use: a
+download has a thread and a TLS connection of its own. While a download runs, the same report also goes out at every
+10% of it, and that starts the 30 seconds over. Jobs have their own messages, which do not depend on it.
 
 ## An update, message by message
 

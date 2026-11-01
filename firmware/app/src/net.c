@@ -17,6 +17,7 @@
 
 #include "app_events.h"
 #include "console.h"
+#include "join_policy.h"
 
 LOG_MODULE_REGISTER(net, CONFIG_APP_LOG_LEVEL);
 
@@ -27,7 +28,9 @@ LOG_MODULE_REGISTER(net, CONFIG_APP_LOG_LEVEL);
  */
 #define L4_EVENTS    (NET_EVENT_L4_IPV4_CONNECTED | NET_EVENT_L4_IPV4_DISCONNECTED)
 #define CONN_EVENTS  (NET_EVENT_CONN_IF_FATAL_ERROR)
-#define WIFI_EVENTS  (NET_EVENT_WIFI_CONNECT_RESULT)
+#define WIFI_EVENTS                                                                                \
+	(NET_EVENT_WIFI_CONNECT_RESULT | NET_EVENT_WIFI_DISCONNECT_RESULT |                        \
+	 NET_EVENT_WIFI_DISCONNECT_COMPLETE)
 #define RETRY_SECONDS 30
 #define MAX_STORED_NETWORKS CONFIG_WIFI_CREDENTIALS_MAX_ENTRIES
 
@@ -50,6 +53,28 @@ static int seconds_down;
 static atomic_t stack_ready;
 /* net_connect() was called before that, and it is to be called again when it comes. */
 static atomic_t join_waiting;
+/* Associated, as far as the stack has said. It is a result that says so, and asking takes its locks. */
+static atomic_t associated;
+/* The stack has just said that: a join that got this far gets all of its time to find an address. */
+static atomic_t association_news;
+/* The uptime in ms of the last change of the link or request to the stack, plus 1. 0 means none yet. */
+static atomic_t link_changed_at;
+/* A join that is being held. Only the main loop touches this. */
+static struct join_state join;
+
+/* Any thread: the network management thread for what the stack says, the main loop for what it asks. */
+static void note_link_change(void)
+{
+	atomic_set(&link_changed_at, (atomic_val_t)(uint32_t)(k_uptime_get() + 1));
+}
+
+/* The stack says that the association has ended. It can say so again, or say so of none. */
+static void note_left(void)
+{
+	if (atomic_set(&associated, 0)) {
+		note_link_change();
+	}
+}
 
 static bool security_allowed(enum wifi_security_type type)
 {
@@ -119,6 +144,8 @@ static void on_l4_event(struct net_mgmt_event_callback *callback, uint64_t event
 	ARG_UNUSED(callback);
 	ARG_UNUSED(iface);
 
+	note_link_change();
+
 	if (event == NET_EVENT_L4_IPV4_CONNECTED) {
 		if (!link_is_acceptable()) {
 			post_join_failed(JOIN_FAILED_SECURITY);
@@ -150,6 +177,11 @@ static void on_conn_event(struct net_mgmt_event_callback *callback, uint64_t eve
  * A wrong password never gets as far as an L4 event. This is where it shows, together
  * with a network that cannot be found. The Wi-Fi stack retries by itself, so the same
  * reason can come many times.
+ *
+ * Only the result of a join counts as an answer, see net_wifi_answers(). What ends an association
+ * is one of three things. hostap raises DISCONNECT_RESULT for a link that was complete and a failed
+ * CONNECT_RESULT for one that was not, and DISCONNECT_COMPLETE ends its own wait in a request to
+ * disconnect, with an error if that wait ran out.
  */
 static void on_wifi_event(struct net_mgmt_event_callback *callback, uint64_t event,
 			  struct net_if *iface)
@@ -163,7 +195,15 @@ static void on_wifi_event(struct net_mgmt_event_callback *callback, uint64_t eve
 	}
 
 	if (event == NET_EVENT_WIFI_CONNECT_RESULT && status != NULL && status->status != 0) {
+		note_left();
 		post_join_failed(status->status);
+	} else if (event == NET_EVENT_WIFI_CONNECT_RESULT && status != NULL) {
+		atomic_set(&associated, 1);
+		atomic_set(&association_news, 1);
+	} else if (event == NET_EVENT_WIFI_DISCONNECT_RESULT ||
+		   (event == NET_EVENT_WIFI_DISCONNECT_COMPLETE && status != NULL &&
+		    status->status == 0)) {
+		note_left();
 	}
 }
 
@@ -269,13 +309,10 @@ static bool stack_ready_or_join_later(void)
 	return atomic_get(&stack_ready) && atomic_set(&join_waiting, 0);
 }
 
-int net_connect(void)
+/* The request itself. What comes back later is an event, or nothing. */
+static int connect_now(void)
 {
 	int err;
-
-	if (wifi_credentials_is_empty()) {
-		return -ENOENT;
-	}
 
 	seconds_down = 0;
 	atomic_set(&last_failure, 0);
@@ -302,6 +339,7 @@ int net_connect(void)
 		}
 
 		err = conn_mgr_all_if_connect(true);
+		note_link_change();
 	}
 
 	if (err) {
@@ -312,9 +350,96 @@ int net_connect(void)
 	return err;
 }
 
+/*
+ * On the main loop, like everything that asks the stack for something. hostap waits for up to 5 s
+ * inside this request, which held up the main loop in CLEAR_WIFI before there was anything here.
+ */
+static void ask_to_leave(void)
+{
+	struct net_if *iface = net_if_get_first_wifi();
+
+	if (iface != NULL) {
+		(void)net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0);
+	}
+
+	note_link_change();
+}
+
+/*
+ * The disconnect was asked for and never reported, so the chip may be what hangs. The link counts
+ * as gone, which is what starts STUCK_WIFI_SILENT_SECONDS on a board whose link has not gone by
+ * itself. If the stack says otherwise later, it gets believed then.
+ */
+static void give_up_on_leaving(void)
+{
+	LOG_WRN("The Wi-Fi stack did not report the disconnect: the link counts as gone");
+	atomic_set(&associated, 0);
+
+	if (atomic_set(&link_up, 0)) {
+		(void)app_event_post_simple(APP_EVENT_NET_DOWN);
+	}
+}
+
+/* Returns what the connect request returned, or -EAGAIN if the join has not started yet. */
+static int join_step(void)
+{
+	const uint32_t changed_at = (uint32_t)atomic_get(&link_changed_at);
+	const struct join_view view = {
+		.now_ms = (uint32_t)k_uptime_get(),
+		.associated = atomic_get(&associated) != 0 || atomic_get(&link_up) != 0,
+		.changed = changed_at != 0,
+		.changed_at_ms = changed_at - 1,
+	};
+
+	switch (join_next(&join, &view)) {
+	case JOIN_DISCONNECT:
+		ask_to_leave();
+		break;
+	case JOIN_GAVE_UP:
+		give_up_on_leaving();
+		break;
+	case JOIN_CONNECT:
+		return connect_now();
+	default:
+		break;
+	}
+
+	return -EAGAIN;
+}
+
+int net_connect(void)
+{
+	if (wifi_credentials_is_empty()) {
+		return -ENOENT;
+	}
+
+	atomic_set(&last_failure, 0);
+	join_request(&join);
+	return join_step();
+}
+
 void net_tick(void)
 {
-	if (atomic_get(&link_up) || wifi_credentials_is_empty()) {
+	const bool stored = !wifi_credentials_is_empty();
+	bool held;
+
+	if (atomic_set(&association_news, 0)) {
+		seconds_down = 0;
+	}
+
+	if (!stored) {
+		join_cancel(&join);
+	}
+
+	/* This comes first: a join can be held on a link that is up, to take that link down. */
+	held = join_pending(&join);
+	(void)join_step();
+
+	if (held) {
+		return;
+	}
+
+	if (atomic_get(&link_up) || !stored) {
 		seconds_down = 0;
 		return;
 	}
@@ -463,12 +588,9 @@ int net_credentials_set(const char *ssid, size_t ssid_len, enum net_security sec
 
 int net_credentials_clear(void)
 {
-	struct net_if *iface = net_if_get_first_wifi();
-
-	if (iface != NULL) {
-		(void)net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0);
-	}
-
+	/* A join that is held finds nothing stored at the next tick, and a network stored next asks again. */
+	join_leaving(&join, (uint32_t)k_uptime_get());
+	ask_to_leave();
 	return wifi_credentials_delete_all();
 }
 

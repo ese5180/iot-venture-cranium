@@ -17,6 +17,7 @@ target_sources(app PRIVATE
   src/factory.c
   src/health.c
   src/identity.c
+  src/join_policy.c
   src/net.c
   src/ota.c
   src/ota_job.c

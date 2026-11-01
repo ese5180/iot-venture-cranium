@@ -29,6 +29,10 @@
  * that makes it take longer could hold this timer off. No such result came in the hang that was
  * seen. All of this comes from reading hostap, and it has not been run.
  *
+ * A join that join_policy.h holds is no answer, and this timer goes on running while it is held. If
+ * the link is up when the join is asked for, the link goes first: if the stack does not report that
+ * within JOIN_LEAVE_LIMIT_MS, the link counts as gone, and this timer starts from there.
+ *
  * SUPPLICANT_EVENT_SCAN_FAILED is not used, and that is a decision. As a way to get there sooner
  * it would make a restart more likely on a healthy chip, which reports it as well when a scan is
  * still running (the -EBUSY in wpa_supp_if.c). As a condition for a restart it would miss a chip

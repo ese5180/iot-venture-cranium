@@ -206,3 +206,29 @@ bool console_equal_nocase(const char *a, const char *b)
 
 	return *a == *b;
 }
+
+size_t console_wrap(const char **text, size_t width)
+{
+	const char *from = *text;
+	size_t length = strlen(from);
+
+	if (length <= width) {
+		*text = from + length;
+		return length;
+	}
+
+	for (size_t cut = width; cut > 0; cut--) {
+		if (from[cut] == ' ') {
+			*text = from + cut + 1;
+			return cut;
+		}
+
+		if (from[cut - 1] == '|') {
+			*text = from + cut;
+			return cut;
+		}
+	}
+
+	*text = from + width;
+	return width;
+}

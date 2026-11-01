@@ -104,8 +104,9 @@ HANG_PATIENCE_SECONDS = WIFI_SILENT_SECONDS + 30
 HANG_QUIET_SECONDS = 15
 # How far the time of a line can be from what it marks. The main loop can be busy with the chip.
 BOUND_SLACK_SECONDS = 30
-# Connected when the chip dies. It takes the next shadow report (60 s) and TCP giving up on it
-# for the cloud to go, and then NO_CLOUD_SECONDS. Or the link goes before that.
+# Connected when the chip dies. It takes the next heartbeat, the shadow report (30 s from 1.7.1, 60 s
+# before that), and TCP giving up on it for the cloud to go, and then NO_CLOUD_SECONDS. Or the link
+# goes before that.
 CHIP_DEAD_WAIT_SECONDS = 60 + 60 + NO_CLOUD_SECONDS + BOUND_SLACK_SECONDS
 # The next shadow report follows a moment after the job's final status.
 SHADOW_CATCH_UP_SECONDS = 8

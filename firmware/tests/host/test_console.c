@@ -7,12 +7,14 @@
  * that no secret ever comes back in a reply, and that none stays behind in the buffer.
  */
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/sys/base64.h>
+#include <zephyr/sys/util.h>
 
 #include "console_cmd.h"
 #include "console_fakes.h"
@@ -42,6 +44,8 @@ static int checks;
 			printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #condition);         \
 		}                                                                            \
 	} while (0)
+
+#define MAX_OF(a, b) ((a) > (b) ? (a) : (b))
 
 #define CHECK_TEXT(actual, expected)                                                         \
 	do {                                                                                 \
@@ -616,51 +620,325 @@ static void test_unknown_command(void)
 
 /* ---- the table ------------------------------------------------------------------ */
 
-static void test_the_table_drives_help(void)
+#define HELP_WIDTH_ALLOWED 80
+#define HELP_LINES_MAX     100
+
+static char help_lines[HELP_LINES_MAX][HELP_WIDTH_ALLOWED + 40];
+static int help_line_count;
+static size_t help_args_at;
+static size_t help_words_at;
+
+/* The lines of the reply to HELP that was just sent, and where its header puts its columns. */
+static void read_help(void)
+{
+	const char *at = fake.output;
+
+	help_line_count = 0;
+	help_args_at = 0;
+	help_words_at = 0;
+
+	while (*at != '\0' && help_line_count < HELP_LINES_MAX) {
+		const char *end = strchr(at, '\n');
+		char *line = help_lines[help_line_count++];
+
+		snprintf(line, sizeof(help_lines[0]), "%.*s", (int)(end - at), at);
+		at = end + 1;
+
+		if (strncmp(line, "  COMMAND ", 10) == 0) {
+			help_args_at = (size_t)(strstr(line, "ARGUMENTS") - line);
+			help_words_at = (size_t)(strstr(line, "WHAT IT DOES") - line);
+		}
+	}
+}
+
+static bool is_help_row(const char *line)
+{
+	return (line[0] == '*' || line[0] == ' ') && line[1] == ' ' &&
+	       strncmp(line + 2, "COMMAND ", 8) != 0;
+}
+
+/* The line of a row that names this command, or -1. */
+static int help_row_of(const struct console_command *command)
+{
+	char name[40];
+
+	snprintf(name, sizeof(name), "%s%s%s", command->name, command->alias != NULL ? " or " : "",
+		 command->alias != NULL ? command->alias : "");
+
+	for (int i = 0; i < help_line_count; i++) {
+		const char *line = help_lines[i];
+
+		if (is_help_row(line) && strncmp(line + 2, name, strlen(name)) == 0 &&
+		    line[2 + strlen(name)] == ' ') {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/* One column of a row, back in one piece: across the lines that it was wrapped over. */
+static void help_cell_text(int row, size_t from, size_t to, char *out, size_t size)
+{
+	size_t used = 0;
+
+	out[0] = '\0';
+
+	for (int i = row; i < help_line_count; i++) {
+		const char *line = help_lines[i];
+		size_t length = strlen(line);
+
+		if (!is_help_row(line) || (i > row && (line[0] != ' ' || line[2] != ' '))) {
+			break;
+		}
+
+		if (length > from) {
+			size_t end = MIN(length, to);
+
+			while (end > from && line[end - 1] == ' ') {
+				end--;
+			}
+
+			if (end > from) {
+				if (used > 0 && out[used - 1] != '|') {
+					out[used++] = ' ';
+				}
+				used += (size_t)snprintf(out + used, size - used, "%.*s", (int)(end - from),
+							 line + from);
+			}
+		}
+	}
+}
+
+static void test_console_wrap(void)
+{
+	const char *text;
+
+	/* What fits stays in one piece, and nothing is left. */
+	text = "short";
+	CHECK(console_wrap(&text, 5) == 5);
+	CHECK_TEXT(text, "");
+	text = "";
+	CHECK(console_wrap(&text, 5) == 0);
+	CHECK_TEXT(text, "");
+
+	/* A blank right at the width. It goes, and the next line starts behind it. */
+	text = "hello world";
+	CHECK(console_wrap(&text, 5) == 5);
+	CHECK_TEXT(text, "world");
+
+	/* Before the width, at the last one that fits. */
+	text = "one two three";
+	CHECK(console_wrap(&text, 8) == 7);
+	CHECK_TEXT(text, "three");
+
+	/* After a bar, which stays with what it follows. */
+	text = "<ssid>|<password>";
+	CHECK(console_wrap(&text, 10) == 7);
+	CHECK_TEXT(text, "<password>");
+
+	/* The bar right at the width. */
+	text = "<ssid>|<password>";
+	CHECK(console_wrap(&text, 7) == 7);
+	CHECK_TEXT(text, "<password>");
+
+	/* The last place wins, whichever it is. */
+	text = "a|b c|d";
+	CHECK(console_wrap(&text, 4) == 3);
+	CHECK_TEXT(text, "c|d");
+
+	/* A word that does not fit at all is cut, so the column holds. */
+	text = "abcdefghij";
+	CHECK(console_wrap(&text, 4) == 4);
+	CHECK_TEXT(text, "efghij");
+}
+
+static void test_help_is_a_table(void)
 {
 	size_t count;
 	const struct console_command *table = console_cmd_table(&count);
-
-	CHECK(count >= 20);
+	int rules = 0;
+	int widest = 0;
+	bool saw_header = false;
 
 	operating_board();
 	command("HELP");
 	CHECK(fake.finals == 1);
 	CHECK_TEXT(final_line(), "OK");
-	CHECK(strstr(fake.output, fw_version_running_string()) != NULL);
+	read_help();
 
-	for (size_t i = 0; i < count; i++) {
-		char expected[160];
-		const char *line;
+	/* It says what it is, what the case rule is, and what the mark means, before any row. */
+	CHECK(strncmp(help_lines[0], "Cranium console, firmware ", 26) == 0);
+	CHECK(strstr(help_lines[0], fw_version_running_string()) != NULL);
+	CHECK(strstr(help_lines[1], "COMMAND|arg|arg") != NULL);
+	CHECK(strstr(help_lines[1], "any case") != NULL);
+	CHECK(strstr(help_lines[2], "passwords") != NULL);
+	CHECK(strstr(help_lines[2], "as typed") != NULL);
+	CHECK(strncmp(help_lines[3], "* ", 2) == 0);
+	CHECK(strstr(help_lines[3], "factory mode") != NULL);
+	CHECK(help_args_at > 0);
+	CHECK(help_words_at > help_args_at);
 
-		/* Every command is there, with its mark, its usage and its description. */
-		snprintf(expected, sizeof(expected), "%c %s", table[i].in_factory ? '*' : ' ',
-			 table[i].usage);
-		line = strstr(fake.output, expected);
-		CHECK(line != NULL);
-		CHECK(strstr(fake.output, table[i].description) != NULL);
+	for (int i = 0; i < help_line_count; i++) {
+		const char *line = help_lines[i];
+		const char *stripped = line + strspn(line, " ");
+		int length = (int)strlen(line);
+
+		widest = MAX_OF(widest, length);
+
+		/* Plain ASCII, no blank at the end, and within what a plain terminal shows. */
+		CHECK(length > 0);
+		CHECK(length <= HELP_WIDTH_ALLOWED);
+		CHECK(line[length - 1] != ' ');
+		for (int c = 0; c < length; c++) {
+			CHECK(line[c] >= 0x20 && line[c] < 0x7f);
+		}
+
+		/* Nothing but the last line can be taken for a final line, a log line or an echo. */
+		if (i < help_line_count - 1) {
+			CHECK(strncmp(stripped, "OK ", 3) != 0 && strcmp(stripped, "OK") != 0);
+			CHECK(strncmp(stripped, "ERR ", 4) != 0);
+			CHECK(stripped[0] != '[');
+			CHECK(strncmp(stripped, "WIFI|", 5) != 0);
+			CHECK(strncmp(stripped, "WIFI_SEC|", 9) != 0);
+		}
+
+		saw_header = saw_header || strncmp(line, "  COMMAND ", 10) == 0;
+
+		/* The columns line up: nothing crosses from one into the next. */
+		if (saw_header && is_help_row(line) && strncmp(line, "  COMMAND ", 10) != 0) {
+			CHECK(line[1] == ' ');
+			CHECK(line[help_args_at - 1] == ' ' && line[help_args_at - 2] == ' ');
+			if ((size_t)length > help_words_at) {
+				CHECK(line[help_words_at - 1] == ' ' && line[help_words_at - 2] == ' ');
+			}
+		}
+
+		if (line[0] == '+') {
+			rules++;
+			CHECK(length == HELP_WIDTH_ALLOWED);
+			CHECK(line[length - 1] == '+');
+			CHECK(saw_header);
+		}
 	}
 
-	/* Grouped: each section's heading comes once, and before its commands. */
-	CHECK(strstr(fake.output, "Device:\n") != NULL);
-	CHECK(strstr(fake.output, "Wi-Fi:\n") != NULL);
-	CHECK(strstr(fake.output, "Device:\n") < strstr(fake.output, "HELP "));
-	CHECK(strstr(fake.output, "Wi-Fi:\n") < strstr(fake.output, "WIFI|<ssid>"));
-	CHECK(strstr(fake.output, "Cloud:\n") < strstr(fake.output, "CLOUD|<endpoint>"));
+	/* A rule for each section and one to end the table, which is as wide as the rules. */
+	CHECK(rules == SECTION_COUNT + 1);
+	CHECK(widest == HELP_WIDTH_ALLOWED);
+	CHECK(help_lines[help_line_count - 2][0] == '+');
+	CHECK(strspn(help_lines[help_line_count - 2] + 1, "-") == HELP_WIDTH_ALLOWED - 2);
+	CHECK_TEXT(help_lines[help_line_count - 1], "OK");
 
-	/* The alias works and is mentioned. */
-	CHECK(strstr(fake.output, "also ?") != NULL);
+	/* Each command has one row: its mark, its name, its arguments and what it does. */
+	for (size_t i = 0; i < count; i++) {
+		const char *usage = table[i].usage + strlen(table[i].name);
+		int row = help_row_of(&table[i]);
+		char expected[128];
+		char cell[256];
+
+		CHECK(row >= 0);
+		if (row < 0) {
+			continue;
+		}
+
+		CHECK(help_lines[row][0] == (table[i].in_factory ? '*' : ' '));
+
+		if (usage[0] == '[') {
+			snprintf(expected, sizeof(expected), "[%s", usage + 2);
+		} else {
+			snprintf(expected, sizeof(expected), "%s", usage[0] == '|' ? usage + 1 : usage);
+		}
+
+		help_cell_text(row, help_args_at, help_words_at, cell, sizeof(cell));
+		CHECK_TEXT(cell, expected);
+
+		help_cell_text(row, help_words_at, HELP_WIDTH_ALLOWED, cell, sizeof(cell));
+		CHECK_TEXT(cell, table[i].description);
+
+		/* It is under the rule of its section, with no other rule in between. */
+		{
+			char rule[64];
+			int above = row;
+
+			snprintf(rule, sizeof(rule), "+-- %s -", ((const char *[]){
+				[SECTION_DEVICE] = "Device", [SECTION_WIFI] = "Wi-Fi",
+				[SECTION_CLOUD] = "Cloud", [SECTION_STATUS] = "Status",
+				[SECTION_STREAM] = "Loading a certificate",
+				[SECTION_TEST] = "Test bench" })[table[i].section]);
+
+			while (above > 0 && help_lines[above][0] != '+') {
+				above--;
+			}
+
+			CHECK(strncmp(help_lines[above], rule, strlen(rule)) == 0);
+		}
+	}
+
+	/* A mark only on what works in factory mode, and a row for nothing that is not in the table. */
+	for (int i = 0; i < help_line_count; i++) {
+		if (help_lines[i][0] == '*' && help_lines[i][2] != 'a') {
+			bool known = false;
+
+			for (size_t j = 0; j < count; j++) {
+				known = known || help_row_of(&table[j]) == i;
+			}
+
+			CHECK(known);
+		}
+	}
+
+	/* The keyword choices are there to be read. */
+	{
+		const char *const shown[][2] = { { "ECHO", "<ON or OFF>" },
+						 { "KEYGEN", "[REPLACE]" },
+						 { "BUTTON", "<1 or 2>" },
+						 { "STATUS", "[<device or wifi or cloud or certs or update>]" },
+						 { "WIFI_SEC",
+						   "<ssid>|<WPA2_PSK or WPA2_PSK_SHA256 or WPA3_SAE>|<password>" },
+						 { "STREAM_START",
+						   "<total_bytes>|<chunk_count>|<crc16_hex>|<CA or CERT>" } };
+
+		for (size_t i = 0; i < sizeof(shown) / sizeof(shown[0]); i++) {
+			for (size_t j = 0; j < count; j++) {
+				char cell[256];
+
+				if (strcmp(table[j].name, shown[i][0]) == 0) {
+					help_cell_text(help_row_of(&table[j]), help_args_at, help_words_at, cell,
+						       sizeof(cell));
+					CHECK_TEXT(cell, shown[i][1]);
+				}
+			}
+		}
+	}
+
+	/* The alias works, in the same words. */
 	{
 		char first[sizeof(fake.output)];
 
 		strcpy(first, fake.output);
 		command("?");
 		CHECK_TEXT(fake.output, first);
+		command("help");
+		CHECK_TEXT(fake.output, first);
 	}
 
-	/* RESET_CONFIG says what it keeps. */
-	command("HELP");
-	CHECK(strstr(fake.output, "keep id, wifi, certificates, key") != NULL);
+	/* In factory mode it is the same table, as it comes from the same one. */
+	{
+		char first[sizeof(fake.output)];
+
+		strcpy(first, fake.output);
+		blank_board();
+		command("HELP");
+		CHECK_TEXT(fake.output, first);
+	}
+}
+
+static void test_the_table_drives_help(void)
+{
+	size_t count;
+	const struct console_command *table = console_cmd_table(&count);
+
+	CHECK(count >= 20);
 
 	/* The numbers of arguments cannot drift from what the usage says. */
 	for (size_t i = 0; i < count; i++) {
@@ -2431,6 +2709,343 @@ static void test_stream_idle_timeout(void)
 
 /* ---- the test image that can stop the Wi-Fi chip -------------------------------------- */
 
+/* ---- what the case of a word matters for ------------------------------------------ */
+
+/* Each spelling a person might type: as written in HELP, small, capitalised, and mixed up. */
+static void spellings_of(const char *word, char out[4][32])
+{
+	for (int kind = 0; kind < 4; kind++) {
+		size_t i;
+
+		for (i = 0; word[i] != '\0'; i++) {
+			char c = word[i];
+			bool up = kind == 0 || (kind == 2 && i == 0) || (kind == 3 && i % 2 == 0);
+
+			if (kind == 0) {
+				out[kind][i] = c;
+			} else {
+				out[kind][i] = up ? (char)toupper((unsigned char)c) : (char)tolower((unsigned char)c);
+			}
+		}
+
+		out[kind][i] = '\0';
+	}
+}
+
+static void test_every_command_name_works_in_any_case(void)
+{
+	size_t count;
+	const struct console_command *table = console_cmd_table(&count);
+
+	for (size_t i = 0; i < count; i++) {
+		char spellings[4][32];
+		char expected[sizeof(fake.output)];
+
+		operating_board();
+		command(table[i].name);
+		strcpy(expected, fake.output);
+		CHECK(expected[0] != '\0');
+		CHECK(strstr(expected, "unknown command") == NULL);
+
+		spellings_of(table[i].name, spellings);
+
+		for (int kind = 1; kind < 4; kind++) {
+			operating_board();
+			command(spellings[kind]);
+			CHECK_TEXT(fake.output, expected);
+
+			/* A usage error says the name from the table, not as it was typed. */
+			operating_board();
+			if (table[i].max_args == 0) {
+				char line[64];
+
+				snprintf(line, sizeof(line), "%s|x", spellings[kind]);
+				command(line);
+				CHECK_TEXT(final_line() + strlen("ERR usage: "), table[i].usage);
+			}
+		}
+
+		/* The factory-mode refusal does not care either. */
+		if (!table[i].in_factory) {
+			for (int kind = 1; kind < 4; kind++) {
+				blank_board();
+				command(spellings[kind]);
+				CHECK_TEXT(final_line(), "ERR factory mode, send INIT|<id> first");
+			}
+		}
+	}
+
+	/* What erases the board, in small letters, is held back as it is in capitals. */
+	operating_board();
+	fake.ota = OTA_DOWNLOADING;
+	command("factory_reset");
+	CHECK_TEXT(final_line(), "ERR update in progress");
+	command("Reset_Config");
+	CHECK_TEXT(final_line(), "ERR update in progress");
+	command("init|NEWID");
+	CHECK_TEXT(final_line(), "ERR update in progress");
+	CHECK(fake.reboots == 0);
+	CHECK(fake.wifi_stored);
+}
+
+static void test_every_keyword_works_in_any_case(void)
+{
+	char spellings[4][32];
+
+	/* ECHO. Its state shows in what comes back of the next character. */
+	static const struct {
+		const char *word;
+		bool on;
+		const char *reply;
+	} echoes[] = { { "ON", true, "OK echo on" }, { "OFF", false, "OK echo off" } };
+
+	for (size_t i = 0; i < sizeof(echoes) / sizeof(echoes[0]); i++) {
+		spellings_of(echoes[i].word, spellings);
+
+		for (int kind = 0; kind < 4; kind++) {
+			char line[64];
+
+			blank_board();
+			snprintf(line, sizeof(line), "ECHO|%s", spellings[kind]);
+			feed(echoes[i].on ? "ECHO|OFF\r" : "ECHO|ON\r");
+			command(line);
+			CHECK_TEXT(final_line(), echoes[i].reply);
+			fake_clear_log();
+			feed("G");
+			CHECK_TEXT(fake.echo, echoes[i].on ? "G" : "");
+			feed("\b");
+		}
+	}
+
+	/* STATUS's sections. The output is that of the section, whichever way it is spelled. */
+	static const char *const sections[] = { "device", "wifi", "cloud", "certs", "update" };
+
+	for (size_t i = 0; i < sizeof(sections) / sizeof(sections[0]); i++) {
+		char line[64];
+		char expected[sizeof(fake.output)];
+
+		operating_board();
+		snprintf(line, sizeof(line), "STATUS|%s", sections[i]);
+		command(line);
+		strcpy(expected, fake.output);
+		CHECK_TEXT(final_line(), "OK");
+
+		spellings_of(sections[i], spellings);
+
+		for (int kind = 1; kind < 4; kind++) {
+			snprintf(line, sizeof(line), "STATUS|%s", spellings[kind]);
+			command(line);
+			CHECK_TEXT(fake.output, expected);
+		}
+	}
+
+	/* WIFI_SEC's security names. */
+	static const struct {
+		const char *name;
+		enum net_security security;
+	} modes[] = {
+		{ "WPA2_PSK", NET_SECURITY_WPA2_PSK },
+		{ "WPA2_PSK_SHA256", NET_SECURITY_WPA2_PSK_SHA256 },
+		{ "WPA3_SAE", NET_SECURITY_WPA3_SAE },
+	};
+
+	for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+		spellings_of(modes[i].name, spellings);
+
+		for (int kind = 0; kind < 4; kind++) {
+			char line[128];
+
+			operating_board();
+			fake.wifi_security = modes[(i + 1) % 3].security;
+			snprintf(line, sizeof(line), "WIFI_SEC|MyNet|%s|" PASSWORD, spellings[kind]);
+			command(line);
+			CHECK_TEXT(final_line(), "OK saved, connecting to MyNet");
+			CHECK(fake.wifi_security == modes[i].security);
+			CHECK_TEXT(fake.wifi_ssid, "MyNet");
+			CHECK_TEXT(fake.wifi_password, PASSWORD);
+		}
+	}
+
+	/* KEYGEN's REPLACE. Without it a key that exists stays. */
+	spellings_of("REPLACE", spellings);
+
+	for (int kind = 0; kind < 4; kind++) {
+		char line[64];
+
+		operating_board();
+		snprintf(line, sizeof(line), "KEYGEN|%s", spellings[kind]);
+		command(line);
+		CHECK_TEXT(final_line(), "OK key pair created");
+		CHECK(fake.key_stores == 1);
+		fake.key_stores = 0;
+	}
+
+	operating_board();
+	command("keygen");
+	CHECK_TEXT(final_line(), "ERR a device key exists, KEYGEN|REPLACE discards it and its certificate");
+	CHECK(fake.key_stores == 0);
+
+	/* STREAM_START's CA and CERT, and its hexadecimal CRC. */
+	static const struct {
+		const char *name;
+		enum console_stream_kind kind;
+	} kinds[] = { { "CA", CONSOLE_STREAM_CA }, { "CERT", CONSOLE_STREAM_CERT } };
+
+	make_certificate(550);
+
+	for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		spellings_of(kinds[i].name, spellings);
+
+		for (int kind = 0; kind < 4; kind++) {
+			char line[128];
+
+			/* Both ways of writing the same CRC end up storing the same thing. */
+			operating_board();
+			snprintf(line, sizeof(line), "stream_start|550|3|%04x|%s",
+				 console_crc16(0xffff, certificate, 550), spellings[kind]);
+			command(line);
+			CHECK_TEXT(final_line(), "OK ready for 3 chunks");
+			stream_chunk(0, certificate, 100);
+			stream_chunk(1, certificate + 100, 200);
+			stream_chunk(2, certificate + 300, 250);
+			CHECK(fake.certificates_stored == 1);
+			CHECK(fake.stored_kind == kinds[i].kind);
+			fake.certificates_stored = 0;
+
+			operating_board();
+			snprintf(line, sizeof(line), "STREAM_START|550|3|%04X|%s",
+				 console_crc16(0xffff, certificate, 550), spellings[kind]);
+			command(line);
+			stream_chunk(0, certificate, 100);
+			stream_chunk(1, certificate + 100, 200);
+			stream_chunk(2, certificate + 300, 250);
+			CHECK(fake.certificates_stored == 1);
+			CHECK(fake.stored_kind == kinds[i].kind);
+			fake.certificates_stored = 0;
+		}
+	}
+
+	/* Something else is still something else, in any case. */
+	operating_board();
+	command("ECHO|ONN");
+	CHECK(strncmp(final_line(), "ERR usage: ECHO", 15) == 0);
+	command("echo|o");
+	CHECK(strncmp(final_line(), "ERR usage: ECHO", 15) == 0);
+	command("ECHO|on ");
+	CHECK(strncmp(final_line(), "ERR usage: ECHO", 15) == 0);
+	command("STATUS|Devices");
+	CHECK(strncmp(final_line(), "ERR unknown section", 19) == 0);
+	command("KEYGEN|REPLACES");
+	CHECK(strncmp(final_line(), "ERR usage: KEYGEN", 17) == 0);
+	CHECK(fake.private_key);
+	command("WIFI_SEC|MyNet|wep|" PASSWORD);
+	CHECK(strncmp(final_line(), "ERR security must be", 20) == 0);
+	make_certificate(550);
+	stream_start(550, 3, "cat");
+	CHECK_TEXT(final_line(), "ERR a stream is a CA or a CERT");
+}
+
+static void test_what_is_chosen_stays_exactly_as_typed(void)
+{
+	/* An ID. */
+	operating_board();
+	command("set_id|AbCxYz9");
+	CHECK_TEXT(final_line(), "OK id set to AbCxYz9");
+	CHECK_TEXT(device_id(), "AbCxYz9");
+	command("GET_ID");
+	CHECK(strncmp(final_line(), "OK AbCxYz9|", 11) == 0);
+	CHECK(boot() == DEVICE_BOOT_OPERATING);
+	CHECK_TEXT(device_id(), "AbCxYz9");
+
+	blank_board();
+	command("init|MiXeD7");
+	CHECK_TEXT(final_line(), "OK initialised as MiXeD7, rebooting");
+	CHECK(boot() == DEVICE_BOOT_OPERATING);
+	CHECK_TEXT(device_id(), "MiXeD7");
+
+	/* A network name and a password, also one that looks like a keyword. */
+	static const struct {
+		const char *ssid;
+		const char *password;
+	} networks[] = {
+		{ "MixedCase Net", "MiXeD-PaSsWoRd" },
+		{ "lowercase", "UPPERCASE-PASS" },
+		{ "UPPERCASE", "lowercase-pass" },
+		{ "wpa2_psk", "WPA3_SAE-KEEP" },
+		{ "ON", "OFF-OFF-OFF" },
+		{ "Tester\xe2\x80\x99s iPhone", "Has|Bars|In-It" },
+	};
+
+	for (size_t i = 0; i < sizeof(networks) / sizeof(networks[0]); i++) {
+		char line[128];
+
+		operating_board();
+		snprintf(line, sizeof(line), "wifi|%s|%s", networks[i].ssid, networks[i].password);
+		command(line);
+		CHECK(strncmp(final_line(), "OK saved", 8) == 0);
+		CHECK_TEXT(fake.wifi_ssid, networks[i].ssid);
+		CHECK_TEXT(fake.wifi_password, networks[i].password);
+
+		operating_board();
+		snprintf(line, sizeof(line), "wifi_sec|%s|wpa3_sae|%s", networks[i].ssid, networks[i].password);
+		command(line);
+		CHECK(strncmp(final_line(), "OK saved", 8) == 0);
+		CHECK(fake.wifi_security == NET_SECURITY_WPA3_SAE);
+		CHECK_TEXT(fake.wifi_ssid, networks[i].ssid);
+		CHECK_TEXT(fake.wifi_password, networks[i].password);
+	}
+
+	/* An endpoint and a URL. */
+	operating_board();
+	CHECK(identity_settings_clear() == 0);
+	command("cloud|Example-ATS.iot.US-East-1.amazonaws.com|https://Bucket.s3.amazonaws.com/FirmWare/");
+	CHECK_TEXT(final_line(), "OK cloud settings saved");
+	CHECK_TEXT(identity_settings_get()->endpoint, "Example-ATS.iot.US-East-1.amazonaws.com");
+	CHECK_TEXT(identity_settings_get()->download_url_prefix, "https://Bucket.s3.amazonaws.com/FirmWare/");
+	command("STATUS|CLOUD");
+	CHECK_TEXT(value_of("endpoint"), "Example-ATS.iot.US-East-1.amazonaws.com");
+	CHECK_TEXT(value_of("download from"), "https://Bucket.s3.amazonaws.com/FirmWare/");
+
+	/* A scheme in capitals is not one that the board takes: this check stays what it was. */
+	command("CLOUD|" ENDPOINT "|HTTPS://bucket.example.com/firmware/");
+	CHECK(strncmp(final_line(), "ERR endpoint must be", 20) == 0);
+	CHECK_TEXT(identity_settings_get()->endpoint, "Example-ATS.iot.US-East-1.amazonaws.com");
+
+	/* Base64, where the case of a letter is another six bits. */
+	{
+		char encoded[400];
+		char line[420];
+		char *c;
+		size_t length;
+
+		make_certificate(240);
+		operating_board();
+		fake.certificate = false;
+		CHECK(base64_encode((uint8_t *)encoded, sizeof(encoded), &length, certificate, 240) == 0);
+		encoded[length] = '\0';
+		CHECK(strpbrk(encoded, "abcdefghijklmnopqrstuvwxyz") != NULL);
+		CHECK(strpbrk(encoded, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != NULL);
+
+		stream_start(240, 1, "cert");
+		snprintf(line, sizeof(line), "stream_chunk|0|%s", encoded);
+		command(line);
+		CHECK_TEXT(final_line(), "OK CERT stored (240 bytes)");
+		CHECK(memcmp(fake.stored, certificate, 240) == 0);
+
+		/* The same chunk with its case changed is other data, and it does not get stored. */
+		for (c = encoded; *c != '\0'; c++) {
+			*c = (char)toupper((unsigned char)*c);
+		}
+
+		fake.certificates_stored = 0;
+		stream_start(240, 1, "CERT");
+		snprintf(line, sizeof(line), "STREAM_CHUNK|0|%s", encoded);
+		command(line);
+		CHECK(strncmp(final_line(), "ERR ", 4) == 0);
+		CHECK(fake.certificates_stored == 0);
+	}
+}
+
 #if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
 static void test_the_chip_stops_once_on_command(void)
 {
@@ -2513,6 +3128,8 @@ int main(void)
 	test_backspace_and_del();
 	test_echo();
 	test_unknown_command();
+	test_console_wrap();
+	test_help_is_a_table();
 	test_the_table_drives_help();
 	test_factory_refusal_comes_from_the_table();
 	test_every_command_ends_with_one_final_line();
@@ -2541,6 +3158,9 @@ int main(void)
 	test_stream_in_order();
 	test_stream_failures();
 	test_stream_idle_timeout();
+	test_every_command_name_works_in_any_case();
+	test_every_keyword_works_in_any_case();
+	test_what_is_chosen_stays_exactly_as_typed();
 #if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
 	test_the_chip_stops_once_on_command();
 #else

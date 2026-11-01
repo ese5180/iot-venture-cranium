@@ -2,6 +2,7 @@
 // mostly feed it things a well-behaved board would never send.
 
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { ONLINE_WINDOW_MS, deviceFromShadow, unknownDevice } from '../src/lib/shadow.mjs';
@@ -64,14 +65,28 @@ test('a thing without a shadow has never reported', () => {
   }
 });
 
-test('online means AWS received the uptime less than 150 seconds ago', () => {
+const KCONFIG = new URL('../../../firmware/app/Kconfig', import.meta.url);
+
+test('the window has room for a late heartbeat at the interval that the firmware has by default', { skip: !existsSync(KCONFIG) }, () => {
+  const seconds = /config APP_SHADOW_INTERVAL_SECONDS\n[^\n]*\n\s*default (\d+)/.exec(readFileSync(KCONFIG, 'utf8'));
+  assert.notEqual(seconds, null);
+  const interval = Number(seconds[1]);
+  assert.equal(interval, 30);
+  assert.equal(ONLINE_WINDOW_MS, interval * 3 * 1000);
+});
+
+test('online means AWS received the uptime less than 90 seconds ago', () => {
   const at = (secondsAgo) => read(healthy(), { seen: Math.floor(NOW / 1000) - secondsAgo });
-  assert.equal(ONLINE_WINDOW_MS, 150_000);
+  assert.equal(ONLINE_WINDOW_MS, 90_000);
   assert.equal(at(0).online, true);
-  assert.equal(at(149).online, true);
-  assert.equal(at(150).online, false);
+  assert.equal(at(89).online, true);
+  assert.equal(at(90).online, false);
   assert.equal(at(86400).online, false);
-  assert.equal(at(150).lastSeen, new Date(NOW - 150_000).toISOString());
+  assert.equal(at(90).lastSeen, new Date(NOW - 90_000).toISOString());
+
+  // Every 30 s, with one heartbeat lost; and the golden image's 60 s, with its report 29 s late.
+  assert.equal(at(30 + 30 + 29).online, true);
+  assert.equal(at(60 + 29).online, true);
 
   // The timestamp comes from AWS, but it is still checked before it is used.
   for (const seen of [undefined, null, 'now', '1790000000', 12.5, -5, 0, NaN, Infinity, 1e15, {}, [SEEN], true]) {

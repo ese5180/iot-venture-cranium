@@ -31,7 +31,8 @@ test: $(BUILD)/host_tests $(BUILD)/console_tests $(BUILD)/console_output_tests $
 		$(BUILD)/ui_tests $(BUILD)/golden_policy_tests $(BUILD)/bt_ota_policy_tests \
 		$(BUILD)/bt_ota_tests $(BUILD)/ota_bt_tests $(BUILD)/ota_bt_no_confirm_tests \
 		$(BUILD)/console_bt_tests $(BUILD)/app_bt_tests $(BUILD)/ui_bt_tests \
-		$(BUILD)/stuck_policy_tests $(BUILD)/console_fault_tests $(BUILD)/console_sim_fault
+		$(BUILD)/stuck_policy_tests $(BUILD)/join_policy_tests $(BUILD)/console_fault_tests \
+		$(BUILD)/console_sim_fault
 	./$(BUILD)/host_tests
 	./$(BUILD)/console_tests
 	./$(BUILD)/console_output_tests
@@ -46,6 +47,7 @@ test: $(BUILD)/host_tests $(BUILD)/console_tests $(BUILD)/console_output_tests $
 	./$(BUILD)/app_bt_tests
 	./$(BUILD)/ui_bt_tests
 	./$(BUILD)/stuck_policy_tests
+	./$(BUILD)/join_policy_tests
 	./$(BUILD)/console_fault_tests
 
 $(BUILD)/cJSON.o: $(CJSON_DIR)/cJSON.c
@@ -68,9 +70,10 @@ $(BUILD)/console_output_tests: test_console_output.c $(SRC)/console.c $(SRC)/con
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(WARNINGS) $(CONSOLE_DEFINES) -o $@ test_console_output.c $(SRC)/console_parser.c
 
-$(BUILD)/app_tests: test_app.c $(SRC)/main.c $(SRC)/net.c $(SRC)/stuck.c $(SRC)/stuck_policy.c $(CONSOLE_HEADERS)
+$(BUILD)/app_tests: test_app.c $(SRC)/main.c $(SRC)/net.c $(SRC)/stuck.c $(SRC)/stuck_policy.c $(SRC)/join_policy.c \
+		$(CONSOLE_HEADERS)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) $(WARNINGS) $(CONSOLE_DEFINES) -o $@ test_app.c $(SRC)/stuck_policy.c
+	$(CC) $(CFLAGS) $(WARNINGS) $(CONSOLE_DEFINES) -o $@ test_app.c $(SRC)/stuck_policy.c $(SRC)/join_policy.c
 
 # ui.c, included by its test to get at its input callback.
 $(BUILD)/ui_tests: test_ui.c $(SRC)/ui.c $(SRC)/ui.h $(SRC)/app_events.h
@@ -116,23 +119,30 @@ $(BUILD)/ota_bt_no_confirm_tests: test_ota_bt.c $(SRC)/ota.c $(SRC)/ota.h $(SRC)
 $(BUILD)/console_bt_tests: test_console.c $(CONSOLE_SOURCES) $(BUILD)/base64.o $(CONSOLE_HEADERS)
 	$(CC) $(CFLAGS) $(WARNINGS) $(CONSOLE_DEFINES) $(BT_DEFINES) -o $@ $(filter %.c %.o,$^)
 
-$(BUILD)/app_bt_tests: test_app.c $(SRC)/main.c $(SRC)/net.c $(SRC)/stuck.c $(SRC)/stuck_policy.c $(CONSOLE_HEADERS)
+$(BUILD)/app_bt_tests: test_app.c $(SRC)/main.c $(SRC)/net.c $(SRC)/stuck.c $(SRC)/stuck_policy.c $(SRC)/join_policy.c \
+		$(CONSOLE_HEADERS)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) $(WARNINGS) $(CONSOLE_DEFINES) $(BT_DEFINES) -o $@ test_app.c $(SRC)/stuck_policy.c
+	$(CC) $(CFLAGS) $(WARNINGS) $(CONSOLE_DEFINES) $(BT_DEFINES) -o $@ test_app.c $(SRC)/stuck_policy.c $(SRC)/join_policy.c
 
 $(BUILD)/ui_bt_tests: test_ui.c $(SRC)/ui.c $(SRC)/ui.h $(SRC)/app_events.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(WARNINGS) -DCONFIG_APP_LOG_LEVEL=0 $(BT_DEFINES) -o $@ test_ui.c
 
-# When a board that is stuck gets restarted. tests/host/mutate_stuck.py shows that these tests
-# notice when the policy is wrong: `make mutants` runs it. test_app.c has the wiring.
+# When a board that is stuck gets restarted, and when a join may start. tests/host/mutate_stuck.py
+# and mutate_join.py show that these tests notice when a policy is wrong: `make mutants` runs them.
+# test_app.c has the wiring.
 $(BUILD)/stuck_policy_tests: test_stuck_policy.c $(SRC)/stuck_policy.c $(SRC)/stuck_policy.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(WARNINGS) -o $@ test_stuck_policy.c $(SRC)/stuck_policy.c
 
+$(BUILD)/join_policy_tests: test_join_policy.c $(SRC)/join_policy.c $(SRC)/join_policy.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -o $@ test_join_policy.c $(SRC)/join_policy.c
+
 .PHONY: mutants
 mutants:
 	CC=$(CC) python3 mutate_stuck.py
+	CC=$(CC) python3 mutate_join.py
 
 # The console of the test image that can stop the Wi-Fi chip. Every other build of it answers that
 # the command does not exist, which test_console.c checks.

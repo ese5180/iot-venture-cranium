@@ -668,11 +668,23 @@ function presence(device, now) {
   // A board that is restarting is off for the moment, whatever its last connection says.
   if (isRestarting(device)) return badge('idle', 'restart', 'Restarting');
   if (device.online) {
-    const reported = device.lastSeen ? `Last report ${timeAgo(device.lastSeen, now)}` : null;
+    const reported = device.lastSeen ? `Last heartbeat ${timeAgo(device.lastSeen, now)}` : null;
     return badge('good', 'online', 'Online', reported);
   }
   if (!device.lastSeen) return badge('idle', 'minus-circle', 'Never connected');
-  return badge('idle', 'offline', 'Offline', `Last seen ${exactTime(device.lastSeen)}`);
+  return badge('idle', 'offline', 'Offline', `Last heartbeat ${exactTime(device.lastSeen)}`);
+}
+
+/**
+ * The state of a board and when its last heartbeat arrived, or null for one that has never had
+ * one. The API says whether it is online. This page does not work that out again from the time.
+ */
+function heartbeatWords(device, now) {
+  let words = ['Offline', 'last heartbeat'];
+  if (isRestarting(device)) words = ['Restarting', 'last heartbeat'];
+  else if (device.online) words = ['Online', 'heartbeat'];
+  if (device.lastSeen) return when(device.lastSeen, now, `${words[0]}, ${words[1]} `);
+  return device.online ? words[0] : null;
 }
 
 /** An icon and a few words for a state; `description` comes from core.js. */
@@ -1413,10 +1425,7 @@ function boardsCard(ctx, devices) {
         const update = reported.tone === 'act'
           ? { ...reported, tone: 'wait', title: 'Waiting for its button' }
           : { ...reported, progress };
-        let seen = 'Never connected';
-        if (isRestarting(device)) seen = 'Restarting';
-        else if (device.online) seen = ['Online, reported ', when(device.lastSeen, state.now)];
-        else if (device.lastSeen) seen = when(device.lastSeen, state.now, 'Offline, seen ');
+        const seen = heartbeatWords(device, state.now) ?? 'Never connected';
         return h('li', { key: device.thing, class: 'board-line' },
           h('span', { class: `presence-dot ${isUp(device) ? 'is-on' : ''}`.trim() }),
           h('span', { class: 'board-line-who' },
@@ -1944,8 +1953,15 @@ function uptimeFact(device) {
   return [duration(device.uptime), whenLastSeen(device)];
 }
 
-function deviceFacts(device, ctx, { offer = openOffer(device, ctx), withScale = false } = {}) {
+/** When the last heartbeat arrived. The state goes with it in the words above, or in the badge. */
+function heartbeatFact(device, now) {
+  return device.lastSeen ? when(device.lastSeen, now) : h('span', { class: 'quiet' }, 'None yet');
+}
+
+function deviceFacts(device, ctx, { offer = openOffer(device, ctx), withScale = false, withHeartbeat = false } = {}) {
   return facts([
+    // The list of devices has it in the line under the board's name, and its columns are fixed.
+    withHeartbeat ? ['Heartbeat', heartbeatFact(device, ctx.state.now)] : null,
     ['Firmware', firmwareFact(device, revokedVersions(ctx), releaseList(ctx))],
     ['Update', updateFact(device, offer)],
     ['Signal', signalFact(device, withScale)],
@@ -1972,9 +1988,7 @@ const NEVER_REPORTED = 'Has not reported to AWS IoT yet.';
 const NEVER_REPORTED_HELP = 'Power it up and check that it was provisioned.';
 
 function seenLine(device, now) {
-  if (device.online) return ['Reported ', when(device.lastSeen, now)];
-  if (device.lastSeen) return ['Last seen ', when(device.lastSeen, now)];
-  return NEVER_REPORTED;
+  return heartbeatWords(device, now) ?? NEVER_REPORTED;
 }
 
 /** The state of the fleet as a whole, at the top of the Devices page. */
@@ -2139,7 +2153,7 @@ export function deviceView(ctx) {
     h('div', { class: 'split', key: 'split' },
       card({ key: 'state', title: 'State', className: 'device' },
         h('div', { class: 'device-presence' }, presence(device, state.now)),
-        deviceFacts(device, ctx, { offer, withScale: true })),
+        deviceFacts(device, ctx, { offer, withScale: true, withHeartbeat: true })),
       h('div', { class: 'stack' },
         card({ key: 'certificates', title: 'Certificates' },
           certificates.length === 0

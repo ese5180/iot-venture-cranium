@@ -65,14 +65,14 @@ test('boards are listed by name with what their shadows say', async () => {
   ]);
 });
 
-test('a board goes offline 150 seconds after its last report', async () => {
+test('a board goes offline 90 seconds after its last heartbeat', async () => {
   const context = setup();
   const { fake } = context;
   fake.addThing(BOARD_A);
   fake.device(BOARD_A).report(reported());
   const seen = (await context.list()).devices[0].lastSeen;
 
-  context.advance(149_000);
+  context.advance(89_000);
   assert.equal((await context.list()).devices[0].online, true);
   context.advance(1000);
   let device = (await context.list()).devices[0];

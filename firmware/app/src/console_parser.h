@@ -73,7 +73,18 @@ char *console_split_name(char *line, char **name);
  */
 int console_split_args(char *rest, char **argv, int max_args);
 
-/* Compare without regard to case. Command names and keywords are ASCII. */
+/*
+ * Compare without regard to case. Command names and keywords are ASCII. What is compared this way
+ * is a word from the console's own table. Everything a person chooses stays as it was typed: an ID,
+ * a network name, a password, an endpoint, a URL, or the data of a stream.
+ */
 bool console_equal_nocase(const char *a, const char *b);
+
+/*
+ * Wrap text into a column: returns how many characters of it go on this line, and moves *text on
+ * to what goes on the next. A line breaks after a blank, which it leaves out, or after a '|'. A
+ * word too long for the column is cut.
+ */
+size_t console_wrap(const char **text, size_t width);
 
 #endif /* CONSOLE_PARSER_H_ */

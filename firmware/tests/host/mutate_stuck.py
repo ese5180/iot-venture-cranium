@@ -161,7 +161,7 @@ def verdict(mutant: Mutant, sources: dict[str, str], folder: Path, compiler: str
         (folder / name).write_text(mutant.text if name == mutant.file else text)
     binary = folder / "test"
     built = subprocess.run([compiler, "-std=c11", "-O0", "-w", f"-I{folder}", "-o", str(binary),
-                            str(TEST), str(folder / "stuck_policy.c")],
+                            str(TEST), str(folder / FILES[0])],
                            capture_output=True, text=True)
     if built.returncode != 0:
         return "does not compile"

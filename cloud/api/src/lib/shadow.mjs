@@ -13,13 +13,15 @@
  * nothing is passed through. What the console shows from here is for display only: no
  * decision of the server depends on it.
  *
- * A board is online if AWS IoT received its uptime less than 150 s ago. That time is
- * set by AWS (metadata.reported.uptime.timestamp, in epoch seconds), not by the board.
+ * This report is the board's heartbeat: it comes every 30 s, and there is no other message and no
+ * last will. A board is online if AWS IoT received its uptime less than 90 s ago, which allows for
+ * one late report of a board on 60 s, as the golden image is. That time is set by AWS
+ * (metadata.reported.uptime.timestamp, in epoch seconds), not by the board.
  */
 
 import { parseJobId, strictVersion } from './validate.mjs';
 
-export const ONLINE_WINDOW_MS = 150_000;
+export const ONLINE_WINDOW_MS = 90_000;
 
 const OTA_STATES = Object.freeze(
   ['idle', 'awaiting_user', 'downloading', 'verifying', 'rebooting', 'testing']);

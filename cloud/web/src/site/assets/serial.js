@@ -747,10 +747,13 @@ const MARKS = {
 const LEVELS = { ERR: ['bad', 'x-circle'], WRN: ['warn', 'alert'] };
 const NOTE_ICONS = { idle: 'minus', warn: 'alert', bad: 'x-circle' };
 
+// A line of a box, or of HELP's table: its rules start with a +, and its other lines with their
+// mark, a * or a blank, and a blank after that.
+const COLUMNS = /^(?:[+|]|[* ] )/;
+
 function lineText(text) {
-  // A line of a box keeps its columns.
-  const boxed = /^[+|]/.test(text);
-  return h('span', { class: `serial-text ${boxed ? 'is-box' : ''}`.trim() }, text);
+  // These keep their columns.
+  return h('span', { class: `serial-text ${COLUMNS.test(text) ? 'is-box' : ''}`.trim() }, text);
 }
 
 function finalWord(kind) {
@@ -780,10 +783,13 @@ function transcriptLine(line) {
     output: () => [lineText(line.text)],
     note: () => [icon(NOTE_ICONS[line.tone], 'is-small'), h('span', { class: 'serial-text' }, line.text)],
   };
+  // A time on every row of a table takes the width that its columns need, and it would be copied
+  // with them. The command above the table and the final line below it have theirs.
+  const timed = !(line.kind === 'output' && COLUMNS.test(line.text));
   return h('li', {
     key: line.id,
     class: `serial-line is-${line.kind} ${line.kind === 'note' ? `is-tone-${line.tone}` : ''}`.trim(),
-  }, parts[line.kind](), ' ', h('time', { class: 'serial-time' }, line.at));
+  }, parts[line.kind](), timed ? [' ', h('time', { class: 'serial-time' }, line.at)] : null);
 }
 
 function transcript(session) {

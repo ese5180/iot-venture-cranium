@@ -603,6 +603,207 @@ class SimulatedBoard:
 
 
 @unittest.skipUnless(SIMULATOR.exists(), "run `make -C firmware/tests/host` first")
+class WhatPeopleTypeTest(SimulatedBoard, unittest.TestCase):
+    """The table that HELP prints and what the case of a word means, on the console's real code."""
+
+    def setUp(self):
+        self.start_simulator()
+        self.link = PtyLink(self.parent)
+        self.console = Console("/dev/simulated", self.link)
+        self.console.wait_until_up(5)
+        self.console.run("INIT|ABC123", wait=3)
+        self.console.wait_until_up(5)
+
+    @staticmethod
+    def spellings(word):
+        """As written, in small letters, capitalised, and every other letter."""
+        return (word.upper(), word.lower(), word.capitalize(),
+                "".join(c.upper() if i % 2 else c.lower() for i, c in enumerate(word)))
+
+    def raw_reply(self, command):
+        """The lines of a reply with their blanks, which the tools take off, and its final line."""
+        self.console.handshake()
+        self.link.write(command.encode() + b"\r")
+        deadline, text = time.time() + 5, b""
+        while time.time() < deadline:
+            text += self.link.read(4096)
+            lines = text.decode().split("\r\n")
+            finished = [i for i, line in enumerate(lines) if board.FINAL_LINE.match(line)]
+            if finished:
+                # Log lines come in between replies, and never inside one.
+                reply = lines[:finished[0]]
+                return [line for line in reply if not line.startswith("[")], lines[finished[0]]
+            time.sleep(0.01)
+        self.fail(f"no final line for {command}")
+
+    def test_help_is_a_table_within_80_columns(self):
+        reply, final = self.raw_reply("HELP")
+        self.assertEqual(final, "OK")
+        self.assertRegex(reply[0], r"^Cranium console, firmware ")
+        self.assertEqual(max(len(line) for line in reply), 80)
+        self.assertTrue(all(line.isascii() for line in reply))
+        self.assertEqual([line for line in reply if line != line.rstrip()], [])
+
+        header = next(line for line in reply if line.startswith("  COMMAND"))
+        arguments, words = header.index("ARGUMENTS"), header.index("WHAT IT DOES")
+        rules = [line for line in reply if line.startswith("+")]
+        self.assertEqual([rule.strip("+-") for rule in rules],
+                         [" Device ", " Wi-Fi ", " Cloud ", " Status ", " Loading a certificate ",
+                          " Test bench ", ""])
+        self.assertTrue(all(len(rule) == 80 and rule.endswith("+") for rule in rules))
+
+        # Nothing crosses from one column into the next.
+        for line in reply[reply.index(header) + 1:]:
+            if line.startswith("+"):
+                continue
+            self.assertEqual(line[1], " ", line)
+            self.assertEqual(line[arguments - 2:arguments].strip(), "", line)
+            self.assertEqual(line[words - 2:words].strip(), "", line)
+
+        rows = {line[2:].split()[0]: line for line in reply[reply.index(header) + 1:]
+                if line[:1] in "* " and line[2:3] != " " and not line.startswith("+")}
+        self.assertEqual(console_bench.commands_missing_from_help([line.strip() for line in reply]), [])
+        for name in ("HELP", "INIT", "GET_ID", "THING", "ECHO", "REBOOT", "ENTER_BOOTLOADER"):
+            self.assertEqual(rows[name][0], "*", name)
+        for name in ("SET_ID", "WIFI", "WIFI_SEC", "CLEAR_WIFI", "NET", "CLOUD", "KEYGEN", "STATS", "STATUS",
+                     "RESET_CONFIG", "FACTORY_RESET", "STREAM_START", "BUTTON"):
+            self.assertEqual(rows[name][0], " ", name)
+        self.assertIn("HELP or ?", rows["HELP"])
+        self.assertIn("<ON or OFF>", rows["ECHO"])
+        self.assertIn("[REPLACE]", rows["KEYGEN"])
+
+        # The same in every spelling, and in factory mode, as it comes from one table.
+        for spelling in ("?", "help", "Help"):
+            self.assertEqual(self.raw_reply(spelling), (reply, final), spelling)
+        self.console.run("FACTORY_RESET", wait=3)
+        self.console.wait_until_up(5)
+        self.assertEqual(self.raw_reply("hElP"), (reply, final))
+
+    def test_nothing_in_help_can_be_taken_for_something_else(self):
+        reply, _ = self.raw_reply("HELP")
+        for line in reply:
+            self.assertIsNone(board.FINAL_LINE.match(line.strip()), line)
+            self.assertIsNone(console_bench.ANY_TAGGED_LINE.match(line), line)
+        # The bench's check for log lines inside a reply starts on its first line.
+        self.assertEqual(console_bench.log_lines_around_help(reply + ["OK"]), ([], 0))
+
+    def test_the_help_in_the_readme_is_what_the_console_says(self):
+        reply, _ = self.raw_reply("HELP")
+        readme = (REPO / "firmware/README.md").read_text()
+        block = re.search(r"```text\n(Cranium console, firmware .*?)```", readme, re.DOTALL)
+        self.assertIsNotNone(block, "firmware/README.md shows HELP")
+        self.assertEqual(block.group(1).splitlines()[1:], reply[1:] + ["OK"])
+
+    def test_a_missing_command_is_noticed_by_the_bench(self):
+        reply, _ = self.raw_reply("HELP")
+        stripped = [line.strip() for line in reply if not line.strip().startswith("WIFI_SEC")]
+        self.assertEqual(console_bench.commands_missing_from_help(stripped), ["WIFI_SEC"])
+
+    def test_command_names_in_any_case(self):
+        for name in ("GET_ID", "THING", "STATS", "STATUS", "NET"):
+            expected = self.console.exchange(name)[1]
+            for spelling in self.spellings(name):
+                final = self.console.exchange(spelling)[1]
+                self.assertEqual(final.split("|")[0][:2], expected.split("|")[0][:2], spelling)
+
+    def test_echos_keywords_in_any_case(self):
+        for word, reply in (("ON", "OK echo on"), ("OFF", "OK echo off")):
+            for spelling in self.spellings(word):
+                self.link.write(f"\rECHO|{spelling}\r".encode())
+                deadline, text = time.time() + 2, b""
+                while time.time() < deadline and reply.encode() not in text:
+                    text += self.link.read(4096)
+                    time.sleep(0.01)
+                self.assertIn(reply.encode(), text, spelling)
+
+    def test_status_sections_in_any_case(self):
+        for section, key in (("device", "id"), ("wifi", "wifi link"), ("cloud", "cloud"),
+                             ("certs", "root CA"), ("update", "update")):
+            expected, final = self.console.exchange(f"STATUS|{section}")
+            self.assertEqual(final, "OK", section)
+            self.assertIn(key, board.parse_key_values(expected), section)
+            for spelling in self.spellings(section):
+                self.assertEqual(self.console.exchange(f"status|{spelling}")[0], expected, spelling)
+        self.assertRegex(self.console.exchange("STATUS|Devices")[1], "^ERR unknown section")
+
+    def test_security_names_in_any_case(self):
+        for name in ("WPA2_PSK", "WPA2_PSK_SHA256", "WPA3_SAE"):
+            for spelling in self.spellings(name):
+                final = self.console.exchange(f"wifi_sec|Mixed Net|{spelling}|{PASSWORD}")[1]
+                self.assertEqual(final, "OK saved, connecting to Mixed Net", spelling)
+        self.assertRegex(self.console.exchange(f"WIFI_SEC|net|wep|{PASSWORD}")[1], "^ERR security must be")
+
+    def test_keygens_keyword_in_any_case(self):
+        self.console.run("KEYGEN", wait=5)
+        self.assertRegex(self.console.exchange("keygen", 5)[1], "^ERR a device key exists")
+        for spelling in self.spellings("REPLACE"):
+            self.assertEqual(self.console.exchange(f"keygen|{spelling}", 5)[1], "OK key pair created", spelling)
+        self.assertRegex(self.console.exchange("KEYGEN|REPLACES")[1], "^ERR usage: KEYGEN")
+
+    def load(self, data, kind, start="STREAM_START", chunk="STREAM_CHUNK", crc=None):
+        crc = crc if crc is not None else f"{board.crc16_ccitt_false(data):04x}"
+        final = self.console.exchange(f"{start}|{len(data)}|1|{crc}|{kind}")[1]
+        self.assertEqual(final, "OK ready for 1 chunks", kind)
+        encoded = base64.b64encode(data).decode()
+        return encoded, self.console.exchange(f"{chunk}|0|{encoded}")[1]
+
+    def test_stream_kinds_and_the_crc_in_any_case(self):
+        der = b"\x30\x82" + bytes(range(200))
+        for name in ("CA", "CERT"):
+            for spelling in self.spellings(name):
+                _, final = self.load(der, spelling, "stream_start", "stream_chunk")
+                self.assertEqual(final, f"OK {name} stored ({len(der)} bytes)", spelling)
+        crc = f"{board.crc16_ccitt_false(der):04x}"
+        for written in (crc.upper(), crc.lower()):
+            _, final = self.load(der, "cert", crc=written)
+            self.assertEqual(final, f"OK CERT stored ({len(der)} bytes)", written)
+        self.assertEqual(self.console.exchange(f"STREAM_START|{len(der)}|1|{crc}|cat")[1],
+                         "ERR a stream is a CA or a CERT")
+
+    def test_base64_is_kept_exactly(self):
+        der = b"\x30\x82" + bytes(range(200))
+        encoded = base64.b64encode(der).decode()
+        self.assertNotEqual(encoded, encoded.swapcase())
+        self.assertEqual(self.console.exchange(f"STREAM_START|{len(der)}|1|{board.crc16_ccitt_false(der):04x}|CERT")[1],
+                         "OK ready for 1 chunks")
+        self.assertRegex(self.console.exchange(f"STREAM_CHUNK|0|{encoded.swapcase()}")[1], "^ERR ")
+
+    def test_an_id_is_kept_exactly(self):
+        self.assertEqual(self.console.exchange("set_id|AbC9xY")[1], "OK id set to AbC9xY")
+        self.assertEqual(self.console.get_id()[0], "AbC9xY")
+        self.assertEqual(self.console.status()["id"], "AbC9xY")
+
+    def test_a_network_name_is_kept_exactly(self):
+        for name in ("MixedCase Net", "lowercase", "UPPERCASE", "wpa2_psk", "ON"):
+            self.assertEqual(self.console.exchange(f"wifi|{name}|{PASSWORD}")[1], f"OK saved, connecting to {name}")
+            self.assertEqual(self.console.status()["wifi network"], name)
+
+    def test_a_password_is_kept_exactly(self):
+        # In the simulator, a password that starts with "wrong" is wrong, and only that spelling is.
+        for password, word in (("wrong-password", "failed"), ("WRONG-password", "connected"),
+                               ("Wrong-password", "connected")):
+            self.link.keep, self.link.kept = True, b""
+            self.console.run(f"wifi|net|{password}")
+            deadline = time.time() + 3
+            while time.time() < deadline and f"[WIFI] {word}".encode() not in self.link.kept:
+                self.console.handshake()
+                time.sleep(0.05)
+            self.assertIn(f"[WIFI] {word}".encode(), self.link.kept, password)
+            self.assertNotIn(password.encode(), self.link.kept)
+
+    def test_an_endpoint_and_a_url_are_kept_exactly(self):
+        endpoint = "Example-ATS.iot.US-East-1.amazonaws.com"
+        prefix = "https://Bucket.S3.amazonaws.com/FirmWare/"
+        self.assertEqual(self.console.exchange(f"cloud|{endpoint}|{prefix}", 6)[1], "OK cloud settings saved")
+        status = self.console.status()
+        self.assertEqual(status["endpoint"], endpoint)
+        self.assertEqual(status["download from"], prefix)
+        # Its scheme is compared exactly, as the board's download code would need it.
+        self.assertRegex(self.console.exchange(f"CLOUD|{endpoint}|HTTPS://b.example.com/fw/")[1],
+                         "^ERR endpoint must be")
+
+
+@unittest.skipUnless(SIMULATOR.exists(), "run `make -C firmware/tests/host` first")
 class BenchAgainstSimulatorTest(SimulatedBoard, unittest.TestCase):
     """The hardware script's checks, on the console's real code. What only real hardware
     can show, this cannot show; what the script looks for, and how it reads it, it can."""

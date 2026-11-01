@@ -99,8 +99,9 @@ thread halts the board if there is none, with no output and before the watchdog 
 link fails if an image ever has none. A GitHub Release is not such a build yet: it has the console
 in it, as [`docs/ci.md`](../docs/ci.md#how-a-real-release-is-made) says.
 
-Commands look like `COMMAND|arg1|arg2`. Command names can be in any case, and arguments
-keep theirs. CR, LF and CRLF each end a line. Blank lines and leading whitespace are
+Commands look like `COMMAND|arg1|arg2`. Command names and keywords can be in any case, and
+what a person chooses stays exactly as typed: [the table below](#what-the-case-of-a-word-means) says
+which is which. CR, LF and CRLF each end a line. Blank lines and leading whitespace are
 ignored, backspace and DEL work, and typed characters are echoed unless `ECHO|OFF` was
 sent. The last argument can contain `|`. A line over 384 bytes is discarded whole, and so is
 one that lost bytes on the way in or holds a control character: it gets one `ERR`, and the
@@ -114,7 +115,7 @@ all start with `[BOOT]`.
 
 | Command | | What it does |
 | --- | --- | --- |
-| `HELP` or `?` | * | list the commands, grouped, with the firmware version |
+| `HELP` or `?` | * | a table of the commands, grouped, with the firmware version: see below |
 | `INIT\|<id>` | * | first-time setup: erase everything, store the ID, restart (see below) |
 | `GET_ID` | * | `OK <id>\|<firmware version>`, with an empty ID if there is none |
 | `THING` | * | `OK <thing name>`: the board's name in AWS IoT, from its SoC |
@@ -138,7 +139,89 @@ all start with `[BOOT]`.
 | `BUTTON\|<1 or 2>` | | a short press of a button, by the path of the real one, for a test bench |
 | `TEST_WIFI_DEAD` | | only in a test image built with `APP_TEST_FAULT_WIFI_DEAD`, and every other image answers `ERR unknown command`: stops the Wi-Fi chip's power, once, until a restart. Refused during an update or a trial, and on an image with no trailer |
 
-Only the commands marked * work in factory mode. The rules that apply to values:
+Only the commands marked * work in factory mode. `HELP` comes from the same table as the commands
+themselves, and within 80 columns. A row that is too long for its column goes on under it, and a line
+breaks after a blank or a `|`. Its lines start with the mark, a blank or a `+`, so nothing in it can be
+taken for a final line or a `[TAG]`:
+
+```text
+Cranium console, firmware 1.7.1+0
+Send COMMAND|arg|arg, one per line. Names and keywords work in any case;
+IDs, network names, passwords, URLs and data stay exactly as typed.
+* also works in factory mode. The rest needs INIT first.
+  COMMAND           ARGUMENTS                WHAT IT DOES
++-- Device --------------------------------------------------------------------+
+* HELP or ?                                  list the commands
+* INIT              <id>                     first-time setup: erase everything,
+                                             store the id, restart
+* GET_ID                                     reply with <id>|<firmware version>
+* THING                                      reply with the AWS IoT thing name
+* ECHO              <ON or OFF>              send typed characters back, or not
+* REBOOT                                     restart
+* ENTER_BOOTLOADER                           restart; catch the bootloader with
+                                             tools/recover.py --console
+  SET_ID            <id>                     change the id, keep everything else
+  RESET_CONFIG                               clear the cloud settings only; keep
+                                             id, wifi, certificates, key
+  FACTORY_RESET                              erase everything, also the id, and
+                                             restart in factory mode
++-- Wi-Fi ---------------------------------------------------------------------+
+  WIFI              <ssid>|<password>        save a WPA2 network and join it
+  WIFI_SEC          <ssid>|<WPA2_PSK or      the same, with the security mode
+                    WPA2_PSK_SHA256 or       named
+                    WPA3_SAE>|<password>
+  CLEAR_WIFI                                 erase the network and disconnect
+  NET                                        show connection state, ssid, ip,
+                                             rssi and mac
++-- Cloud ---------------------------------------------------------------------+
+  CLOUD             <endpoint>|              save the AWS IoT endpoint and the
+                    <download-url-prefix>    download prefix; empty clears
+  KEYGEN            [REPLACE]                create the device key, print a
+                                             signing request
++-- Status --------------------------------------------------------------------+
+  STATS                                      show state, id, firmware, wifi,
+                                             uptime, memory, last reset
+  STATUS            [<device or wifi or      print the configuration, or one
+                    cloud or certs or        section of it
+                    update>]
++-- Loading a certificate -----------------------------------------------------+
+  STREAM_START      <total_bytes>|           start loading a certificate
+                    <chunk_count>|
+                    <crc16_hex>|<CA or
+                    CERT>
+  STREAM_CHUNK      <index>|<base64>         the next piece of it
+  STREAM_STATUS                              show how far it is
+  STREAM_CANCEL                              give up on it
++-- Test bench ----------------------------------------------------------------+
+  BUTTON            <1 or 2>                 act as if the button was pressed
++------------------------------------------------------------------------------+
+OK
+```
+
+### What the case of a word means
+
+A word from the console's own table can be in any case. What a person chooses stays exactly as typed:
+
+| Command | Any case | Exactly as typed |
+| --- | --- | --- |
+| The name of every command | `HELP`, `help`, `Help`, and `?` | |
+| `ECHO` | `ON`, `OFF` | |
+| `STATUS` | `device`, `wifi`, `cloud`, `certs`, `update` | |
+| `WIFI` | | the SSID, the password |
+| `WIFI_SEC` | `WPA2_PSK`, `WPA2_PSK_SHA256`, `WPA3_SAE` | the SSID, the password |
+| `INIT`, `SET_ID` | | the ID |
+| `CLOUD` | | the endpoint, the download prefix, also its `https://` |
+| `KEYGEN` | `REPLACE` | |
+| `STREAM_START` | `CA`, `CERT`, and the letters of the CRC, which is a number | |
+| `STREAM_CHUNK` | | the base64 |
+| `BUTTON` | it takes `1` or `2`, which have no case | |
+
+The refusals do not depend on the case either: `factory_reset` is refused during an update as
+`FACTORY_RESET` is, and a word that is not on the list stays wrong in any case. The console page in
+`cloud/web` goes by the same rules: `init` and `factory_reset` need their forms there however they are
+typed, and `echo|on` is refused like `ECHO|ON`.
+
+The rules that apply to values:
 
 * The ID is 1-32 letters or digits. It is a name for people, and it is not the cloud
   identity: the AWS IoT thing name stays `cranium-<SoC id>`, which is the certificate's
@@ -220,6 +303,7 @@ nothing: one failed read must not take it off the network.
 | `tests/hil/golden_bench.py` | Hardware tests of the golden image, with no Wi-Fi but for G15 and G16. `golden_bench.py plan` lists them and touches nothing, and `golden_bench.py images` builds the fault images they upload. |
 | `tests/hil/build_image.sh` | Build a signed test image from a scratch copy, for example with `-Dapp_CONFIG_APP_TEST_FAULT_INIT_POWER_LOSS=y`, the image that loses power in the middle of `INIT`. |
 | `tests/hil/fault_check.py` | Check built images, reading files only: those a release could come from have none of `APP_TEST_FAULT_WIFI_DEAD` in their configuration or their bytes, the fault image has all of it, and all of them have the same network event queue. |
+| `tests/host/mutate_join.py` | The same for the order of a join in `src/join_policy.c`, with `tests/host/mutate_stuck.py` as its engine. |
 | `tests/host/mutate_stuck.py` | Change the policy in `src/stuck_policy.c` in small ways, one at a time, and check that its tests notice each one. It needs a C compiler and no board, and touches no file in the tree. |
 
 ## What the LEDs show
@@ -365,13 +449,39 @@ does not get there, the console says `no answer` or `request refused` every 30 s
 This has only run on a host, against a fake of those locks: nothing has run with a chip that does not come up,
 and `chip-dead` does not cover it, because the driver powers the chip up at init.
 
-**What it does not do.** It does not change the order of the disconnect and the connect when `WIFI` is sent
-while associated. That preceded the hang, but one incident does not prove it, and it could not be tested
-without the loop that forces it. It does not use `SUPPLICANT_EVENT_SCAN_FAILED`: `src/stuck_policy.h` says why.
-The driver's recovery stays as it was, and its settings too.
+**The order of a join.** The chip has hung twice with the same shape: a connect request within a second or so of
+the link changing. On 1.5.0 it was `WIFI` within a second of `[WIFI] connected`, and on 1.7.0 `WIFI` within a
+second of the disconnect of `CLEAR_WIFI`, where the chip stopped answering 10 s later and `wifi_silent` restarted
+the board at its limit, after which the chip answered. From firmware 1.7.1 a join that is asked for goes in order.
+The decisions are in `src/join_policy.c`, and `net_tick()` holds a join from the main loop's tick, so nothing
+waits for it:
 
-**What has been tested.** The decisions are in `src/stuck_policy.c`, with no Zephyr in it. `test_stuck_policy.c`
-tests each one, and `tests/host/mutate_stuck.py` makes small changes to it and checks that those tests notice.
+1. If the board is associated, as far as the stack has said, or its link is up, it is asked to disconnect, once.
+   Then the join waits for the stack to report that, for up to 10 s. The request itself can take up to 5 s of the
+   main loop, as it always has in `CLEAR_WIFI`: that wait is inside hostap.
+2. A disconnect that has not been reported by then counts as done: the board says `[WIFI] disconnected`, and
+   `wifi_silent` starts from there. If the stack reports it later, that changes nothing.
+3. No connect request goes out within 5 s of the last change of the link, or of the last request to disconnect or
+   to connect. A failed result on a link that was not associated, such as a wrong password, is no change of the link,
+   so the right password goes at once.
+4. A later request replaces one that is held, and does not start the wait over. A join reads what is stored when it
+   starts, so it uses the network stored last. If the network is erased in the meantime no join comes, and nothing
+   is said.
+
+A board that has been quiet joins at once, as the join at boot does. The `[WIFI]` line still comes after the `OK`.
+A join that is held is no answer: `wifi_silent` goes on counting while it is held, and a disconnect that the stack
+reports is no answer either. So the most a hold adds to `wifi_silent` is the 10 s in which the link still counts as
+up. Only a `WIFI` command takes a link that is up down: `net_tick()` does not, and `WIFI` is refused during an update.
+
+**This has not been shown to fix the hang.** Its cause is not known. This takes away the timing that both hangs had,
+and a run on a board has to show the rest: it has run only on a host, against a fake network stack.
+
+**What it does not do.** It does not use `SUPPLICANT_EVENT_SCAN_FAILED`: `src/stuck_policy.h` says why. The driver's
+recovery stays as it was, and its settings too.
+
+**What has been tested.** The decisions are in `src/stuck_policy.c` and `src/join_policy.c`, with no Zephyr in
+them. `test_stuck_policy.c` and `test_join_policy.c` test each one, and `tests/host/mutate_stuck.py` and
+`mutate_join.py` make small changes to them and check that those tests notice.
 `test_app.c` runs the real `main.c`, `net.c` and `stuck.c` on a fake network stack. **None of this has run on a
 board.** Neither has a wrong WPA3 password, which is the first thing to try for a refused join. For the rest there
 is the scenario below, which takes the hotspot and AWS, and drops the board off the network once:

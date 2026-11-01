@@ -22,7 +22,7 @@
 // ota.job; update IN_PROGRESS step=downloading; report "downloading" with progress;
 // report "verifying"; update IN_PROGRESS step=rebooting; report "rebooting", then
 // "testing" with the new fw.version; update SUCCEEDED running=<version>; report "idle".
-// Every report also counts as a sign of life: a board is online for 150 s after one.
+// Every report is also a heartbeat: a board is online for 90 s after one.
 //
 // Time comes from the `now` function passed in (the system clock by default). Jobs
 // behave as in AWS IoT: an execution in progress times out after the job's timeout, a

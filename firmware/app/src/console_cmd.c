@@ -28,10 +28,21 @@
 #define MAX_ARGS        4
 /* An unknown command is shown by name, which is not worth more than this. */
 #define NAME_SHOWN_MAX  32
-#define USAGE_COLUMN    30
 #define KEY_VALUE       "%-14s %s"
 #define BOX_RULE        "+----------------------------------------------+"
 #define BOX_WIDTH       44
+
+/*
+ * HELP's table: a mark and three columns. 80 in all, which is what a plain terminal has, and what
+ * the transcript of the web page's console shows without scrolling on a screen 1280 wide.
+ */
+#define HELP_COMMAND_AT    2
+#define HELP_COMMAND_WIDTH 16
+#define HELP_ARGS_AT       (HELP_COMMAND_AT + HELP_COMMAND_WIDTH + 2)
+#define HELP_ARGS_WIDTH    23
+#define HELP_WORDS_AT      (HELP_ARGS_AT + HELP_ARGS_WIDTH + 2)
+#define HELP_WORDS_WIDTH   35
+#define HELP_WIDTH         (HELP_WORDS_AT + HELP_WORDS_WIDTH)
 
 /* What an on_main_guarded() function was not run for. No API here returns this. */
 #define REFUSED_BY_UPDATE (-EINPROGRESS)
@@ -1152,9 +1163,8 @@ static const struct console_command commands[] = {
 
 	{ "STATS", NULL, "STATS", "show state, id, firmware, wifi, uptime, memory, last reset",
 	  SECTION_STATUS, false, 0, 0, cmd_stats },
-	{ "STATUS", NULL, "STATUS[|<section>]",
-	  "print the configuration: device, wifi, cloud, certs or update", SECTION_STATUS, false, 0, 1,
-	  cmd_status },
+	{ "STATUS", NULL, "STATUS[|<device or wifi or cloud or certs or update>]",
+	  "print the configuration, or one section of it", SECTION_STATUS, false, 0, 1, cmd_status },
 
 	{ "STREAM_START", NULL, "STREAM_START|<total_bytes>|<chunk_count>|<crc16_hex>|<CA or CERT>",
 	  "start loading a certificate", SECTION_STREAM, false, 4, 4, cmd_stream_start },
@@ -1187,31 +1197,109 @@ static const struct console_command *find_command(const char *name)
 	return NULL;
 }
 
+/* One line's worth of a cell, written into the line at a column. *end follows the last that has text. */
+static void help_cell(char *line, size_t column, size_t width, const char **text, size_t *end)
+{
+	const char *from = *text;
+	size_t shown = console_wrap(text, width);
+
+	memcpy(line + column, from, shown);
+
+	if (shown > 0) {
+		*end = column + shown;
+	}
+}
+
+/*
+ * The arguments, as what the usage says after the command's name. Where they can be left out, the
+ * brackets go around them: "[|REPLACE]" reads better without its bar.
+ */
+static const char *help_arguments(const struct console_command *command, char *buffer, size_t size)
+{
+	const char *rest = command->usage + strlen(command->name);
+
+	if (rest[0] == '[') {
+		(void)snprintk(buffer, size, "[%s", rest + 2);
+		return buffer;
+	}
+
+	return rest[0] == '|' ? rest + 1 : rest;
+}
+
+/* A row, on as many lines as its longest cell takes. Only the first has the mark. */
+static void help_row(const struct console_command *command)
+{
+	char name[HELP_COMMAND_WIDTH + 1];
+	char optional[64];
+	const char *who = name;
+	const char *arguments = help_arguments(command, optional, sizeof(optional));
+	const char *words = command->description;
+	char mark = command->in_factory ? '*' : ' ';
+
+	(void)snprintk(name, sizeof(name), "%s%s%s", command->name,
+		       command->alias != NULL ? " or " : "",
+		       command->alias != NULL ? command->alias : "");
+
+	do {
+		char line[HELP_WIDTH + 1];
+		size_t end = 0;
+
+		memset(line, ' ', sizeof(line));
+		line[0] = mark;
+		mark = ' ';
+
+		help_cell(line, HELP_COMMAND_AT, HELP_COMMAND_WIDTH, &who, &end);
+		help_cell(line, HELP_ARGS_AT, HELP_ARGS_WIDTH, &arguments, &end);
+		help_cell(line, HELP_WORDS_AT, HELP_WORDS_WIDTH, &words, &end);
+		line[end] = '\0';
+		console_reply_line("%s", line);
+	} while (*who != '\0' || *arguments != '\0' || *words != '\0');
+}
+
+/* A line of plain ASCII as wide as the table, with a title in it or not, like the status box's. */
+static void help_rule(const char *title)
+{
+	char line[HELP_WIDTH + 1];
+
+	memset(line, '-', HELP_WIDTH);
+	line[0] = '+';
+	line[HELP_WIDTH - 1] = '+';
+	line[HELP_WIDTH] = '\0';
+
+	if (title[0] != '\0') {
+		size_t length = strlen(title);
+
+		line[3] = ' ';
+		memcpy(line + 4, title, length);
+		line[4 + length] = ' ';
+	}
+
+	console_reply_line("%s", line);
+}
+
 static void cmd_help(int argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
 	console_reply_line("Cranium console, firmware %s", fw_version_running_string());
-	console_reply_line("Commands marked * also work in factory mode.");
+	console_reply_line("Send COMMAND|arg|arg, one per line. Names and keywords work in any case;");
+	console_reply_line("IDs, network names, passwords, URLs and data stay exactly as typed.");
+	console_reply_line("* also works in factory mode. The rest needs INIT first.");
+	console_reply_line("  %-*s  %-*s  %s", HELP_COMMAND_WIDTH, "COMMAND", HELP_ARGS_WIDTH,
+			   "ARGUMENTS", "WHAT IT DOES");
 
 	for (int section = 0; section < SECTION_COUNT; section++) {
-		console_reply_line("%s:", section_names[section]);
+		help_rule(section_names[section]);
 
 		for (size_t i = 0; i < COMMAND_COUNT; i++) {
-			const struct console_command *command = &commands[i];
-
-			if ((int)command->section != section) {
-				continue;
+			if ((int)commands[i].section == section) {
+				help_row(&commands[i]);
 			}
-
-			console_reply_line("%c %-*s %s%s%s", command->in_factory ? '*' : ' ',
-					   USAGE_COLUMN, command->usage, command->description,
-					   command->alias != NULL ? ", also " : "",
-					   command->alias != NULL ? command->alias : "");
 		}
 	}
 
+	help_rule("");
 	reply_done();
 }
 

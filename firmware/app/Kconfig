@@ -20,9 +20,13 @@ config APP_DOWNLOAD_SEC_TAG
 	  loaded for downloads.
 
 config APP_SHADOW_INTERVAL_SECONDS
-	int "Seconds between periodic device shadow reports"
-	default 60
+	int "Seconds between heartbeats: the periodic device shadow reports"
+	default 30
 	range 10 3600
+	help
+	  The console calls a board online if AWS IoT received one of these within the last
+	  90 seconds (ONLINE_WINDOW_MS in cloud/api/src/lib/shadow.mjs). There is no second
+	  message for this and no last will: this report is the heartbeat.
 
 config APP_CLOUD_RETRY_SECONDS
 	int "Seconds to wait before the first retry of a failed cloud connection"

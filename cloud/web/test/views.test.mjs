@@ -520,6 +520,59 @@ test('the devices page shows a board that has an update waiting for it', async (
   assert.match(one(never, 'dd', 'Nothing reported').children[0].children[0].getAttribute('class'), /is-quiet/);
 });
 
+test('a board says what state it is in and when its last heartbeat arrived, in the same words on each page', async () => {
+  const rebooting = { state: 'rebooting', job: OFFERED, progress: 0, last: 'none', error: '' };
+  for (const [board, words, badge, title] of [
+    [device(WAITING, { lastSeen: ago(6) }), 'Online, heartbeat 6 s ago', 'Online', 'Last heartbeat 6 s ago'],
+    [device(WAITING, { lastSeen: ago(2) }), 'Online, heartbeat just now', 'Online', 'Last heartbeat just now'],
+    [device(WAITING, { lastSeen: ago(61) }), 'Online, heartbeat 1 min ago', 'Online', 'Last heartbeat 1 min ago'],
+    [device(WAITING, { online: false, lastSeen: ago(180) }), 'Offline, last heartbeat 3 min ago', 'Offline', /^Last heartbeat /],
+    [device(WAITING, { online: false, lastSeen: ago(7200) }), 'Offline, last heartbeat 2 h ago', 'Offline', /^Last heartbeat /],
+    [device(WAITING, { ota: rebooting, lastSeen: ago(20) }), 'Restarting, last heartbeat 20 s ago', 'Restarting', null],
+    // Restarting is only what a board said while it counts as online. After that it is offline.
+    [device(WAITING, { online: false, ota: rebooting, lastSeen: ago(200) }), 'Offline, last heartbeat 3 min ago', 'Offline', /^Last heartbeat /],
+  ]) {
+    const state = await consoleState({ ...WORLD, devices: [board], deployments: [] });
+    const overview = page(views.overviewView, state);
+    assert.equal(textOf(one(overview, 'span.board-line-note')), words);
+
+    const list = page(views.devicesView, state);
+    assert.equal(textOf(one(list, 'p.device-seen')), words);
+    const shown = one(one(list, 'header.device-head'), 'span.badge');
+    assert.equal(textOf(shown), badge);
+    if (title instanceof RegExp) assert.match(shown.getAttribute('title'), title);
+    else if (title) assert.equal(shown.getAttribute('title'), title);
+    else assert.equal(shown.hasAttribute('title'), false);
+
+    // The board's own page: the same line at its top, and a field of its own.
+    const own = page(views.deviceView, state, { thing: WAITING });
+    assert.equal(textOf(one(own, 'p.page-lede')), words);
+    assert.equal(textOf(one(one(own, 'div.fact', 'Heartbeat'), 'dd')), words.replace(/^.*heartbeat /, ''));
+    assert.equal(textOf(one(one(own, 'div.device-presence'), 'span.badge')), badge);
+  }
+});
+
+test('a board that has never had a heartbeat says so, and the list of devices keeps its columns', async () => {
+  const state = await consoleState({ ...WORLD, devices: [device(NEVER, { online: false, lastSeen: null, fw: null, ota: null, rssi: null, uptime: null })], deployments: [] });
+  assert.equal(textOf(one(page(views.overviewView, state), 'span.board-line-note')), 'Never connected');
+  const list = page(views.devicesView, state);
+  assert.equal(textOf(one(list, 'p.device-seen')), 'Has not reported to AWS IoT yet.');
+  assert.deepEqual(all(one(list, 'article.device'), 'dt').map(textOf), ['Firmware', 'Update', 'Signal', 'Uptime']);
+  const own = page(views.deviceView, state, { thing: NEVER });
+  assert.equal(textOf(one(one(own, 'div.fact', 'Heartbeat'), 'dd')), 'None yet');
+  assert.doesNotMatch(textOf(own), /heartbeat [\d]/i);
+});
+
+test('the page takes the API\'s word for whether a board is online, whatever the time of its heartbeat', async () => {
+  // The API knows the window. The page has only the flag, and a clock that may be wrong.
+  const old = await consoleState({ ...WORLD, devices: [device(WAITING, { lastSeen: ago(600) })], deployments: [] });
+  assert.equal(textOf(one(page(views.overviewView, old), 'span.board-line-note')), 'Online, heartbeat 10 min ago');
+  assert.equal(textOf(one(one(page(views.devicesView, old), 'header.device-head'), 'span.badge')), 'Online');
+  const fresh = await consoleState({ ...WORLD, devices: [device(WAITING, { online: false, lastSeen: ago(1) })], deployments: [] });
+  assert.equal(textOf(one(page(views.overviewView, fresh), 'span.board-line-note')), 'Offline, last heartbeat just now');
+  assert.equal(textOf(one(one(page(views.devicesView, fresh), 'header.device-head'), 'span.badge')), 'Offline');
+});
+
 test('the newest release is the newest one that can be deployed, on both cards that say so', async () => {
   const overview = page(views.overviewView, await consoleState(WORLD));
   const card = all(overview, 'section.card').find((item) => textOf(one(item, 'h2')) === 'Newest release');

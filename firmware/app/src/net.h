@@ -6,7 +6,7 @@
  * accepted: open, WEP and WPA (TKIP) networks are refused both when credentials are
  * stored and after association.
  *
- * Joining never blocks anyone: net_connect() starts it, and the result arrives later as
+ * Joining never blocks anyone: net_connect() asks for it, and the result arrives later as
  * APP_EVENT_NET_UP or APP_EVENT_NET_JOIN_FAILED. Each one ends up as a [WIFI] line on the
  * console. Passwords go into storage and nowhere else.
  */
@@ -45,12 +45,17 @@ struct net_status {
 int net_init(void);
 
 /*
- * Start joining a stored network. Returns -ENOENT when none is stored, and -EAGAIN when the Wi-Fi
- * stack is not ready yet, in which case the join starts by itself when it is.
+ * Ask to join a stored network, in the order that join_policy.h gives: a join on a board that is
+ * associated, or whose link has just changed, is held by net_tick() until it may start. Returns
+ * -ENOENT when none is stored, and -EAGAIN when the join has not started: it is being held, or the
+ * Wi-Fi stack is not ready yet, and either way it starts by itself when it can.
  */
 int net_connect(void);
 
-/* Called once a second: retries the connection when it has been down for a while. */
+/*
+ * Called once a second: starts a join that was being held, and retries the connection when it has
+ * been down for a while.
+ */
 void net_tick(void);
 
 /* Say on the console what happened. Called by the main loop for the events above. */

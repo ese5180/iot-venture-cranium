@@ -98,7 +98,7 @@ const FORM_BODY = /^application\/x-www-form-urlencoded\b/i;
 const CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 const VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
 
-// The firmware reports at least once a minute; a board counts as online for 150 s.
+// The firmware's heartbeat comes every 30 s, and a board counts as online for 90 s after one.
 const HEARTBEAT_MS = 30_000;
 // A board left to itself (--live): ten percent of the download every two seconds,
 // and twelve seconds for the restart into the new firmware.
@@ -576,7 +576,7 @@ function createBoard(fake, thing, version, say) {
       report({ uptime });
     },
 
-    /** The report a board sends when nothing has changed, at least once a minute. */
+    /** The report a board sends when nothing has changed: its heartbeat. */
     heartbeat() {
       if (board.powered) report();
     },

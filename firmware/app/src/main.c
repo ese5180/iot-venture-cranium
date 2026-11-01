@@ -52,6 +52,7 @@ K_MSGQ_DEFINE(event_queue, sizeof(struct app_event), 32, 4);
 
 static int cloud_retry_in = -1;
 static int cloud_backoff = CONFIG_APP_CLOUD_RETRY_SECONDS;
+/* Since the last report to the shadow. A report that nothing asked for is the board's heartbeat. */
 static int seconds_since_report;
 /* A tick is in the queue. A main loop that is held up must not come back to a queue full of them. */
 static atomic_t tick_queued;
@@ -127,7 +128,11 @@ static void update_ui(void)
 	}
 }
 
-/* Publish what the console shows for this device. Nothing here is secret. */
+/*
+ * Publish what the console shows for this device. Nothing here is secret. AWS IoT stamps the time
+ * that it gets the uptime, which is what the console calls the last heartbeat, and there is no other
+ * message for that.
+ */
 static void publish_report(void)
 {
 	char job[OTA_JOB_ID_MAX + 3] = "null";

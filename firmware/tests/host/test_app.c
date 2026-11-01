@@ -9,7 +9,7 @@
 
 #define CONFIG_WIFI_CREDENTIALS_MAX_ENTRIES 2
 #define CONFIG_APP_CLOUD_RETRY_SECONDS      30
-#define CONFIG_APP_SHADOW_INTERVAL_SECONDS  60
+#define CONFIG_APP_SHADOW_INTERVAL_SECONDS  30
 
 #include <errno.h>
 #include <setjmp.h>
@@ -91,6 +91,13 @@ static struct {
 	int connect_requests;
 	int disconnect_requests;
 	int connect_result;
+	/* What a join would use: what is stored by then. See connect_requests. */
+	char stored_ssid[33];
+	char joined_ssid[33];
+	/* hostap waits up to 5 s for the disconnect, inside the request. */
+	int64_t disconnect_takes_ms;
+	int shadow_reports;
+	bool ota_changed;
 	int up_requests;
 	int up_result;
 	/*
@@ -223,6 +230,7 @@ int net_mgmt(enum net_request request, struct net_if *iface, void *data, size_t 
 
 	if (request == NET_REQUEST_WIFI_DISCONNECT) {
 		board.disconnect_requests++;
+		uptime_ms += board.disconnect_takes_ms;
 	} else {
 		struct wifi_iface_status *status = data;
 
@@ -252,6 +260,7 @@ int conn_mgr_all_if_connect(bool skip_ignored)
 	ARG_UNUSED(skip_ignored);
 	CHECK(!board.conn_mgr_thread_waits);
 	board.connect_requests++;
+	strcpy(board.joined_ssid, board.stored_ssid);
 	return board.connect_result;
 }
 
@@ -304,6 +313,7 @@ void wifi_credentials_for_each_ssid(void (*callback)(void *arg, const char *ssid
 int wifi_credentials_delete_all(void)
 {
 	board.network_stored = false;
+	board.stored_ssid[0] = '\0';
 	return 0;
 }
 
@@ -313,8 +323,6 @@ int wifi_credentials_set_personal(const char *ssid, size_t ssid_length,
 				  size_t password_length, uint32_t flags, uint8_t channel,
 				  uint32_t timeout)
 {
-	ARG_UNUSED(ssid);
-	ARG_UNUSED(ssid_length);
 	ARG_UNUSED(type);
 	ARG_UNUSED(bssid);
 	ARG_UNUSED(bssid_length);
@@ -324,6 +332,7 @@ int wifi_credentials_set_personal(const char *ssid, size_t ssid_length,
 	ARG_UNUSED(channel);
 	ARG_UNUSED(timeout);
 	board.network_stored = true;
+	snprintf(board.stored_ssid, sizeof(board.stored_ssid), "%.*s", (int)ssid_length, ssid);
 	return 0;
 }
 
@@ -516,6 +525,7 @@ bool cloud_is_connected(void)
 int cloud_shadow_report(const char *reported_json)
 {
 	ARG_UNUSED(reported_json);
+	board.shadow_reports++;
 	return 0;
 }
 
@@ -645,7 +655,10 @@ const char *ota_last_error(void)
 
 bool ota_take_changed(void)
 {
-	return false;
+	bool changed = board.ota_changed;
+
+	board.ota_changed = false;
+	return changed;
 }
 
 uint32_t ota_stuck_progress(void)
@@ -677,6 +690,10 @@ static void run_main(enum device_boot result, bool factory, bool network, bool s
 	atomic_set(&tick_queued, 0);
 	atomic_set(&stack_ready, 0);
 	atomic_set(&join_waiting, 0);
+	atomic_set(&associated, 0);
+	atomic_set(&association_news, 0);
+	atomic_set(&link_changed_at, 0);
+	memset(&join, 0, sizeof(join));
 	seconds_down = 0;
 	cloud_retry_in = -1;
 	cloud_backoff = CONFIG_APP_CLOUD_RETRY_SECONDS;
@@ -859,12 +876,14 @@ static void test_a_failed_join_is_reported_once_per_attempt(void)
 	wifi_result(0);
 	CHECK_TEXT(board.console, "");
 
-	/* A request the stack refused outright. */
+	/* A request the stack refused outright. Not at once: the one at boot was just now. */
 	boot(DEVICE_BOOT_OPERATING, false, true, true);
 	forget_console();
 	board.connect_result = -EIO;
 	(void)net_connect();
 	run_loop();
+	CHECK_TEXT(board.console, "");
+	ticks(JOIN_QUIET_MS / MSEC_PER_SEC);
 	CHECK_TEXT(board.console, "[WIFI] failed reason=request refused\n");
 
 	/* A network that talked us down to a security mode that is not allowed gets left. */
@@ -977,8 +996,9 @@ static void test_the_board_joins_at_boot_whenever_a_network_is_stored(void)
 	boot(DEVICE_BOOT_OPERATING, false, false, true);
 	CHECK(board.connect_requests == 0);
 
-	/* The WIFI command's event. */
+	/* The WIFI command's event, on a board where nothing has happened for a while. */
 	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(JOIN_QUIET_MS / MSEC_PER_SEC);
 	CHECK(app_event_post_simple(APP_EVENT_NET_JOIN) == 0);
 	run_loop();
 	CHECK(board.connect_requests == 2);
@@ -1270,6 +1290,7 @@ static void test_a_chip_that_does_not_come_up_leaves_the_main_loop_running(void)
 	CHECK(board.connect_requests == 1);
 
 	/* Somebody else just got it up: that is not a failure. */
+	ticks(JOIN_QUIET_MS / MSEC_PER_SEC);
 	board.up_result = -EALREADY;
 	CHECK(net_connect() == 0);
 	CHECK(board.connect_requests == 2);
@@ -1320,6 +1341,7 @@ static void test_a_healthy_chip_joins_when_the_supplicant_is_ready(void)
 	CHECK(event_queue.used == 1);
 	run_loop();
 	CHECK(board.connect_requests == 1);
+	ticks(JOIN_QUIET_MS / MSEC_PER_SEC);
 	CHECK(net_connect() == 0);
 	CHECK(board.connect_requests == 2);
 	CHECK_TEXT(board.console, "");
@@ -1643,6 +1665,17 @@ static void test_new_settings_give_the_cloud_its_full_wait(void)
 		ticks_quietly(NO_CLOUD - 1);
 		CHECK(app_event_post_simple(events[i]) == 0);
 		run_loop();
+
+		/* A network that is new takes the link down first, and then it comes back. */
+		if (events[i] == APP_EVENT_NET_JOIN) {
+			raise_event(NET_EVENT_WIFI_DISCONNECT_RESULT, NULL);
+			link_goes_down();
+			ticks_quietly(JOIN_QUIET_MS / MSEC_PER_SEC);
+			CHECK(board.connect_requests == 2);
+			wifi_result(0);
+			link_comes_up();
+		}
+
 		ticks_quietly(NO_CLOUD - 1);
 		CHECK(board.reboots == 0);
 		ticks(1);
@@ -1789,6 +1822,594 @@ static void test_a_held_up_main_loop_does_not_hold_up_the_timers(void)
 	CHECK(board.reboots == 1);
 }
 
+/* ---- a join in order, see join_policy.h ---------------------------------------------- */
+
+#define QUIET       ((int)(JOIN_QUIET_MS / MSEC_PER_SEC))
+#define LEAVE_LIMIT ((int)(JOIN_LEAVE_LIMIT_MS / MSEC_PER_SEC))
+
+/* A board that has been on its network for a while. */
+static void board_on_its_network(void)
+{
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	wifi_result(0);
+	link_comes_up();
+	ticks(20);
+	forget_console();
+	CHECK(net_is_up());
+	CHECK(board.connect_requests == 1);
+	CHECK(board.disconnect_requests == 0);
+}
+
+/* What the WIFI command does after its reply, with the network that it has stored. */
+static void wifi_command(const char *ssid)
+{
+	CHECK(net_credentials_set(ssid, strlen(ssid), NET_SECURITY_WPA2_PSK, "password1", 9) == 0);
+	CHECK(app_event_post_simple(APP_EVENT_NET_JOIN) == 0);
+	run_loop();
+}
+
+static void disconnect_reported(int status)
+{
+	const struct wifi_status info = { .status = status };
+
+	raise_event(NET_EVENT_WIFI_DISCONNECT_COMPLETE, &info);
+	run_loop();
+}
+
+static void test_a_join_on_a_link_that_is_up_waits_for_the_link_to_go(void)
+{
+	/* Each way that the stack says so: see on_wifi_event(). */
+	for (int way = 0; way < 4; way++) {
+		board_on_its_network();
+		wifi_command("Second");
+
+		/* It is asked to leave, and nothing else is asked. Nobody has said anything yet. */
+		CHECK(board.disconnect_requests == 1);
+		CHECK(board.connect_requests == 1);
+		CHECK(net_is_up());
+		CHECK_TEXT(board.console, "");
+
+		/* It takes its time. It gets asked once, also by a second WIFI. */
+		ticks(3);
+		wifi_command("Second");
+		ticks(1);
+		CHECK(board.disconnect_requests == 1);
+		CHECK(board.connect_requests == 1);
+
+		switch (way) {
+		case 0:
+			raise_event(NET_EVENT_WIFI_DISCONNECT_RESULT, NULL);
+			link_goes_down();
+			break;
+		case 1:
+			link_goes_down();
+			disconnect_reported(0);
+			break;
+		case 2:
+			disconnect_reported(0);
+			link_goes_down();
+			break;
+		default:
+			/* It was not as far as a link that was complete, as hostap sees it. */
+			wifi_result(WIFI_STATUS_CONN_FAIL);
+			link_goes_down();
+			forget_console();
+			break;
+		}
+
+		/* 5 s from there, to the second. */
+		ticks(QUIET - 1);
+		CHECK(board.connect_requests == 1);
+		ticks(1);
+		CHECK(board.connect_requests == 2);
+		CHECK_TEXT(board.joined_ssid, "Second");
+
+		/* That was the join: no more of them, and no more leaving. */
+		wifi_result(0);
+		link_comes_up();
+		ticks(RETRY_SECONDS * 2);
+		CHECK(board.connect_requests == 2);
+		CHECK(board.disconnect_requests == 1);
+		CHECK(strstr(board.console, "[WIFI] connected") != NULL);
+		CHECK(board.reboots == 0);
+	}
+}
+
+/* The first hang: a WIFI command within a second of [WIFI] connected. */
+static void test_a_join_within_a_second_of_connecting_is_held(void)
+{
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	wifi_result(0);
+	link_comes_up();
+	forget_console();
+
+	wifi_command("Second");
+	CHECK(board.connect_requests == 1);
+	CHECK(board.disconnect_requests == 1);
+
+	/* The link goes 4 seconds later, and only then does the wait begin. */
+	ticks(4);
+	raise_event(NET_EVENT_WIFI_DISCONNECT_RESULT, NULL);
+	link_goes_down();
+	CHECK_TEXT(board.console, "[WIFI] disconnected\n");
+	ticks(QUIET - 1);
+	CHECK(board.connect_requests == 1);
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+	CHECK_TEXT(board.joined_ssid, "Second");
+}
+
+/* The second hang: a WIFI command within a second of the disconnect of CLEAR_WIFI. */
+static void test_a_join_within_a_second_of_clear_wifi_is_held(void)
+{
+	/* The stack reports its disconnect after the second WIFI. */
+	board_on_its_network();
+	CHECK(net_credentials_clear() == 0);
+	CHECK(board.disconnect_requests == 1);
+	CHECK(!net_has_credentials());
+	ticks(1);
+	wifi_command("Second");
+	CHECK(board.connect_requests == 1);
+	CHECK(board.disconnect_requests == 1);
+	ticks(1);
+	disconnect_reported(0);
+	link_goes_down();
+	ticks(QUIET - 1);
+	CHECK(board.connect_requests == 1);
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+	CHECK_TEXT(board.joined_ssid, "Second");
+	CHECK(board.disconnect_requests == 1);
+
+	/* The stack reports it first, within the second. The wait counts from the report. */
+	board_on_its_network();
+	CHECK(net_credentials_clear() == 0);
+	disconnect_reported(0);
+	link_goes_down();
+	ticks(1);
+	wifi_command("Second");
+	CHECK(board.connect_requests == 1);
+	ticks(QUIET - 2);
+	CHECK(board.connect_requests == 1);
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+	CHECK(board.disconnect_requests == 1);
+
+	/* A board that was not on any network: the request itself starts the wait. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	CHECK(net_credentials_clear() == 0);
+	ticks(1);
+	wifi_command("Second");
+	CHECK(board.connect_requests == 1);
+	ticks(QUIET - 2);
+	CHECK(board.connect_requests == 1);
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+
+	/* Nothing stored after it: no join, whatever the stack says, and nothing more is said. */
+	board_on_its_network();
+	CHECK(net_credentials_clear() == 0);
+	disconnect_reported(0);
+	link_goes_down();
+	CHECK_TEXT(board.console, "[WIFI] disconnected\n");
+	forget_console();
+	ticks(RETRY_SECONDS * 2);
+	CHECK(board.connect_requests == 1);
+	CHECK(board.disconnect_requests == 1);
+	CHECK_TEXT(board.console, "");
+
+	/* Its disconnect never reports. It does not go on waiting, and it does not join. */
+	board_on_its_network();
+	CHECK(net_credentials_clear() == 0);
+	ticks(LEAVE_LIMIT - 1);
+	CHECK(net_is_up());
+	CHECK_TEXT(board.console, "");
+	ticks(1);
+	CHECK(!net_is_up());
+	CHECK_TEXT(board.console, "[WIFI] disconnected\n");
+	ticks(RETRY_SECONDS * 2);
+	CHECK(board.connect_requests == 1);
+	CHECK(board.disconnect_requests == 1);
+}
+
+static void test_a_disconnect_that_never_reports_on_the_main_loop(void)
+{
+	/* The chip has hung while associated. The timers have nothing to go on until the link goes. */
+	board_on_its_network();
+	wifi_command("Second");
+	ticks(LEAVE_LIMIT - 1);
+	CHECK(net_is_up());
+	CHECK(board.connect_requests == 1);
+	CHECK(board.disconnect_requests == 1);
+	CHECK_TEXT(board.console, "");
+
+	/* At the limit it takes the link as gone, says so once, and then it joins. */
+	ticks(1);
+	CHECK(!net_is_up());
+	CHECK_TEXT(board.console, "[WIFI] disconnected\n");
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+	CHECK_TEXT(board.joined_ssid, "Second");
+	CHECK(board.disconnect_requests == 1);
+
+	/* From the limit on, the silence is what it always is: the hold has added the 10 s and no more. */
+	ticks_quietly(WIFI_SILENT - 3);
+	CHECK(board.reboots == 0);
+	ticks(1);
+	check_restart("[STUCK] restarting reason=wifi_silent count=1\n", 1, STUCK_REASON_WIFI_SILENT);
+
+	/* A report that is late is believed, and it does not say so twice. */
+	board_on_its_network();
+	wifi_command("Second");
+	ticks(LEAVE_LIMIT);
+	forget_console();
+	raise_event(NET_EVENT_WIFI_DISCONNECT_RESULT, NULL);
+	link_goes_down();
+	CHECK_TEXT(board.console, "");
+	ticks(QUIET);
+	CHECK(board.connect_requests == 2);
+
+	/* hostap waits for up to 5 s inside the request. The limit counts from the asking. */
+	board_on_its_network();
+	board.disconnect_takes_ms = 5000;
+	wifi_command("Second");
+	CHECK(board.disconnect_requests == 1);
+	ticks(LEAVE_LIMIT - 6);
+	CHECK(net_is_up());
+	ticks(1);
+	CHECK(!net_is_up());
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+	CHECK(board.watchdog_feeds >= 40 + LEAVE_LIMIT - 5);
+
+	/* It answered that its wait ran out: not gone, and the limit stays what ends this. */
+	board_on_its_network();
+	wifi_command("Second");
+	disconnect_reported(-ETIMEDOUT);
+	ticks(LEAVE_LIMIT - 1);
+	CHECK(net_is_up());
+	CHECK(board.connect_requests == 1);
+	ticks(1);
+	CHECK(!net_is_up());
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+
+	/* The link went and the stack said nothing else. The link says enough for that. */
+	board_on_its_network();
+	wifi_command("Second");
+	link_goes_down();
+	forget_console();
+	ticks(LEAVE_LIMIT);
+	CHECK(board.connect_requests == 1);
+	CHECK_TEXT(board.console, "");
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+}
+
+static void test_a_later_request_replaces_a_held_one(void)
+{
+	/* WIFI three times within seconds. The first goes, as the link has been quiet. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	wifi_command("First");
+	CHECK(board.connect_requests == 2);
+	CHECK_TEXT(board.joined_ssid, "First");
+	CHECK(board.disconnect_requests == 0);
+
+	/* Asking again does not start the wait over, or it could go on for ever. */
+	ticks(1);
+	wifi_command("Second");
+	ticks(1);
+	wifi_command("Third");
+	CHECK(board.connect_requests == 2);
+	ticks(QUIET - 3);
+	CHECK(board.connect_requests == 2);
+	ticks(1);
+	CHECK(board.connect_requests == 3);
+	CHECK_TEXT(board.joined_ssid, "Third");
+
+	/* One join came of the two. */
+	ticks(RETRY_SECONDS - 1);
+	CHECK(board.connect_requests == 3);
+}
+
+static void test_a_join_while_joining(void)
+{
+	/* Associated, with no address yet. The link is not up, and it still has to go first. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	wifi_result(0);
+	CHECK(!net_is_up());
+	wifi_command("Second");
+	CHECK(board.disconnect_requests == 1);
+	CHECK(board.connect_requests == 1);
+	disconnect_reported(0);
+	ticks(QUIET - 1);
+	CHECK(board.connect_requests == 1);
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+
+	/* The stack takes 3 s to say so: the wait counts from what it says, and not from the asking. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	wifi_result(0);
+	wifi_command("Second");
+	ticks(3);
+	CHECK(board.connect_requests == 1);
+	disconnect_reported(0);
+	ticks(QUIET - 1);
+	CHECK(board.connect_requests == 1);
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+
+	/* The stack says that its wait ran out, so it has not left. Only the limit ends this. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	wifi_result(0);
+	wifi_command("Second");
+	disconnect_reported(-ETIMEDOUT);
+	ticks(LEAVE_LIMIT - 1);
+	CHECK(board.connect_requests == 1);
+	ticks(2);
+	CHECK(board.connect_requests == 2);
+
+	/* The join that was going on gets there during the hold. It goes, in the same order. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	wifi_command("Second");
+	CHECK(board.connect_requests == 1);
+	ticks(2);
+	wifi_result(0);
+	link_comes_up();
+	CHECK(board.disconnect_requests == 0);
+	ticks(1);
+	CHECK(board.disconnect_requests == 1);
+	CHECK(board.connect_requests == 1);
+	raise_event(NET_EVENT_WIFI_DISCONNECT_RESULT, NULL);
+	link_goes_down();
+	ticks(QUIET - 1);
+	CHECK(board.connect_requests == 1);
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+	CHECK(board.disconnect_requests == 1);
+}
+
+/* An address with no result on record: what the link says is enough, in both directions. */
+static void test_a_link_that_only_the_l4_events_tell_of(void)
+{
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	link_comes_up();
+	ticks(20);
+	wifi_command("Second");
+	CHECK(board.disconnect_requests == 1);
+	CHECK(board.connect_requests == 1);
+
+	/* Its going counts as a change, with nothing from the Wi-Fi stack. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	link_comes_up();
+	ticks(20);
+	link_goes_down();
+	ticks(1);
+	wifi_command("Second");
+	CHECK(board.disconnect_requests == 0);
+	CHECK(board.connect_requests == 1);
+	ticks(QUIET - 2);
+	CHECK(board.connect_requests == 1);
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+}
+
+static void test_a_wrong_password_and_a_held_join(void)
+{
+	/* A result that is a failure is no change of the link. The right password goes at once. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	forget_console();
+	wifi_result(WIFI_STATUS_CONN_WRONG_PASSWORD);
+	CHECK_TEXT(board.console, "[WIFI] failed reason=wrong password\n");
+	wifi_command("Right");
+	CHECK(board.connect_requests == 2);
+	CHECK(board.disconnect_requests == 0);
+
+	/* The stack goes on retrying by itself: that does not move a join that is held. */
+	ticks(1);
+	wifi_command("Righter");
+	CHECK(board.connect_requests == 2);
+	for (int i = 0; i < QUIET - 2; i++) {
+		wifi_result(WIFI_STATUS_CONN_WRONG_PASSWORD);
+		ticks(1);
+		CHECK(board.connect_requests == 2);
+	}
+	ticks(1);
+	CHECK(board.connect_requests == 3);
+	CHECK_TEXT(board.joined_ssid, "Righter");
+
+	/* That is a new attempt, so it may say it again. */
+	forget_console();
+	wifi_result(WIFI_STATUS_CONN_WRONG_PASSWORD);
+	CHECK_TEXT(board.console, "[WIFI] failed reason=wrong password\n");
+}
+
+static void test_a_held_join_is_no_answer(void)
+{
+	/* A chip that says nothing, and somebody who asks every second: the same 120 s. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	for (int i = 0; i < WIFI_SILENT - 1; i++) {
+		CHECK(app_event_post_simple(APP_EVENT_NET_JOIN) == 0);
+		run_loop();
+		ticks_quietly(1);
+		CHECK(net_wifi_answers() == 0);
+		CHECK(board.reboots == 0);
+	}
+	ticks(1);
+	check_restart("[STUCK] restarting reason=wifi_silent count=1\n", 1, STUCK_REASON_WIFI_SILENT);
+
+	/* A held join holds nothing else off, whenever it is asked for. */
+	for (int asked_at = 0; asked_at < WIFI_SILENT; asked_at += 17) {
+		boot(DEVICE_BOOT_OPERATING, false, true, true);
+		ticks_quietly(asked_at);
+		wifi_command("Second");
+		ticks_quietly(WIFI_SILENT - asked_at - 1);
+		CHECK(board.reboots == 0);
+		ticks(1);
+		CHECK(board.reboots == 1);
+		CHECK(stored.record.reason == STUCK_REASON_WIFI_SILENT);
+	}
+
+	/* What the stack says about a disconnect takes no scan: it says nothing of a hung join. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks_quietly(WIFI_SILENT - 1);
+	raise_event(NET_EVENT_WIFI_DISCONNECT_RESULT, NULL);
+	disconnect_reported(0);
+	CHECK(net_wifi_answers() == 0);
+	ticks(1);
+	CHECK(board.reboots == 1);
+}
+
+static void test_no_network_stays_quiet(void)
+{
+	/* Nothing stored, and nothing is asked of the stack or said on the console. */
+	boot(DEVICE_BOOT_OPERATING, false, false, true);
+	forget_console();
+	CHECK(net_connect() == -ENOENT);
+	CHECK(app_event_post_simple(APP_EVENT_NET_JOIN) == 0);
+	run_loop();
+	ticks(RETRY_SECONDS * 2);
+	CHECK(board.connect_requests == 0);
+	CHECK(board.disconnect_requests == 0);
+	CHECK_TEXT(board.console, "");
+
+	/* The network goes during the hold, by CLEAR_WIFI or by anything else. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	wifi_command("First");
+	ticks(1);
+	wifi_command("Second");
+	CHECK(net_credentials_clear() == 0);
+	forget_console();
+	ticks(RETRY_SECONDS * 2);
+	CHECK(board.connect_requests == 2);
+	CHECK_TEXT(board.console, "");
+
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(20);
+	wifi_command("First");
+	ticks(1);
+	wifi_command("Second");
+	board.network_stored = false;
+	forget_console();
+	ticks(RETRY_SECONDS * 2);
+	CHECK(board.connect_requests == 2);
+	CHECK_TEXT(board.console, "");
+	CHECK(net_connect() == -ENOENT);
+
+	/* And it is not left behind: a network that comes later joins by its own request. */
+	board.network_stored = true;
+	wifi_command("Third");
+	CHECK(board.connect_requests == 3);
+
+	/* Factory mode is off the network, whatever is asked. */
+	boot(DEVICE_BOOT_FACTORY, true, true, false);
+	ticks(RETRY_SECONDS * 2);
+	CHECK(board.connect_requests == 0);
+	CHECK(board.disconnect_requests == 0);
+}
+
+static void test_a_join_gets_its_time_from_the_association(void)
+{
+	/* Associated at the last moment: the retry waits, as it would throw that away. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(RETRY_SECONDS - 1);
+	wifi_result(0);
+	forget_console();
+	ticks(RETRY_SECONDS - 1);
+	CHECK(board.connect_requests == 1);
+	CHECK(board.disconnect_requests == 0);
+	CHECK_TEXT(board.console, "");
+
+	/* No address after all that: it starts over, in order. */
+	ticks(1);
+	CHECK_TEXT(board.console, "[WIFI] failed reason=no answer\n");
+	CHECK(board.disconnect_requests == 1);
+	CHECK(board.connect_requests == 1);
+	disconnect_reported(0);
+	ticks(QUIET - 1);
+	CHECK(board.connect_requests == 1);
+	ticks(1);
+	CHECK(board.connect_requests == 2);
+}
+
+static void test_a_restart_forgets_a_held_join(void)
+{
+	/* REBOOT during the hold. RAM is gone, and so is the chip's state: the boot join goes at once. */
+	board_on_its_network();
+	wifi_command("Second");
+	CHECK(board.connect_requests == 1);
+	ticks(1);
+	boot_again();
+	CHECK(board.connect_requests == 1);
+	CHECK(board.disconnect_requests == 0);
+}
+
+static void test_a_join_held_at_the_supplicant(void)
+{
+	/* Not ready, and a WIFI comes in meanwhile: held by neither, one join when it is ready. */
+	supplicant_late = true;
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	supplicant_late = false;
+	wifi_command("Second");
+	CHECK(board.connect_requests == 0);
+	ticks(3);
+	CHECK(board.connect_requests == 0);
+	supplicant_is_ready();
+	run_loop();
+	CHECK(board.connect_requests == 1);
+	CHECK_TEXT(board.joined_ssid, "Second");
+	ticks(RETRY_SECONDS - 1);
+	CHECK(board.connect_requests == 1);
+}
+
+/* ---- the heartbeat ---------------------------------------------------------------------- */
+
+static void test_the_heartbeat_is_the_report(void)
+{
+	/* Connected: one report when that happens, and one every interval. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	board.cloud_up = true;
+	CHECK(app_event_post_simple(APP_EVENT_CLOUD_UP) == 0);
+	run_loop();
+	CHECK(board.shadow_reports == 1);
+	ticks(CONFIG_APP_SHADOW_INTERVAL_SECONDS - 1);
+	CHECK(board.shadow_reports == 1);
+	ticks(1);
+	CHECK(board.shadow_reports == 2);
+	ticks(CONFIG_APP_SHADOW_INTERVAL_SECONDS * 10);
+	CHECK(board.shadow_reports == 12);
+
+	/* A change of the update's state is reported at once, and the interval counts from there. */
+	board.ota_changed = true;
+	ticks(1);
+	CHECK(board.shadow_reports == 13);
+	ticks(CONFIG_APP_SHADOW_INTERVAL_SECONDS - 1);
+	CHECK(board.shadow_reports == 13);
+	ticks(1);
+	CHECK(board.shadow_reports == 14);
+
+	/* Not connected: nothing goes out, and the next one goes as soon as it can. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	ticks(CONFIG_APP_SHADOW_INTERVAL_SECONDS * 3);
+	CHECK(board.shadow_reports == 0);
+	board.cloud_up = true;
+	ticks(1);
+	CHECK(board.shadow_reports == 1);
+	ticks(CONFIG_APP_SHADOW_INTERVAL_SECONDS - 1);
+	CHECK(board.shadow_reports == 1);
+}
+
 int main(void)
 {
 	test_only_ipv4_counts_as_up();
@@ -1823,6 +2444,20 @@ int main(void)
 	test_the_cloud_gets_tried_again_after_a_lost_event();
 	test_ticks_do_not_pile_up();
 	test_a_held_up_main_loop_does_not_hold_up_the_timers();
+	test_a_join_on_a_link_that_is_up_waits_for_the_link_to_go();
+	test_a_join_within_a_second_of_connecting_is_held();
+	test_a_join_within_a_second_of_clear_wifi_is_held();
+	test_a_disconnect_that_never_reports_on_the_main_loop();
+	test_a_later_request_replaces_a_held_one();
+	test_a_join_while_joining();
+	test_a_link_that_only_the_l4_events_tell_of();
+	test_a_wrong_password_and_a_held_join();
+	test_a_held_join_is_no_answer();
+	test_no_network_stays_quiet();
+	test_a_join_gets_its_time_from_the_association();
+	test_a_restart_forgets_a_held_join();
+	test_a_join_held_at_the_supplicant();
+	test_the_heartbeat_is_the_report();
 
 	printf("%d application checks, %d failed\n", checks, failures);
 	return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
