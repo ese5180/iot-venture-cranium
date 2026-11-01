@@ -12,6 +12,7 @@ import base64
 import contextlib
 import io
 import struct
+import time
 import sys
 import unittest
 from pathlib import Path
@@ -296,7 +297,7 @@ class RecoverTest(unittest.TestCase):
         # Longer than the slowest swap that was measured.
         self.assertGreater(recover.ENTER_THROUGH_A_SWAP, 81)
 
-    def restarts(self, fake, poll=None):
+    def restarts(self, fake, poll=None, settle=0.02):
         """How many restarts enter() asks for through the debug port, on this board."""
         calls = []
 
@@ -308,6 +309,7 @@ class RecoverTest(unittest.TestCase):
 
         with mock.patch.object(recover.subprocess, "Popen", popen), \
                 mock.patch.object(recover, "GREETING_EVERY", 0.01), \
+                mock.patch.object(recover, "RESTART_SETTLE", settle), \
                 contextlib.redirect_stdout(io.StringIO()):
             recover.enter(link_to(fake), "1", deadline_seconds=fake.seconds)
         self.assertTrue(all("RESET_PIN" in call for call in calls))
@@ -344,6 +346,53 @@ class RecoverTest(unittest.TestCase):
             return answer
 
         self.assertEqual(self.restarts(fake, poll), 1)
+
+    def test_an_answer_from_before_the_restart_landed_does_not_count(self):
+        # The bootloader is listening when the restart is asked for, answers, and then the restart
+        # lands and the application runs: nothing is listening any more.
+        fake = self.a_board(listens_at_restart=10**9, seconds=0.5)
+        fake.running_application = False
+        answers = iter([None] * 3)
+
+        def poll():
+            answer = next(answers, 0)
+            if answer == 0:
+                fake.running_application = True
+            return answer
+
+        with self.assertRaisesRegex(BoardError, "not listening"):
+            self.restarts(fake, poll)
+
+    def test_an_answer_that_was_on_its_way_when_the_restart_landed_does_not_count(self):
+        fake = self.a_board(listens_at_restart=10**9, seconds=0.5)
+        fake.running_application = False
+        # The first answer arrives in the same moment as the end of the restart.
+        started = []
+        real_read = fake.read
+
+        def read(size):
+            started.append(1)
+            if len(started) > 1:
+                fake.running_application = True
+            return real_read(size)
+
+        fake.read = read
+        with self.assertRaisesRegex(BoardError, "not listening"):
+            self.restarts(fake, settle=0.1)
+
+    def test_what_arrives_right_after_a_restart_is_old_and_is_no_reason_to_restart(self):
+        fake = self.a_board(listens_at_restart=10**9)
+        real_read = fake.read
+        began = time.time()
+
+        def read(size):
+            if time.time() - began < 0.1:
+                return b"the end of a line from before the restart\r\n"
+            fake.running_application = False
+            return real_read(size)
+
+        fake.read = read
+        self.assertEqual(self.restarts(fake, settle=0.2), 1)
 
     def test_a_silent_board_is_left_alone_as_it_may_be_in_a_swap(self):
         calls = []

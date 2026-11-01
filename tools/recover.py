@@ -65,6 +65,9 @@ ENTER_THROUGH_A_SWAP = 150
 # than its half second, and then that look lasts a millisecond (CONFIG_BOOT_SERIAL_WAIT_FOR_DFU in
 # MCUboot's main.c). Now and then a restart goes past it: 1 in 75 on the bench. So --reset tries again.
 ENTER_RESTARTS = 3
+# What arrives this soon after a restart was on its way before it: the bootloader needs longer than
+# this to check the image, and the application longer still to start.
+RESTART_SETTLE = 0.3
 
 
 class NoAnswer(BoardError):
@@ -158,6 +161,9 @@ def enter(link: Link, serial_number: str | None, through_console: bool = False,
     If the application answers after a restart through the debug port, the bootloader has passed the
     board on without seeing a greeting, and it is restarted again. A swap says nothing on this port,
     so a board that is busy with one is left alone.
+
+    Nothing that arrives before a restart has landed counts, or just after: an answer from a bootloader
+    that is about to be restarted says nothing about the next one.
     """
     def restart() -> subprocess.Popen:
         return subprocess.Popen(["nrfutil", "device", "reset", "--reset-kind", "RESET_PIN",
@@ -165,7 +171,7 @@ def enter(link: Link, serial_number: str | None, through_console: bool = False,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
     reset = restart() if serial_number is not None else None
-    restarted = False
+    restarted_at = None
     restarts_left = ENTER_RESTARTS
     if through_console:
         # Greetings that reach the application before it restarts are nothing to it but
@@ -178,27 +184,29 @@ def enter(link: Link, serial_number: str | None, through_console: bool = False,
         # Slowly enough that the bootloader's eight line buffers do not fill up before it
         # starts reading them, and often enough for a window of half a second.
         link.send(OP_WRITE, GROUP_OS, ID_OS_ECHO, {"d": "cranium"})
-        if link.receive(GREETING_EVERY) is not None:
-            if reset:
-                reset.wait()
+        reply = link.receive(GREETING_EVERY)
+        if reset is not None:
+            status = reset.poll()
+            if status:
+                raise BoardError(f"nrfutil could not restart the board through probe {serial_number}: "
+                                 f"{reset.stderr.read().strip()}\nName another probe with --serial-number")
+            if status is None:
+                restarted_at = None
+                continue
+            if restarted_at is None:
+                restarted_at = time.time()
+            if time.time() - restarted_at < RESTART_SETTLE:
+                link.heard_text = False
+                continue
+        if reply is not None:
             # The bootloader may still answer the greetings sent just before this one.
             link.drain()
             return
-        status = None if reset is None else reset.poll()
-        if status:
-            raise BoardError(f"nrfutil could not restart the board through probe {serial_number}: "
-                             f"{reset.stderr.read().strip()}\nName another probe with --serial-number")
-        if status is None:
-            restarted = False
-        elif not restarted:
-            # The restart has happened now. What was heard up to here came before it.
-            restarted = True
-            link.heard_text = False
-        elif link.heard_text and restarts_left > 0:
+        if reset is not None and link.heard_text and restarts_left > 0:
             restarts_left -= 1
             print("  the board went past the bootloader, restarting it again", flush=True)
             reset = restart()
-            restarted = False
+            restarted_at = None
     raise BoardError("the bootloader is not listening: hold Button 1, press RESET, release "
                      "Button 1 and try again, or pass --console or --reset. A board resuming a swap, or "
                      f"with Button 2 stuck down, takes longer to get there: give it --wait {ENTER_THROUGH_A_SWAP}")
