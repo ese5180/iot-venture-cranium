@@ -5,9 +5,9 @@ came from are in the table below.
 
 **Which firmware.** The golden image, the one a person can always go back to, is firmware 1.5.0. It is
 frozen: [`firmware/golden.json`](../firmware/golden.json) names it, and the bootloader holds its digest.
-The planned release is 1.7.0, which is what `firmware/app/VERSION` says and what a build of this
-checkout makes. It is 1.6.0 with [what restarts a stuck board](../firmware/README.md#when-the-board-is-stuck)
-and a few small fixes next to that. Test images for the bench are 1.6.x, below it.
+The first release with [what restarts a stuck board](../firmware/README.md#when-the-board-is-stuck) is
+1.7.0, on the board since 2026-11-01. The next is 1.7.1, which is not finished. Test images for the bench are
+1.6.x, below both.
 
 Every run below was on one nRF7002 DK. The benches write one line per run to a local
 `results.jsonl`, which is not in git. A result is about the firmware and the bootloader it ran on:
@@ -22,22 +22,29 @@ Every run below was on one nRF7002 DK. The benches write one line per run to a l
 | [Serial console, by the bench](#the-serial-console-on-firmware-130) | 1.3.0 | From before the golden image | 2026-10-31 |
 | [Over the air, and serial recovery](#over-the-air-on-the-older-shell-firmware) | 1.1.x and 1.2.0, with the older Zephyr shell | From before the golden image | 2026-10-31 |
 | Firmware update over Bluetooth | None: it has not been tried on the air | | |
-| [What restarts a stuck board](../firmware/README.md#when-the-board-is-stuck) | None: 1.7.0 has been built and has only run in host tests | | |
+| [The serial console, and a real hang](#the-serial-console-and-a-real-hang-on-firmware-170) | 1.7.0 | The one that holds the pin | 2026-11-01 |
+| [One update to 1.7.0](#over-the-air-on-the-final-firmware) | 1.5.0 to 1.7.0 | The one that holds the pin | 2026-11-01 |
 
 <!-- OVER-THE-AIR REGRESSION: the section under this comment is the one place that says whether the over-the-air regression on the final firmware has run. Other documents link to it. When it has run, replace its text with the date, the firmware, the bootloader, the results and what failed on the way, and add a row to the table above. -->
 
 ## Over the air on the final firmware
 
-**This has not run.** No update over the air has finished on firmware 1.5.0, 1.6.0 or 1.7.0, or on the bootloader
-that holds the pin. The closest are G15 and G16 below: a real job took each image from the frozen 1.5.0
-over Wi-Fi and into the bootloader's swap, and the gesture then went back to 1.5.0 on purpose. On the night of 2026-11-01 the AWS CLI session expired and the phone hotspot went
-down. The run started again at 08:16 that morning and was stopped before its first update, because the
-Wi-Fi chip hung in a console check: see [the serial console on 1.5.0](#the-serial-console-on-firmware-150).
-It will run on 1.7.0, which is written to restart the board when the chip hangs like that, and which has not
-shown that on a board yet. The plan is ten updates in a row, the failure scenarios, `ota_bench.py chip-dead`,
-a release through `scripts/ota.sh`, and the console checks that need Wi-Fi or erase the board. 1.6.0 and
-1.7.0 have been built, and no test has run either of them on a board.
-Until then, the only over-the-air results are those
+**One update has finished, and the regression has not run.** On 2026-11-01, from 12:15 to 12:18,
+`scripts/ota.sh` took the board from the frozen 1.5.0 to 1.7.0, built from commit 8eca4b0, on the bootloader that
+holds the pin. It uploaded the release through the console's API function, invoked directly, so it bypassed
+API Gateway and sign-in, and the signature was checked on upload. The bench pressed Button 1 through the console.
+
+| Step | After the button |
+| --- | --- |
+| Download | 69 s |
+| Restart for the swap | 96 s |
+| The new image on trial | 179 s |
+| Confirmed, job `SUCCEEDED` | 188 s |
+
+Not run on any firmware from 1.5.0 on: ten updates in a row, the failure scenarios, and `ota_bench.py chip-dead`.
+They will run on 1.7.1, with test images built from its code, so that the results are about what ships.
+G15 and G16 below also took real jobs into the bootloader's swap, and the gesture went back to 1.5.0 on purpose.
+Until then, the other over-the-air results are those
 [on the older shell firmware](#over-the-air-on-the-older-shell-firmware), below.
 
 ## The golden image, on firmware 1.5.0
@@ -138,13 +145,39 @@ failures: they show nothing about the firmware.
   chip reported the wrong password properly, with no driver errors, and the right network then joined
   and reached the cloud.
 
-This has been seen once. Its root cause is not known, and it has not been reproduced, on purpose: a loop
-that forces it keeps the board off the hotspot. 1.5.0 is frozen and keeps this behaviour, so on the golden
+Its root cause is not known. It has not been forced in a loop, on purpose, because that keeps the board off the
+hotspot, but it came again in a normal run on 1.7.0: see
+[the serial console and a real hang](#the-serial-console-and-a-real-hang-on-firmware-170). 1.5.0 is frozen and keeps this behaviour, so on the golden
 image a hang like this needs a restart by hand. 1.7.0 has
-[timers for it](../firmware/README.md#when-the-board-is-stuck), which so far have only run in host tests. `settings-kept` and `back-online` have not been rerun, and
+[timers for it](../firmware/README.md#when-the-board-is-stuck). `settings-kept` and `back-online` have not been rerun, and
 `check-5-wrong-password` has not passed on this firmware.
 
 The checks that erase the board have not run on 1.5.0.
+
+## The serial console, and a real hang, on firmware 1.7.0
+
+`console_bench.py` ran the checks that need Wi-Fi, on 2026-11-01 from 12:27, with the hotspot on. `log-lines`
+passed (31 s), `check-4-join` passed (20 s) and `check-5-wrong-password` passed (16 s).
+
+`settings-kept` and `back-online` failed. This is what happened, from the board's log:
+
+| Time | What the board did |
+| --- | --- |
+| 12:28:30 | `CLEAR_WIFI`, and in the same second the bench stored the right network again with `WIFI` |
+| 12:28:40 | The same driver errors as on 1.5.0: the Wi-Fi chip had stopped answering |
+| 12:29:02 and on | `[WIFI] failed reason=no answer`, again and again, and no join |
+| 12:30:30 | `[STUCK] restarting reason=wifi_silent count=1` |
+| 12:30:35 | Booted, and logged that it had restarted for being stuck |
+| 12:30:39 and on | `[WIFI] failed reason=network not found`, with the chip answering |
+
+So the `wifi_silent` timer ran on a real hang for the first time, and did what it is for: the board restarted
+itself, 2 minutes after the link changed, and the chip answered again. This is the second hang seen, and both came
+within a second or so of a connect request while the link was changing. The cause is not proven.
+
+The board then did not rejoin, and `settings-kept` gave up after its 600 s wait. It reported `network not found`
+for as long as anyone looked. The likely cause is the phone hotspot, which stops broadcasting when nothing has been
+connected for a while, but the log does not prove that. A person's Chrome was also connected to the same port
+by 12:46, and the log is mixed after that. The checks that erase the board have not run on 1.7.0.
 
 ## Signing in to the console
 

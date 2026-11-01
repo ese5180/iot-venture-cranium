@@ -5,10 +5,11 @@ and builds the firmware on every push to `main` and `feature/**` and on every pu
 write access can also start it by hand from the Actions tab. The repository is public, so the minutes
 are free, anybody can read the logs, and anybody signed in to GitHub can download the artifacts.
 
-**Nothing has run on Actions yet at the time of this writing.** The tests were run from a clean clone
-on a Mac, as described under [Trying it without Actions](#trying-it-without-actions). The firmware
-jobs have never run at all. Until the Actions tab shows a passing run, read everything below as what
-the workflow is meant to do.
+**It has run.** The first run with every job passing was on commit be91c50, on 2026-11-01, for the push and
+the pull request: the scan, the host tests, the Python tests, the cloud tests, and both firmware builds, on
+Linux, in about six minutes. The run before it failed only the Python job, on 24 tests that skipped because
+`console_sim_fault` was not built, which this job refuses. The job that checks a published release has not run,
+because no release has been published, and `scripts/github-release.sh` has not been run for real.
 
 ## What runs
 
