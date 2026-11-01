@@ -15,6 +15,7 @@ Every run below was on one nRF7002 DK. The benches write one line per run to a l
 | --- | --- | --- | --- |
 | [Golden image tests](#the-golden-image-on-firmware-150), by the debug port and by a person | 1.5.0, the frozen file. G13 also 1.5.40 | The one that holds the pin | 2026-11-01 |
 | [Getting into the bootloader](#getting-into-the-bootloader-on-firmware-150) | 1.5.0 | The one that holds the pin | 2026-11-01 |
+| [Signing in to the console](#signing-in-to-the-console) | 1.5.0 | The one that holds the pin | 2026-11-01 |
 | [Serial console, by the bench](#the-serial-console-on-firmware-150) | 1.5.0 | The one that holds the pin | 2026-11-01 |
 | [Serial console, by the web page](#the-consoles-serial-page-on-firmware-150) | 1.5.0 | The one that holds the pin | 2026-11-01 |
 | [Serial console, by the bench](#the-serial-console-on-firmware-130) | 1.3.0 | From before the golden image | 2026-10-31 |
@@ -140,6 +141,17 @@ image a hang like this needs a restart by hand. `settings-kept` and `back-online
 `check-5-wrong-password` has not passed on this firmware.
 
 The checks that erase the board have not run on 1.5.0.
+
+## Signing in to the console
+
+On 2026-11-01, at about 09:06, a person signed in to the deployed console with a password and an
+authenticator code, as a release manager. This is the first time that real sign-in and the API's check of
+its token have been tried. Overview, Firmware, Serial console and History all opened. Overview showed the
+board online on 1.5.0, reported 6 s earlier, which only the signed-in API can give it. The console was
+deployed from commit 5f8eb6d.
+
+Not tried: a viewer's account, an upload or a deployment through the website, and connecting a board on
+that Serial console page.
 
 ## The console's serial page, on firmware 1.5.0
 

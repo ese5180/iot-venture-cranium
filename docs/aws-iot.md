@@ -346,6 +346,13 @@ Stated plainly. What has been measured, and on which firmware, is in the
   answers listed under
   [What the gateway answers itself](../cloud/README.md#what-the-gateway-answers-itself). These answers
   are not pages, and nothing renders them.
+- The domain's DNS is at Cloudflare and every name is "DNS only", so Cloudflare answers for the names and
+  carries none of the traffic. CAA allows only Amazon to issue a certificate, and none for a wildcard.
+  Cloudflare's Universal SSL is off, because while it is on Cloudflare adds its own five certificate
+  authorities to the answer. A null MX, SPF `-all`, DMARC `p=reject` and an empty DKIM key say that the
+  domain sends no mail. DNSSEC is on: the `.com` registry holds the record and public resolvers validate.
+  All of this was confirmed from public DNS on 2026-11-01. As a result, turning on Cloudflare's proxy for
+  a name would break HTTPS on it until Universal SSL is back on.
 - Plain HTTP does not redirect. Nothing in the stack listens on port 80: API Gateway takes HTTPS only,
   and the names are "DNS only" at Cloudflare, so nothing sits in front of it. A plain `curl` to
   `http://console.craniumiot.com/` failed to connect when this was tried on 2026-10-31, and the home
