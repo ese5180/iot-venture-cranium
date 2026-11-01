@@ -320,7 +320,7 @@ test('the page does not depend on what is deployed or on the day it is read', ()
     /\bthese days\b/i, /\bthis build\b/i, /\bwhat works\b/i, /\bearlier firmware\b/i, /\blatest\b/i]) {
     assert.doesNotMatch(text, pattern);
   }
-  // No run went through a console sign-in (README, "These results have four limits").
+  // No run went through a console sign-in (docs/test-results.md, "These results have four limits").
   assert.doesNotMatch(text, /updated over the air, through the developer console/);
   assert.ok(text.includes('those tests did not go through its sign-in'));
 });

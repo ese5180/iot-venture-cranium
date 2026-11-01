@@ -30,6 +30,25 @@ uploaded twice, so it is refused once it has been uploaded, or once anything hig
 `latest.signed.bin` needs a higher build first: raise the version in `firmware/app/VERSION`, run
 `west build`, and check the version in `latest.json`. Do this before the demo starts.
 
+## `scripts/ota.sh`
+
+```sh
+scripts/ota.sh                                      # install binaries/latest.signed.bin
+scripts/ota.sh binaries/cranium-1.6.0-0.signed.bin  # install that image
+scripts/ota.sh --real-button                        # wait for a person to press Button 1
+```
+
+The script needs a signed-in AWS profile. It invokes the console's API function directly. This
+bypasses API Gateway and sign-in: there is no token check, no password and no authenticator code.
+The function's own checks still run: it asks Cognito whether the named person is an active release
+manager, and it checks the signature before it stores anything. The script acts in that person's
+name, and the audit entry names them. [`docs/aws-iot.md`](../docs/aws-iot.md#known-limits) has more.
+
+It deploys the image to the board and follows the update until the new firmware has confirmed
+itself. Without `--real-button` it presses Button 1 through the board's serial console, so the board
+must be on USB. The way with a sign-in is by hand, on the console's Firmware page.
+`scripts/open-console.sh` signs in to AWS and opens the console.
+
 ## The golden image
 
 `golden/` holds the one image a board can always go back to: see

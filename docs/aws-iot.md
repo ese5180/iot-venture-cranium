@@ -254,8 +254,8 @@ log group `AWSIotLogsV2`.
 ### Known limits
 
 Stated plainly. What has been measured, and on which firmware, is in the
-[README](../README.md#measured-results), and so is
-[whether the over-the-air regression on the final firmware has run](../README.md#over-the-air-on-the-final-firmware).
+[test results](test-results.md), and so is
+[whether the over-the-air regression on the final firmware has run](test-results.md#over-the-air-on-the-final-firmware).
 
 - The board speaks TLS 1.2; TLS 1.3 is not enabled in this build.
 - MCUboot's image encryption is off, so images are stored in the clear in external flash. S3

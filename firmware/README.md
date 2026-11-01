@@ -233,6 +233,67 @@ nothing: one failed read must not take it off the network.
   go: only a press that was seen counts. So holding Button 2 through a boot, for the
   [golden image](#golden-image) for example, can never turn into that factory reset.
 
+## When an update fails
+
+The measurements named in this table are from the older shell firmware, but for the golden image's:
+[the test results](../docs/test-results.md) say which firmware each came from.
+
+| Failure | What happens |
+| --- | --- |
+| Invalid signature, or signed with another key | MCUboot verifies every image with this project's public key before swapping and on every boot. An image that fails is never started; the board keeps running the current firmware and reports the update as failed (`not_installed`). The server also refuses to accept such a file. |
+| Older firmware (rollback) | The console refuses a release that is not newer than every earlier one. The application refuses a job that is not newer than what it runs. MCUboot compares versions before a test or permanent swap, which is what an update asks for, and refuses a lower one. A revert skips that comparison, so code running in the application could forge a revert to an older signed image: see [What this does not protect against](#what-this-does-not-protect-against-1). That comes from reading MCUboot's source and has not been run. The bench tested the application's check. No run reached MCUboot's check, because the application refuses first. Serial recovery has no version check: see below. A golden image restore has none either, on purpose. |
+| Corrupted or incomplete download | The application compares the SHA-256 of what is in the secondary slot with the digest in the job and checks that the signed header carries the announced version. On a mismatch the image is erased and nothing is installed. A failed download is retried with a fresh link, up to five attempts in all. |
+| Reset or power loss during the download | The running image is not touched. After the restart the board reports the job as `interrupted`. Measured with a reset through the reset pin, not with a power cut. |
+| Faulty code with a valid signature | The new image runs on trial. It must join Wi-Fi and reach AWS IoT within 5 minutes to confirm itself; a 120-second hardware watchdog covers a hang. Without the confirmation the next reset makes MCUboot swap the previous image back, and the board reports the rollback. |
+| Power loss during the swap | MCUboot's swap-using-move continues the swap on the next boot. Measured with a reset through the reset pin, not with a power cut. |
+| Update cancelled after it was offered | The board asks AWS IoT before the download and again before installing. A cancelled job is dropped. A cancel during the download leaves the partial image in the secondary slot, where no swap is requested and the next download overwrites it. A cancel after the download erases the image. |
+| No update can reach the board, or no valid image is left | Serial recovery, below. |
+| A bad image, and a person at the board with nothing else | The golden image. The person holds Button 2 through a reset ([the gesture](#the-gesture)). MCUboot checks the copy in external flash for a good signature and for the digest pinned in the bootloader, and copies it to the primary slot. It needs no laptop, Wi-Fi or cloud. Measured on firmware 1.5.0 with the debug port holding the button: restored in 62 to 64 s, gesture included. A person did it from power-off too, in G5e. A damaged copy, or any other signed image, is refused. Nothing starts it by itself, so a bad image on an unattended board stays bad. |
+
+## Signature
+
+Images are signed with ECDSA P-256 over SHA-256, with a key generated for this project by
+`tools/keys.py`. The boards hold only the public half, and
+[`secrets/README.md`](../secrets/README.md) covers the private key. ECDSA P-256 stays by the team's
+decision. Ed25519 is the possible later upgrade, and it needs a bootloader reflash. Post-quantum
+signatures are not available in this MCUboot.
+
+## Serial recovery
+
+MCUboot can take an image over UART. This is the way back when an image cannot reach the
+network, and it needs neither Wi-Fi nor a debugger. It uses `uart0`, the board's second
+virtual COM port, so close any terminal on that port first. Run `tools/recover.py` from an
+nRF Connect SDK terminal, which provides pyserial and cbor2.
+
+Get the board into the bootloader in one of these ways:
+
+| Way | What to do |
+| --- | --- |
+| Button | Hold Button 1, press RESET, release Button 1, then run `python tools/recover.py upload <image>`. |
+| Debug port | `python tools/recover.py --reset upload <image>` restarts the board and catches the half second after a reset in which the bootloader listens for a command. If the restart goes past that half second, the tool restarts the board again, up to three times. Name your own debug probe with `--serial-number <probe>` (`nrfutil device list` shows it): the tool's default is the probe of this project's bench, and it fails on any other. |
+| Running application | `python tools/recover.py --console upload <image>` sends `ENTER_BOOTLOADER` to the application, which restarts. This needs firmware 1.3.0 or later with the serial console built in, which a build with `-Dapp_CONFIG_APP_CONSOLE=n` does not have. It cannot restart the board again: if it misses the half second it stops with an error, and you run it again. |
+| No valid image left | Nothing. The bootloader stays by itself. |
+
+Tested on the board: `--reset`, `--console` and no valid image. `--reset` is the one with numbers,
+under [Getting into the bootloader](../docs/test-results.md#getting-into-the-bootloader-on-firmware-150). `--console` listed
+the images on firmware 1.3.0 and 1.5.0, and uploaded an image on 1.3.0. Button 1 is not tested on
+hardware yet.
+
+```sh
+python tools/recover.py --reset list                               # show the image the bootloader holds
+python tools/recover.py --reset upload binaries/latest.signed.bin  # write it and restart
+python tools/recover.py reset                                      # restart a board that is already in the bootloader
+```
+
+The tool finds the port by itself; `--port` overrides that. MCUboot takes whatever it is sent and
+writes it straight into the primary slot, the one target it accepts. At the restart it checks the
+signature and starts nothing that fails. It then stays and waits for a good image.
+
+This path has limits. It has no version check, so any image ever signed with this key can be
+installed over a newer one. The image does not run on trial and there is no revert. On a
+development kit this adds no power, because the debug port is open. A product build has to narrow
+it or turn serial recovery off: [`docs/aws-iot.md`](../docs/aws-iot.md#known-limits) says how.
+
 ## Firmware update over Bluetooth
 
 An image can be uploaded from a phone over Bluetooth LE, with nothing of the cloud involved, for a
@@ -777,7 +838,7 @@ from the debug port, by driving P1.09 low once the bootloader has configured the
 has no test code for this.
 
 What these tests showed on the frozen 1.5.0 and its bootloader is in the
-[README](../README.md#the-golden-image-on-firmware-150), test by test.
+[test results](../docs/test-results.md#the-golden-image-on-firmware-150), test by test.
 
 G14 is the test of the image number check. It sends the first chunk of an upload for image numbers 1
 and 3, which a bootloader without the check maps to the primary and the secondary slot, and each has
@@ -790,7 +851,7 @@ G15 and G16 do the gesture during a real update: G15 while a new image runs on t
 of the swap. In both, the board has to end up on the golden image with no revert and no resumed swap,
 and the update must not report success. They need Wi-Fi and AWS, G15 also `--trial-image`, and **they
 have not run yet**. Whether the rest of the over-the-air regression has run is in the
-[README](../README.md#over-the-air-on-the-final-firmware).
+[test results](../docs/test-results.md#over-the-air-on-the-final-firmware).
 
 That stand-in has limits, and a test it cannot finish ends as `PARTIAL`, not `PASS`, with the part that
 did not run in its line of `results.jsonl`. It cannot hold the button down into the application, because
@@ -799,18 +860,20 @@ it from the input driver on. And it is not a hand. A reading of the pin before t
 be seen on the bench, though with a hand it would stop the gesture: `test_golden.py` checks the source
 for one, and only a person can check the rest.
 
-**What needs a person.** G5e, the gesture from power-off, needs a person to pull the cable, and so do
-the power cuts in G5d and G11. Those two and G5c are `PARTIAL` on the frozen image for this reason, and
-G5e has not run. A person should do this before the gesture is taught. None of it has been done, and
-1.5.0 was frozen without it:
+**What needs a person.** A person did G5a to G5e on the frozen image, power cuts included, and all five
+passed. What is left is G11, whose power cuts need somebody to pull the cable, and which ends with a seal
+by that person:
 
 ```sh
-python3 firmware/tests/hil/golden_bench.py run G4 G5a G5b G5c G5d G5e G11 --gesture person --power-cuts
+python3 firmware/tests/hil/golden_bench.py run G11 --gesture person --power-cuts
 ```
+
+G4 by a person needs a golden copy that is not sealed yet, because it waits for the board to say it is
+sealing. On a board that is already sealed it fails, and that says nothing about the board.
 
 Add `--out <folder>` to choose where the logs and `results.jsonl` go: by default that is
 `build-hil-golden/`.
 
-`python tools/golden.py qualify` has not been used, because that needs those runs, G15, G16 and the
+`python tools/golden.py qualify` has not been used, because that needs that run, G15, G16 and the
 over-the-air regression. `qualifying_bench_run` in `golden.json` is empty until then, and
 `golden.py check --qualified` refuses.
