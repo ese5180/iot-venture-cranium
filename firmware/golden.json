@@ -1,0 +1,11 @@
+{
+  "version": "1.5.0+0",
+  "file": "cranium-1.5.0-0.signed.bin",
+  "file_sha256": "bb3683cb251e72d23fdfba7b61152a0a9fc8febe251827d0e7883491628d329e",
+  "hash_tlv": "6d29aa53aa101a960d43e5aebafc0efb525ed77cc09ddd694bc4a61e370c5013",
+  "key_hash_tlv": "c8f281316d657dba95463df47e1dc5654ebe586c4fb74bbf505a8577836c0b28",
+  "size": 759058,
+  "commit": "907d8cd",
+  "sdk": "3.4.0",
+  "qualifying_bench_run": null
+}
