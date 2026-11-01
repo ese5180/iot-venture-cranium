@@ -410,10 +410,10 @@ const pages = {
       // Its own list of updates says, and the deployment's record does not. A copy from
       // before the board ran it cannot say, and a read that failed is tried again.
       const runningIt = (detail?.executions ?? []).filter((execution) =>
-        execution.status === 'CANCELED' && execution.running === detail.version);
+        execution.status === 'CANCELED' && execution.reported === detail.version);
       await each(runningIt, (execution) => {
         const known = entry(state.deviceDetails, execution.thing);
-        const outdated = known.error !== null || known.value?.device.fw?.version !== execution.running;
+        const outdated = known.error !== null || known.value?.device.fw?.version !== execution.reported;
         return full || outdated ? load(known, () => api.device(execution.thing)) : null;
       });
       // Who cancelled it is in the log and not in the deployment's record.
@@ -955,9 +955,7 @@ function openRevoke(release) {
       // Revoking leaves a board that runs the release as it is. Whoever revokes should know
       // which, as soon as that is known.
       await load(state.devices, api.devices);
-      const running = (state.devices.value?.devices ?? [])
-        .filter((device) => device.fw?.version === release.version)
-        .map((device) => device.thing);
+      const running = (state.devices.value?.devices ?? []).filter((device) => device.fw?.version === release.version);
       if (running.length > 0) notify(stillRunning(running));
     }),
   };

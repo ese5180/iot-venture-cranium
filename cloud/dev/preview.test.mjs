@@ -438,6 +438,33 @@ test('the console signs in with its own code and leaves no refresh token behind'
   assert.equal(policy.includes(`connect-src 'self' ${config.loginOrigin};`), true);
 });
 
+test('a board can be seen offline, and on firmware that is not a release', async (t) => {
+  const boardIn = async (scenario) => {
+    const { origin, clock } = await start(t, { scenario });
+    const { api } = await consoleClient(origin, clock, []);
+    const { devices: [board] } = await api.devices();
+    const { releases } = await api.firmware();
+    const detail = await api.device(board.thing);
+    return { board, releases, detail, deployments: await api.deployments() };
+  };
+  const gone = await boardIn('gone-offline');
+  assert.equal(gone.board.online, false);
+  assert.equal(gone.board.fw.version, '1.2.3+5');
+
+  const flashed = await boardIn('flashed-over-usb');
+  assert.equal(flashed.board.online, true);
+  assert.equal(flashed.board.fw.version, '1.3.0+0');
+  assert.equal(core.isUnregistered(flashed.board.fw.version, flashed.releases), true);
+  // A declined, a cancelled and an installed deployment, and jobs the console had no part in.
+  assert.deepEqual(flashed.deployments.map((deployment) => deployment.status), ['COMPLETED', 'CANCELED', 'COMPLETED']);
+  assert.equal(flashed.detail.executions.filter((row) => row.version === null).length, 2);
+  assert.equal(flashed.detail.olderExecutions, 0);
+
+  const away = await boardIn('flashed-then-offline');
+  assert.equal(away.board.online, false);
+  assert.equal(away.board.fw.version, '1.3.0+0');
+});
+
 for (const scenario of Object.keys(SCENARIOS)) {
   test(`${scenario}: the console's client reads every answer of the API as it was sent`, async (t) => {
     const { origin, clock } = await start(t, { scenario });
@@ -684,14 +711,14 @@ test('each scenario is in the state its name promises', async (t) => {
     { state: 'awaiting_user', job: state.deployments[0].id });
 
   state = await look('downloading');
-  assert.deepEqual(pick(state.details[0].executions[0], 'status', 'phase', 'progress', 'running'),
-    { status: 'IN_PROGRESS', phase: 'downloading', progress: 40, running: '1.2.3+4' });
+  assert.deepEqual(pick(state.details[0].executions[0], 'status', 'phase', 'progress', 'ranAtEnd', 'reported'),
+    { status: 'IN_PROGRESS', phase: 'downloading', progress: 40, ranAtEnd: null, reported: '1.2.3+4' });
   assert.equal(state.details[0].executions[0].secondsLeft > 29 * 60, true);
 
   state = await look('rolled-back');
   assert.equal(state.deployments[0].status, 'COMPLETED');
-  assert.deepEqual(pick(state.details[0].executions[0], 'status', 'phase', 'reason', 'running'),
-    { status: 'FAILED', phase: 'rolled_back', reason: 'rolled_back', running: '1.2.3+4' });
+  assert.deepEqual(pick(state.details[0].executions[0], 'status', 'phase', 'reason', 'ranAtEnd', 'reported'),
+    { status: 'FAILED', phase: 'rolled_back', reason: 'rolled_back', ranAtEnd: '1.2.3+4', reported: null });
   assert.deepEqual(pick(state.devices[0], 'online', 'fw', 'ota'), {
     online: true,
     fw: { version: '1.2.3+4', confirmed: true },
@@ -700,12 +727,27 @@ test('each scenario is in the state its name promises', async (t) => {
 
   state = await look('succeeded');
   assert.equal(state.deployments[0].status, 'COMPLETED');
-  assert.deepEqual(pick(state.details[0].executions[0], 'status', 'phase', 'running'),
-    { status: 'SUCCEEDED', phase: 'succeeded', running: '1.2.3+5' });
+  assert.deepEqual(pick(state.details[0].executions[0], 'status', 'phase', 'ranAtEnd', 'reported'),
+    { status: 'SUCCEEDED', phase: 'succeeded', ranAtEnd: '1.2.3+5', reported: null });
   assert.deepEqual(state.devices[0].fw, { version: '1.2.3+5', confirmed: true });
   assert.equal(state.devices[0].ota.last, 'succeeded');
   assert.deepEqual(state.audit.map((entry) => `${entry.action} ${entry.outcome}`),
     ['deployment.create ok', 'firmware.upload ok', 'firmware.upload ok']);
+
+  // A job made directly in AWS IoT: at work on it, and the console's deployments do not hold it.
+  state = await look('outside-job');
+  assert.equal(state.deployments.length, 0);
+  assert.deepEqual(pick(state.devices[0], 'online', 'ota'), {
+    online: true,
+    ota: { state: 'downloading', job: null, progress: 40, last: 'none', error: '' },
+  });
+
+  // Gone quiet at 40%: the job stays open, and the board's last report stands.
+  state = await look('lost-during-download');
+  assert.equal(state.devices[0].online, false);
+  assert.deepEqual(pick(state.details[0].executions[0], 'status', 'phase', 'progress', 'online', 'reported'),
+    { status: 'IN_PROGRESS', phase: 'downloading', progress: 40, online: false, reported: '1.2.3+4' });
+  assert.equal(state.details[0].executions[0].secondsLeft > 20 * 60, true);
 
   state = await look('revoked');
   assert.deepEqual(state.releases, ['2.0.0+0 revoked', '1.2.3+5 active', '1.2.3+4 active']);
@@ -852,8 +894,8 @@ test('a live board picks up an offer, waits for Button 1 and carries the update 
   assert.equal((await device()).fw.version, '1.2.3+4');
 
   seconds(12);
-  assert.deepEqual(pick(await execution(id), 'status', 'phase', 'running'),
-    { status: 'SUCCEEDED', phase: 'succeeded', running: '1.2.3+5' });
+  assert.deepEqual(pick(await execution(id), 'status', 'phase', 'ranAtEnd', 'reported'),
+    { status: 'SUCCEEDED', phase: 'succeeded', ranAtEnd: '1.2.3+5', reported: null });
   const after = await device();
   assert.deepEqual(after.fw, { version: '1.2.3+5', confirmed: true });
   assert.deepEqual(after.ota, { state: 'idle', job: null, progress: 0, last: 'succeeded', error: '' });
@@ -886,8 +928,8 @@ test('a live board declines with Button 2, and refuses a version that is not new
   let id = await deploy('1.2.3+5');
   seconds(1);
   await type('2');
-  assert.deepEqual(pick(await execution(id), 'status', 'phase', 'reason', 'running'),
-    { status: 'REJECTED', phase: 'declined', reason: 'declined', running: '1.2.3+4' });
+  assert.deepEqual(pick(await execution(id), 'status', 'phase', 'reason', 'ranAtEnd', 'reported'),
+    { status: 'REJECTED', phase: 'declined', reason: 'declined', ranAtEnd: '1.2.3+4', reported: null });
   assert.equal((await device()).ota.last, 'declined');
 
   id = await deploy('1.2.3+4');

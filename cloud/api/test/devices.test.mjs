@@ -190,7 +190,8 @@ test('one board is shown with its certificates and update history', async () => 
 
   const fresh = await context.call('GET', `/api/devices/${BOARD_A}`, { as: viewer });
   assert.equal(fresh.status, 200);
-  assert.deepEqual(Object.keys(fresh.body).sort(), ['certificates', 'device', 'executions']);
+  assert.deepEqual(Object.keys(fresh.body).sort(), ['certificates', 'device', 'executions', 'olderExecutions']);
+  assert.equal(fresh.body.olderExecutions, 0);
   assert.equal(fresh.body.device.thing, BOARD_A);
   assert.equal(fresh.body.device.online, true);
   // The first 16 hex digits of each certificate id, and nothing else of the ARN.
@@ -232,11 +233,11 @@ test('one board is shown with its certificates and update history', async () => 
   assert.equal(shown.body.executions[0].startedAt, null);
 });
 
-test('the history shows the 20 newest executions', async () => {
+test('the history shows the 50 newest executions, and says how many it left out', async () => {
   const context = setup();
   const { fake, viewer } = context;
   fake.addThing(BOARD_A);
-  for (let n = 0; n < 23; n += 1) {
+  for (let n = 0; n < 53; n += 1) {
     context.advance(60_000);
     const jobId = `cranium-1-0-${n}-b0-20261011T0000${String(n).padStart(2, '0')}Z-0000`;
     await fake.createJob({
@@ -245,9 +246,10 @@ test('the history shows the 20 newest executions', async () => {
     fake.execution(jobId, BOARD_A).update('SUCCEEDED', { running: `1.0.${n}+0` });
   }
   const shown = await context.call('GET', `/api/devices/${BOARD_A}`, { as: viewer });
-  assert.equal(shown.body.executions.length, 20);
+  assert.equal(shown.body.executions.length, 50);
   assert.deepEqual(shown.body.executions.map((entry) => entry.version),
-    Array.from({ length: 20 }, (_, n) => `1.0.${22 - n}+0`));
+    Array.from({ length: 50 }, (_, n) => `1.0.${52 - n}+0`));
+  assert.equal(shown.body.olderExecutions, 3);
 });
 
 test('a board that is not in the group does not exist for the console', async () => {

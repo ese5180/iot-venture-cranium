@@ -100,7 +100,8 @@ test('a deployment is one snapshot job with the contract\'s document', async () 
       progress: null,
       reason: null,
       detail: null,
-      running: null,
+      ranAtEnd: null,
+      reported: null,
       online: false,
       queuedAt: new Date(clock.ms).toISOString(),
       startedAt: null,
@@ -451,7 +452,7 @@ test('what a board reports never decides whether it is deployed to', async () =>
   assert.equal(before, 0);
   assert.ok(order.indexOf('createJob') < order.indexOf('getShadow'));
   // It is shown, and that is all.
-  assert.equal(response.body.deployment.executions[0].running, '99.0.0+0');
+  assert.equal(response.body.deployment.executions[0].reported, '99.0.0+0');
   assert.equal(response.body.deployment.executions[0].phase, 'waiting_for_device');
 });
 
@@ -540,7 +541,7 @@ test('a deployment that was created is answered with 201 even if it cannot be re
     things: [BOARD_A, BOARD_B],
     counts: { queued: 2, inProgress: 0, succeeded: 0, failed: 0, rejected: 0, canceled: 0, timedOut: 0, removed: 0 },
     executions: [BOARD_A, BOARD_B].map((thing) => ({
-      thing, status: 'QUEUED', phase: 'waiting_for_device', progress: null, reason: null, detail: null, running: null,
+      thing, status: 'QUEUED', phase: 'waiting_for_device', progress: null, reason: null, detail: null, ranAtEnd: null, reported: null,
       online: false, queuedAt: at, startedAt: null, lastUpdatedAt: at, secondsLeft: null,
     })),
   });
@@ -587,7 +588,7 @@ test('a board is followed through a whole update', async () => {
 
   // Offered, not yet picked up.
   let seen = await row();
-  assert.deepEqual([seen.status, seen.phase, seen.progress, seen.online, seen.running],
+  assert.deepEqual([seen.status, seen.phase, seen.progress, seen.online, seen.reported],
     ['QUEUED', 'waiting_for_device', null, true, '1.0.0+3']);
 
   // The board holds the job and waits for its button. The execution stays queued.
@@ -626,7 +627,7 @@ test('a board is followed through a whole update', async () => {
   // The new image is up and on trial.
   board.report({ fw: { version: '1.2.3+4', confirmed: false }, ota: { state: 'testing' }, uptime: 5 });
   seen = await row();
-  assert.deepEqual([seen.status, seen.phase, seen.running], ['IN_PROGRESS', 'testing', '1.2.3+4']);
+  assert.deepEqual([seen.status, seen.phase, seen.reported], ['IN_PROGRESS', 'testing', '1.2.3+4']);
 
   // It reached AWS again, confirmed itself and reported success.
   assert.deepEqual(execution.update('SUCCEEDED', { running: '1.2.3+4' }), { accepted: true });
@@ -636,7 +637,7 @@ test('a board is followed through a whole update', async () => {
   assert.ok(done.completedAt !== null);
   assert.deepEqual(done.counts, { queued: 0, inProgress: 0, succeeded: 1, failed: 0, rejected: 0, canceled: 0, timedOut: 0, removed: 0 });
   assert.deepEqual([done.executions[0].status, done.executions[0].phase, done.executions[0].progress,
-    done.executions[0].running, done.executions[0].secondsLeft], ['SUCCEEDED', 'succeeded', null, '1.2.3+4', null]);
+    done.executions[0].ranAtEnd, done.executions[0].secondsLeft], ['SUCCEEDED', 'succeeded', null, '1.2.3+4', null]);
 
   // The devices view agrees.
   context.advance(6000);
@@ -669,19 +670,98 @@ test('every way an update can end is shown for what it is', async () => {
   assert.equal(seen.status, 'COMPLETED');
   assert.deepEqual(seen.counts, { queued: 0, inProgress: 0, succeeded: 0, failed: 1, rejected: 1, canceled: 0, timedOut: 1, removed: 0 });
   const rows = Object.fromEntries(seen.executions.map((row) => [row.thing, row]));
-  assert.deepEqual([rows[BOARD_A].status, rows[BOARD_A].phase, rows[BOARD_A].reason, rows[BOARD_A].running],
+  assert.deepEqual([rows[BOARD_A].status, rows[BOARD_A].phase, rows[BOARD_A].reason, rows[BOARD_A].ranAtEnd],
     ['REJECTED', 'declined', 'declined', '1.0.0+3']);
   assert.deepEqual([rows[BOARD_B].status, rows[BOARD_B].phase, rows[BOARD_B].reason, rows[BOARD_B].detail],
     ['FAILED', 'rolled_back', 'rolled_back', 'image did not confirm']);
   // Timed out stays timed out; next to it is what the board reports now.
-  assert.deepEqual([rows[BOARD_C].status, rows[BOARD_C].phase, rows[BOARD_C].running, rows[BOARD_C].secondsLeft],
+  assert.deepEqual([rows[BOARD_C].status, rows[BOARD_C].phase, rows[BOARD_C].reported, rows[BOARD_C].secondsLeft],
     ['TIMED_OUT', 'timed_out', '1.2.3+5', null]);
 
   // Refusals that are not a person's choice.
   const second = await context.deploy([BOARD_A], '1.2.3+5');
   fake.execution(second, BOARD_A).update('REJECTED', { reason: 'not_newer', running: '1.2.3+5' });
   const refused = (await context.detail(second)).executions[0];
-  assert.deepEqual([refused.phase, refused.reason, refused.running], ['refused', 'not_newer', '1.2.3+5']);
+  assert.deepEqual([refused.phase, refused.reason, refused.ranAtEnd], ['refused', 'not_newer', '1.2.3+5']);
+});
+
+test('what a job recorded and what a board reports now are two fields, and only one of them holds a value', async () => {
+  const context = await setup();
+  const { fake } = context;
+  const firmware = (row) => ({ ranAtEnd: row.ranAtEnd, reported: row.reported });
+  const row = async (id) => (await context.detail(id)).executions[0];
+  const reports = (version) => {
+    fake.device(BOARD_A).report({ fw: { version, confirmed: true }, uptime: 9 });
+    context.advance(6000);
+  };
+  /** A deployment to the board on 1.0.0+3, taken as far as `end` says. The board then reports 1.3.0+0. */
+  const ended = async (end) => {
+    fake.device(BOARD_A).report(idle());
+    const id = await context.deploy([BOARD_A]);
+    const execution = fake.execution(id, BOARD_A);
+    assert.equal(end(execution)?.accepted ?? true, true);
+    reports('1.3.0+0');
+    return id;
+  };
+
+  // Finished by the board: only what the job holds. If that cannot be read, nothing at all:
+  // not what the board reports today, which is not what happened then.
+  for (const [status, details] of [
+    ['SUCCEEDED', { running: '1.2.3+4' }],
+    ['FAILED', { reason: 'rolled_back', running: '1.0.0+3' }],
+    ['REJECTED', { reason: 'declined', running: '1.0.0+3' }],
+  ]) {
+    const id = await ended((execution) => execution.update(status, details));
+    fake.failNext('describeJobExecution', { code: 'throttled', awsName: 'ThrottlingException' });
+    const unread = await row(id);
+    assert.equal(unread.status, status);
+    assert.deepEqual(firmware(unread), { ranAtEnd: null, reported: null }, `${status}, not read`);
+    assert.deepEqual(firmware(await row(id)), { ranAtEnd: details.running, reported: null }, `${status}, read`);
+
+    // A job that holds no usable version stays without one.
+    for (const running of [{}, { running: 'latest' }]) {
+      const silent = await ended((execution) => execution.update(status, running));
+      assert.deepEqual(firmware(await row(silent)), { ranAtEnd: null, reported: null }, `${status}, ${running.running}`);
+    }
+  }
+
+  // Not finished by the board: what is known of it now, and never as what happened at the end.
+  const open = await ended(() => {});
+  assert.equal((await row(open)).status, 'QUEUED');
+  assert.deepEqual(firmware(await row(open)), { ranAtEnd: null, reported: '1.3.0+0' }, 'queued');
+  assert.equal(fake.execution(open, BOARD_A).update('IN_PROGRESS', { step: 'downloading' }).accepted, true);
+  assert.equal((await row(open)).status, 'IN_PROGRESS');
+  assert.deepEqual(firmware(await row(open)), { ranAtEnd: null, reported: '1.3.0+0' }, 'in progress');
+
+  // Cancelled.
+  assert.equal((await context.cancel(open, { force: true })).status, 200);
+  context.advance(20 * 1000);
+  reports('1.3.0+1');
+  assert.equal((await row(open)).status, 'CANCELED');
+  assert.deepEqual(firmware(await row(open)), { ranAtEnd: null, reported: '1.3.0+1' }, 'cancelled');
+
+  // Taken out of the job.
+  const removed = await ended(() => {});
+  fake.jobs.get(removed).executions.get(BOARD_A).status = 'REMOVED';
+  assert.equal((await row(removed)).status, 'REMOVED');
+  assert.deepEqual(firmware(await row(removed)), { ranAtEnd: null, reported: '1.3.0+0' }, 'removed');
+
+  // Timed out.
+  const late = await ended((execution) => execution.update('IN_PROGRESS', { step: 'downloading' }));
+  context.advance(31 * 60 * 1000);
+  reports('1.3.0+2');
+  assert.equal((await row(late)).status, 'TIMED_OUT');
+  assert.deepEqual(firmware(await row(late)), { ranAtEnd: null, reported: '1.3.0+2' }, 'timed out');
+
+  // A version the board wrote into a job it did not finish comes first, and is `reported`.
+  const told = await ended((execution) => execution.update('IN_PROGRESS', { step: 'downloading', running: '1.0.0+3' }));
+  assert.deepEqual(firmware(await row(told)), { ranAtEnd: null, reported: '1.0.0+3' }, 'written by the board');
+
+  // A board that has reported nothing: nothing to say.
+  const stranger = await context.deploy([BOARD_B]);
+  const unheard = await row(stranger);
+  assert.deepEqual(firmware(unheard), { ranAtEnd: null, reported: null }, 'never reported');
+  assert.equal(Object.hasOwn(unheard, 'running'), false, 'the old field, which meant both, is gone');
 });
 
 test('what a board writes into its execution is cleaned before it is shown', async () => {
@@ -699,13 +779,13 @@ test('what a board writes into its execution is cleaned before it is shown', asy
 
   const seen = await context.detail(id);
   const rows = Object.fromEntries(seen.executions.map((row) => [row.thing, row]));
-  assert.deepEqual([rows[BOARD_A].phase, rows[BOARD_A].reason, rows[BOARD_A].detail, rows[BOARD_A].running],
+  assert.deepEqual([rows[BOARD_A].phase, rows[BOARD_A].reason, rows[BOARD_A].detail, rows[BOARD_A].ranAtEnd],
     ['failed', null, null, null]);
   // Not the board's "Declined": the reason must match exactly to count.
   assert.deepEqual([rows[BOARD_B].phase, rows[BOARD_B].reason, rows[BOARD_B].detail],
     ['refused', null, 'ok "quoted" <b>text</b>']);
   assert.deepEqual(Object.keys(rows[BOARD_A]).sort(), ['detail', 'lastUpdatedAt', 'online', 'phase', 'progress',
-    'queuedAt', 'reason', 'running', 'secondsLeft', 'startedAt', 'status', 'thing']);
+    'queuedAt', 'ranAtEnd', 'reason', 'reported', 'secondsLeft', 'startedAt', 'status', 'thing']);
 });
 
 test('a detail is cached for two seconds and finished executions are described once', async () => {

@@ -565,6 +565,17 @@ function createBoard(fake, thing, version, say) {
       board.powered = false;
     },
 
+    /**
+     * Flashed over USB or serial, and back on the network: it runs something else, and
+     * no job knows about it.
+     */
+    flash(flashed, uptime = 6) {
+      board.version = flashed;
+      board.last = 'none';
+      board.error = '';
+      report({ uptime });
+    },
+
     /** The report a board sends when nothing has changed, at least once a minute. */
     heartbeat() {
       if (board.powered) report();
@@ -749,7 +760,32 @@ function createStage({ fake, clock, boards, callApi, say }) {
 
     async deploy(version, targets, note) {
       const things = targets.map((board) => board.thing);
-      await request('POST', '/api/deployments', { version, things, note }, 'ok');
+      return (await request('POST', '/api/deployments', { version, things, note }, 'ok')).deployment.id;
+    },
+
+    async cancel(id, force = false) {
+      await request('POST', `/api/deployments/${id}/cancel`, { force }, 'ok');
+    },
+
+    /** A job made directly in AWS IoT, which ended before anyone looked: the console had no part in it. */
+    async outsideJob(name, board, status, details) {
+      const jobId = `cranium-bench-${name}`;
+      await fake.createJob({
+        jobId, things: [board.thing], document: '{}', description: '{}', urlExpiresInSec: 600, inProgressTimeoutMinutes: 30,
+      });
+      fake.execution(jobId, board.thing).update(status, { running: board.version, ...details });
+    },
+
+    /** A job made directly in AWS IoT that offers a board a version: the console has no part in it. */
+    async outsideOffer(name, board, version) {
+      await fake.createJob({
+        jobId: `cranium-bench-${name}`,
+        things: [board.thing],
+        document: JSON.stringify({ op: 'fw_update', fw: { version, sha256: '0'.repeat(64) } }),
+        description: '{}',
+        urlExpiresInSec: 600,
+        inProgressTimeoutMinutes: 30,
+      });
     },
 
     async revoke(version, reason) {
@@ -791,6 +827,42 @@ async function restarted(stage) {
   return board;
 }
 
+/**
+ * One board with a past, as a real one has: an update it declined, one that was cancelled
+ * before it started and one it installed, jobs made directly in AWS IoT, and then 1.3.0+0
+ * over USB, which is newer than every release and is not one of them.
+ */
+async function flashedOverUsb(stage) {
+  const board = await oneBoard(stage);
+  stage.ago('24m');
+  await stage.deploy('1.2.3+5', [board], 'Declined on the board.');
+  stage.ago('23m');
+  board.lookForJob();
+  board.pressButton2();
+  stage.ago('21m');
+  const cancelled = await stage.deploy('1.2.3+5', [board], 'Cancelled before the board started.');
+  stage.ago('20m');
+  await stage.cancel(cancelled);
+  stage.ago('19m');
+  await stage.outsideJob('20261010T100000-0a0a', board, 'FAILED', { reason: 'download_failed' });
+  stage.ago('18m');
+  await stage.outsideJob('20261010T101000-0b0b', board, 'SUCCEEDED', {});
+  stage.ago('15m');
+  await stage.deploy('1.2.3+5', [board], 'Installed.');
+  stage.ago('14m50s');
+  board.lookForJob();
+  stage.ago('14m');
+  board.pressButton1();
+  stage.ago('13m30s');
+  board.download(100);
+  board.install();
+  stage.ago('11m');
+  board.comeBack({ kept: true });
+  stage.ago('6m');
+  board.flash('1.3.0+0');
+  return board;
+}
+
 export const SCENARIOS = Object.freeze({
   empty: {
     summary: 'Nothing is registered yet: every page shows its empty state.',
@@ -814,6 +886,29 @@ export const SCENARIOS = Object.freeze({
       board.download(40);
     },
   },
+  'lost-during-download': {
+    summary: 'Button 1 was pressed and the download reached 40%; then the board went offline.',
+    async build(stage) {
+      const board = await offered(stage);
+      stage.ago('5m');
+      board.pressButton1();
+      stage.ago('4m30s');
+      board.download(40);
+      board.disconnect();
+    },
+  },
+  'outside-job': {
+    summary: 'The board is downloading 1.2.3+5 from a job made directly in AWS IoT: no deployment of this console.',
+    async build(stage) {
+      const board = await oneBoard(stage);
+      stage.ago('2m');
+      await stage.outsideOffer('20261010T100000-0a0a', board, '1.2.3+5');
+      board.lookForJob();
+      board.pressButton1();
+      stage.ago('40s');
+      board.download(40);
+    },
+  },
   'rolled-back': {
     summary: 'The board installed 1.2.3+5, could not reconnect, and is back on 1.2.3+4.',
     async build(stage) {
@@ -828,6 +923,26 @@ export const SCENARIOS = Object.freeze({
       const board = await restarted(stage);
       stage.ago('3m40s');
       board.comeBack({ kept: true, uptime: 8 });
+    },
+  },
+  'gone-offline': {
+    summary: 'The board installed 1.2.3+5 and confirmed it, and has been offline since.',
+    async build(stage) {
+      const board = await restarted(stage);
+      stage.ago('3m40s');
+      board.comeBack({ kept: true, uptime: 8 });
+      board.disconnect();
+    },
+  },
+  'flashed-over-usb': {
+    summary: 'After some deployments the board was flashed over USB with 1.3.0+0, which is not a registered release.',
+    build: flashedOverUsb,
+  },
+  'flashed-then-offline': {
+    summary: 'The same, and the board has been offline since it reported 1.3.0+0.',
+    async build(stage) {
+      const board = await flashedOverUsb(stage);
+      board.disconnect();
     },
   },
   revoked: {

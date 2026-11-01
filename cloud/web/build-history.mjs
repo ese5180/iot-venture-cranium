@@ -7,8 +7,9 @@
  *   node cloud/web/build-history.mjs [--repo <dir>] [--out <file>]
  *                                    [--commit <full id>] [--tree <clean|dirty|unknown>]
  *
- * Of a commit it keeps the short id, the full id, the date, the subject and which parts of
- * the project it touched. Never who wrote it, and never the body of the message, where
+ * Of a commit it keeps the short id, the full id, the date it was written (the author date:
+ * a rebase or a merge moves the committer date of many commits to one moment), the subject
+ * and which parts of the project it touched. Never who wrote it, and never the body of the message, where
  * Signed-off-by lines hold addresses. A subject can name an address too, so those are
  * taken out. Only the newest LIMIT commits are kept.
  *
@@ -59,8 +60,8 @@ function git(repo, ...args) {
 
 /** The newest commits. A merge counts what it changed against its first parent. */
 export function readCommits(repo, limit = LIMIT) {
-  const text = git(repo, 'log', `--max-count=${limit}`, '--no-renames', '--diff-merges=first-parent', '--name-only',
-    '--format=%x01%H%x00%h%x00%cI%x00%s%x00');
+  const text = git(repo, 'log', `--max-count=${limit}`, '--author-date-order', '--no-renames', '--diff-merges=first-parent',
+    '--name-only', '--format=%x01%H%x00%h%x00%aI%x00%s%x00');
   const commits = [];
   for (const record of text.split('\u0001').slice(1)) {
     const [hash, short, date, subject, files] = record.split('\0');
@@ -73,7 +74,8 @@ export function readCommits(repo, limit = LIMIT) {
       tags: tagsOf(files.split('\n').filter(Boolean)),
     });
   }
-  return commits;
+  // By the date each one shows: a rebase can leave a commit under one written after it.
+  return commits.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
 }
 
 export function buildHistory({ repo = REPO, commit, tree = 'unknown', now = new Date() } = {}) {

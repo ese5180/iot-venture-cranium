@@ -566,9 +566,9 @@ test('the log does not take away the pages that were loaded by hand', async (t) 
 
 test('a board that a forced cancellation found restarting is followed until it is back', async (t) => {
   const started = { status: 'CANCELED', startedAt: ago(100), lastUpdatedAt: ago(1) };
-  const run = (running) => deployment(OFFERED, {
+  const run = (reported) => deployment(OFFERED, {
     status: 'CANCELED',
-    executions: [execution(WAITING, 'cancelled', { ...started, running })],
+    executions: [execution(WAITING, 'cancelled', { ...started, reported })],
   });
   const restarting = device(WAITING, {
     ota: { state: 'rebooting', job: OFFERED, progress: 0, last: 'none', error: '' },
@@ -584,7 +584,10 @@ test('a board that a forced cancellation found restarting is followed until it i
 
   tab.becomes({
     ...WORLD,
-    devices: [device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } })],
+    devices: [device(WAITING, {
+      fw: { version: '1.2.3+5', confirmed: true },
+      ota: { state: 'idle', job: null, progress: 0, last: 'succeeded', error: '' },
+    })],
     deployments: [run('1.2.3+5')],
   });
   await tab.wait(3000);
@@ -594,6 +597,26 @@ test('a board that a forced cancellation found restarting is followed until it i
   const mark = tab.requests.length;
   await tab.wait(60000);
   assert.deepEqual(tab.since(mark), []);
+});
+
+test('a board\'s list of updates is not read again while the copy in hand is of what it reports now', async (t) => {
+  const board = device(WAITING, {
+    fw: { version: '1.2.3+5', confirmed: true },
+    ota: { state: 'testing', job: OFFERED, progress: 0, last: 'none', error: '' },
+  });
+  const run = deployment(OFFERED, {
+    status: 'CANCELED',
+    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), lastUpdatedAt: ago(1), reported: '1.2.3+5' })],
+  });
+  const tab = await openTab(t, { hash: `#/deployments/${OFFERED}`, world: { ...WORLD, devices: [board], deployments: [run] } });
+  await tab.wait(0);
+  assert.match(textOf(one(tab.main, 'span.freshness-live')), /every 3 s/);
+  const mark = tab.requests.length;
+  await tab.wait(3000);
+  await tab.wait(3000);
+  const asked = tab.since(mark);
+  assert.equal(asked.includes(`GET /api/deployments/${OFFERED}`), true, 'the page is being followed');
+  assert.equal(asked.includes(`GET /api/devices/${WAITING}`), false);
 });
 
 test('a release revoked elsewhere stops being offered again on a page that is already open', async (t) => {
@@ -625,7 +648,7 @@ test('a copy of a board\'s history from before it ran the version is read again,
   const board = (version) => device(WAITING, { fw: { version, confirmed: true } });
   const cancelled = deployment(OFFERED, {
     status: 'CANCELED',
-    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), running: '1.2.3+4' })],
+    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), reported: '1.2.3+4' })],
   });
   let down = false;
   const tab = await openTab(t, {
@@ -636,11 +659,11 @@ test('a copy of a board\'s history from before it ran the version is read again,
   // The board moves on while this copy stays in memory. A later deployment did it.
   const later = deployment('cranium-1-2-3-b5-20261010T115800Z-0d0d', {
     status: 'COMPLETED',
-    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', startedAt: ago(50), running: '1.2.3+5' })],
+    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', startedAt: ago(50), ranAtEnd: '1.2.3+5' })],
   });
   const run = deployment(OFFERED, {
     status: 'CANCELED',
-    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), running: '1.2.3+5' })],
+    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), reported: '1.2.3+5' })],
   });
   tab.becomes({ ...WORLD, devices: [board('1.2.3+5')], deployments: [run, later] });
   down = true;
@@ -986,6 +1009,34 @@ test('a revocation is confirmed at once; which boards still run the release foll
   ]);
 });
 
+const REVOKED_AWAY = { online: false, lastSeen: ago(3600) };
+const onRevoked = (thing, changes) => device(thing, { fw: { version: '1.2.4+0', confirmed: true }, ...changes });
+for (const [who, devices, said] of [
+  ['one board offline', [onRevoked(WAITING, REVOKED_AWAY)],
+    `${WAITING} last reported running it; to replace it there, upload a newer version and deploy that.`],
+  ['one board online and one offline', [onRevoked(WAITING), onRevoked(INSTALLING, REVOKED_AWAY)],
+    '1 board still runs it and 1 board last reported running it; to replace it there, upload a newer version and deploy that.'],
+  ['an offline board on something else', [device(WAITING, REVOKED_AWAY)], 'Revoked 1.2.4+0. No deployment of it was still open.'],
+]) {
+  test(`after a revocation, an offline board is told by what it last reported: ${who}`, async (t) => {
+    const tab = await openTab(t, {
+      world: { ...WORLD, devices, deployments: [] },
+      hash: '#/firmware',
+      answer(method, url) {
+        if (method === 'POST' && url === '/api/firmware/1.2.4+0/revoke') {
+          return Response.json({ release: release('1.2.4+0', { status: 'revoked', revoked: revoked({ enforcedAt: ago(0) }) }), cancelled: [] });
+        }
+        return null;
+      },
+    });
+    await tab.press(releaseRow(tab, '1.2.4+0'), 'button', 'Revoke');
+    await tab.type(one(tab.dialog(), 'textarea'), 'A reason.');
+    await tab.submit();
+    await settle();
+    assert.equal(tab.toasts().at(-1), said);
+  });
+}
+
 test('a release that somebody else revoked first is not reported as "not revoked"', async (t) => {
   const already = () => refusal(409, 'already_revoked', 'Release 1.2.4+0 is already revoked.');
   const tab = await openTab(t, {
@@ -1240,11 +1291,11 @@ test('a board that runs what was cancelled: its own list of updates says who ins
   const later = 'cranium-1-2-3-b5-20261010T115800Z-0d0d';
   const cancelled = deployment(OFFERED, {
     status: 'CANCELED',
-    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(300), running: '1.2.3+5' })],
+    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(300), reported: '1.2.3+5' })],
   });
   const installer = deployment(later, {
     status: 'COMPLETED',
-    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', startedAt: ago(100), running: '1.2.3+5' })],
+    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', startedAt: ago(100), ranAtEnd: '1.2.3+5' })],
   });
   const board = device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } });
   const tab = await openTab(t, {

@@ -107,6 +107,9 @@ const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+// From this age on a time is told by its date, not by how long ago it was.
+const DATED_FROM = 14 * DAY;
+
 /** "3 min ago". Empty if there is no time. */
 export function timeAgo(iso, nowMs) {
   const then = Date.parse(iso);
@@ -116,8 +119,14 @@ export function timeAgo(iso, nowMs) {
   if (elapsed < MINUTE) return `${Math.floor(elapsed / SECOND)} s ago`;
   if (elapsed < HOUR) return `${Math.floor(elapsed / MINUTE)} min ago`;
   if (elapsed < DAY) return `${Math.floor(elapsed / HOUR)} h ago`;
-  if (elapsed < 14 * DAY) return `${Math.floor(elapsed / DAY)} d ago`;
+  if (elapsed < DATED_FROM) return `${Math.floor(elapsed / DAY)} d ago`;
   return new Date(then).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+/** True for a time that timeAgo() tells by its date. */
+export function toldByDate(iso, nowMs) {
+  const then = Date.parse(iso);
+  return !Number.isNaN(then) && nowMs - then >= DATED_FROM;
 }
 
 /** The full local date and time, for a tooltip. */
@@ -139,6 +148,22 @@ export function clockTime(iso, nowMs) {
   return then.toDateString() === new Date(nowMs).toDateString()
     ? then.toLocaleTimeString(undefined, time)
     : then.toLocaleString(undefined, { day: 'numeric', month: 'short', ...time });
+}
+
+/** The date and the time of day, for a time so old that "ago" says nothing. */
+export function dateAndTime(iso) {
+  const then = new Date(Date.parse(iso));
+  if (Number.isNaN(then.getTime())) return '';
+  return then.toLocaleString(undefined, {
+    day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+/** The time of day alone, for an entry under a heading that already names its day. */
+export function timeOfDay(iso) {
+  const then = new Date(Date.parse(iso));
+  if (Number.isNaN(then.getTime())) return '';
+  return then.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
 /** "Today", "Yesterday" or a date: the heading a log entry is filed under. */
@@ -450,6 +475,8 @@ function readDeviceDetail(body) {
     device: readDevice(reply.device),
     certificates: texts(list(reply.certificates)).map((id) => boardText(id)),
     executions: list(reply.executions).map(readExecutionSummary),
+    // How many older updates the server left out of `executions`.
+    olderExecutions: whole(reply.olderExecutions, 0, 2 ** 32) ?? 0,
   };
 }
 
@@ -520,7 +547,11 @@ function readExecution(raw) {
     progress: whole(item.progress, 0, 100),
     reason: boardText(item.reason, 48) || null,
     detail: boardText(item.detail, 96) || null,
-    running: versionOrNull(item.running),
+    // What the job recorded when the board finished the update: history. See firmwareOf in
+    // the API. Never the same thing as `reported`, the board's latest word, which an
+    // execution that the board did not finish has instead.
+    ranAtEnd: versionOrNull(item.ranAtEnd),
+    reported: versionOrNull(item.reported),
     online: item.online === true,
     queuedAt: instant(item.queuedAt),
     startedAt: instant(item.startedAt),
@@ -726,6 +757,24 @@ export function revocationInPlace(error) {
 }
 
 /**
+ * That boards report a release that was just revoked. What an offline board runs is only
+ * what it last reported, and may no longer be so.
+ *
+ * @param {{thing: string, online: boolean}[]} boards
+ */
+export function stillRunning(boards) {
+  const heard = boards.filter((board) => board.online).length;
+  const quiet = boards.length - heard;
+  const who = boards.length === 1
+    ? `${boards[0].thing} ${heard === 1 ? 'still runs it' : 'last reported running it'}`
+    : [
+      heard > 0 ? plural(heard, 'board still runs it', 'boards still run it') : null,
+      quiet > 0 ? `${plural(quiet, 'board')} last reported running it` : null,
+    ].filter(Boolean).join(' and ');
+  return `${who}; to replace it there, upload a newer version and deploy that.`;
+}
+
+/**
  * What to say once a revocation has gone through.
  *
  * @param {string} version
@@ -733,13 +782,8 @@ export function revocationInPlace(error) {
  * @param {string[]|null} result.cancelled  the deployments it cancelled; null when the
  *                                          server only said that all is in place
  * @param {boolean} result.again            the release was revoked before this request
- * @param {string[]} [result.running]       the boards that report that they run it
+ * @param {{thing: string, online: boolean}[]} [result.running]  the boards that report it
  */
-export function stillRunning(running) {
-  const who = running.length === 1 ? `${running[0]} still runs it` : `${running.length} boards still run it`;
-  return `${who}; to replace it there, upload a newer version and deploy that.`;
-}
-
 export function revocationNotice(version, { cancelled, again, running = [] }) {
   const still = running.length > 0 ? ` ${stillRunning(running)}` : '';
   if (cancelled === null) {
@@ -1380,6 +1424,16 @@ export function alreadyRuns(device, version) {
 }
 
 /**
+ * True for a version that is not in the list of releases: it reached the board some other
+ * way than a deployment of a release from this list. Nothing is said while the list has
+ * not been read, or while it is empty and there is nothing to be registered among.
+ */
+export function isUnregistered(version, releases) {
+  return Boolean(version) && Array.isArray(releases) && releases.length > 0 &&
+    !releases.some((release) => release.version === version);
+}
+
+/**
  * The board to tick without being asked: the only one that has no unfinished update,
  * unless it would refuse the release anyway. Null when there is a choice to make.
  * `busy` holds the names of the boards that are not free.
@@ -1420,12 +1474,13 @@ const VERIFIED = 3;
 const RESTARTED = 4;
 const TESTED = 5;
 
+// Told in the past: every one of these is about an update that is over, however long ago.
 const REFUSALS = {
-  not_newer: 'the board already runs this version or a newer one',
-  too_large: 'the image is larger than the board’s update slot',
+  not_newer: 'the board already ran this version or a newer one',
+  too_large: 'the image was larger than the board’s update slot',
   bad_document: 'the board could not read the update instructions',
-  unsupported: 'the board does not support this kind of update',
-  url_not_allowed: 'the download address is not one the board accepts',
+  unsupported: 'the board did not support this kind of update',
+  url_not_allowed: 'the download address was not one the board accepts',
 };
 
 // `at` is the step that failed, where the board says enough to tell.
@@ -1478,9 +1533,12 @@ function entryOf(table, name) {
  * reached when it was told to stop or went quiet: nothing went wrong there, and nothing
  * after it took place. `refusal` calls the failed step what it was when nobody turned
  * the update down by hand. `unknown` says that nothing can be told about the steps after
- * the ones that are done.
+ * the ones that are done. `lastSeen` says that `stopped` is only where the board was when
+ * it was last heard of, and `word` then says so instead of the word for a stop.
  */
-function steps(done, { current = null, failed = null, stopped = null, ended = false, refusal = null, unknown = false } = {}) {
+function steps(done, {
+  current = null, failed = null, stopped = null, ended = false, refusal = null, unknown = false, lastSeen = false,
+} = {}) {
   return STEPS.map((step, index) => {
     let state = unknown ? 'unknown' : 'upcoming';
     if (index < done) state = 'done';
@@ -1491,16 +1549,32 @@ function steps(done, { current = null, failed = null, stopped = null, ended = fa
     let label = step.name;
     if (state === 'current' || state === 'stopped') label = step.doing ?? step.name;
     else if (state === 'failed') label = refusal ?? step.failed ?? step.name;
-    return { label, state };
+    return lastSeen && state === 'stopped' ? { label, state, word: 'last seen here' } : { label, state };
   });
 }
+
+const mayHaveInstalled = (entry) => entry.status === 'SUCCEEDED' || entry.status === 'IN_PROGRESS';
 
 /** The other deployment that put this version on a board, from the board's own list of updates. */
 function otherInstall(history, deployment, version) {
   const other = (history ?? []).find((entry) => entry.deployment !== deployment &&
-    (entry.version ?? versionOfDeployment(entry.deployment)) === version &&
-    (entry.status === 'SUCCEEDED' || entry.status === 'IN_PROGRESS'));
+    (entry.version ?? versionOfDeployment(entry.deployment)) === version && mayHaveInstalled(entry));
   return other?.deployment ?? null;
+}
+
+/** True if a job that this console did not start, whose version it cannot know, may have put a version on a board. */
+function outsideInstall(history) {
+  return history.some((entry) => !(entry.version ?? versionOfDeployment(entry.deployment)) && mayHaveInstalled(entry));
+}
+
+/**
+ * What became of a board after an update ended, where it reports something else than it
+ * did then. How it got there is not on record, so that is not said.
+ */
+function movedSince(board, ranAtEnd) {
+  const now = board?.fw?.version;
+  if (!now || !ranAtEnd || now === ranAtEnd) return '';
+  return board.online ? ` It has since moved to ${now}.` : ` When last seen, it had moved to ${now}.`;
 }
 
 function firstSentence(text) {
@@ -1524,6 +1598,9 @@ function description(tone, icon, title, text, timeline, extra = {}) {
   };
 }
 
+const STILL_OPEN = ' The update stays open until the board reports back or the time limit ends.';
+const TRIAL_RULE = 'It is kept once the board has reconnected to AWS IoT; if it cannot, the bootloader puts the previous firmware back.';
+
 /**
  * Describe one board's part in a deployment.
  *
@@ -1533,8 +1610,10 @@ function description(tone, icon, title, text, timeline, extra = {}) {
  * @param {string|null} [known.deployment]  the id of the deployment
  * @param {string|null} [known.version]     the version the deployment installs
  * @param {Array|null} [known.history]      the board's own list of updates; null while it has
- *   not been read. A cancelled execution's `running` is what the board reports now, so
+ *   not been read. A cancelled execution's `reported` is what the board reports now, so
  *   this is what tells whether another deployment is what put a version there.
+ * @param {boolean} [known.historyCut]      that list leaves older updates out, so what it
+ *   does not hold says nothing.
  * @param {boolean} [known.unread]          the board list has not been read yet, so that
  *   `board` being null does not mean that the board has nothing to say.
  * @returns {{tone: string, icon: string, title: string, text: string, brief: string,
@@ -1546,11 +1625,30 @@ function description(tone, icon, title, text, timeline, extra = {}) {
  *   `installed` says that it went through all the same, `installedBy` names the other
  *   deployment that installed this version, and `unsure` that this cannot be told yet.
  */
-export function describeExecution(execution, { board = null, deployment = null, version = null, history, unread = false } = {}) {
-  const { phase, reason, running, online, progress, startedAt } = execution;
-  const reports = running ? ` The board reports that it runs ${running}.` : '';
-  const kept = ' It keeps running the firmware it had.';
-  const again = { next: 'To try again, start a new deployment.', retry: true };
+export function describeExecution(execution, {
+  board = null, deployment = null, version = null, history = null, historyCut = false, unread = false,
+} = {}) {
+  const { phase, reason, ranAtEnd, reported, online, progress, startedAt } = execution;
+  // An update that the board saw through to its end: `ranAtEnd` is what the board said then,
+  // kept with the job. It stays as it was however long ago that was, so it is told in the
+  // past. Where the job holds none, or could not be read, no version is named at all.
+  const ranThen = ranAtEnd ? ` The board was running ${ranAtEnd} at the time.` : '';
+  const kept = ranAtEnd ? ` It kept running the firmware it had, ${ranAtEnd}.` : ' It kept running the firmware it had.';
+  const since = movedSince(board, ranAtEnd);
+  // An update the board could not see through (cancelled, timed out): `reported` is the
+  // board's own latest report. An offline board's is old news, and says so.
+  let reports = '';
+  if (reported) reports = online ? ` The board reports that it runs ${reported}.` : ` When last seen, the board reported ${reported}.`;
+  // Offering this release again only makes sense if the board would not refuse it: the rule
+  // of the deployment dialog. While the board list has not been read it cannot be told.
+  const mayRetry = !unread && !(board && alreadyRuns(board, version));
+  const again = (next = 'To try again, start a new deployment.') => (mayRetry ? { next, retry: true } : {});
+  const target = version ?? 'an update';
+  // A step of an update under way. A board that has gone offline can only say where it was
+  // when it was last heard of, so that is what is said, and it is not drawn as moving.
+  const underWay = (iconName, at, { title, text, extra }, { was, quiet }) => (online
+    ? description('live', iconName, title, text, steps(at, { current: at }), extra)
+    : description('idle', iconName, `Was ${was} when last seen`, quiet, steps(at, { stopped: at, unknown: true, lastSeen: true })));
 
   switch (phase) {
     case 'waiting_for_device':
@@ -1576,89 +1674,117 @@ export function describeExecution(execution, { board = null, deployment = null, 
         'while the offer is open; Button 2 declines it.',
         steps(1, { current: 1 }));
     case 'downloading':
-      return description('live', 'download', progress === null ? 'Downloading' : `Downloading ${progress}%`,
-        'The board is downloading the image into its spare flash slot. The firmware it runs is ' +
-        'not touched yet.',
-        steps(2, { current: 2 }), { progress, said: 'Downloading' });
+      return underWay('download', 2, {
+        title: progress === null ? 'Downloading' : `Downloading ${progress}%`,
+        text: 'The board is downloading the image into its spare flash slot. The firmware it runs is ' +
+          'not touched yet.',
+        extra: { progress, said: 'Downloading' },
+      }, {
+        was: `downloading ${target}`,
+        quiet: `The board went offline ${progress === null ? 'during the download' : `with the download at ${progress}%`}.${STILL_OPEN}`,
+      });
     case 'verifying':
-      return description('live', 'shield', 'Checking the download',
-        'The board is checking the size, the SHA-256 digest and the version in the signed header ' +
-        'before it installs anything.',
-        steps(3, { current: 3 }));
+      return underWay('shield', 3, {
+        title: 'Checking the download',
+        text: 'The board is checking the size, the SHA-256 digest and the version in the signed header ' +
+          'before it installs anything.',
+      }, {
+        was: `checking the download of ${target}`,
+        quiet: `The board went offline while it was checking the download.${STILL_OPEN}`,
+      });
     case 'rebooting':
-      return description('live', 'restart', 'Restarting',
-        'The board is restarting. The bootloader checks the signature before it starts the new firmware.',
-        steps(4, { current: 4 }));
+      return underWay('restart', 4, {
+        title: 'Restarting',
+        text: 'The board is restarting. The bootloader checks the signature before it starts the new firmware.',
+      }, {
+        was: `restarting into ${target}`,
+        quiet: `The board went offline while it was restarting.${STILL_OPEN}`,
+      });
     case 'testing':
-      return description('live', 'pulse', 'On trial',
-        'The new firmware is running on trial. It is kept once the board has reconnected to AWS IoT; ' +
-        'if it cannot, the bootloader puts the previous firmware back.',
-        steps(5, { current: 5 }));
-    case 'succeeded':
-      return description('good', 'check-circle', 'Installed and confirmed',
-        running
-          ? `The board runs ${running} and has confirmed it.`
-          : 'The board has confirmed the new firmware.',
-        steps(STEPS.length));
+      return underWay('pulse', 5, {
+        title: 'On trial',
+        text: `The new firmware is running on trial. ${TRIAL_RULE}`,
+      }, {
+        was: `on trial with ${target}`,
+        quiet: `The board went offline with the new firmware on trial. ${TRIAL_RULE}`,
+      });
+    case 'succeeded': {
+      // That it went through stays true. That the board runs it is for the board to say today.
+      const holds = Boolean(ranAtEnd) && board?.online === true && board.fw?.version === ranAtEnd && board.fw.confirmed;
+      let told = 'The board confirmed the new firmware.';
+      if (holds) told = `The board runs ${ranAtEnd} and has confirmed it.`;
+      else if (ranAtEnd) told = `The board confirmed ${ranAtEnd} when this update ended.${since}`;
+      return description('good', 'check-circle', 'Installed and confirmed', told, steps(STEPS.length));
+    }
     case 'rolled_back':
       return description('bad', 'undo', 'Rolled back',
         'The bootloader put the previous firmware back. The new firmware started but did not ' +
-        `reconnect to AWS IoT, so it was never confirmed.${reports}`,
+        `reconnect to AWS IoT, so it was never confirmed.${ranAtEnd ? ` That left the board on ${ranAtEnd}.` : ''}${since}`,
         steps(5, { failed: 5, ended: true }),
-        { next: 'Fix the build, then upload a newer version and deploy that.' });
+        // Old news once the board runs this version or a newer one.
+        mayRetry ? { next: 'Fix the build, then upload a newer version and deploy that.' } : {});
     case 'declined':
       return description('warn', 'minus-circle', 'Declined on the board',
-        `Someone pressed Button 2 on the board to decline this update. Nothing was installed.${reports}`,
-        steps(1, { failed: 1, ended: true }), again);
+        `Someone pressed Button 2 on the board to decline this update. Nothing was installed.${ranThen}${since}`,
+        steps(1, { failed: 1, ended: true }), again());
     case 'refused': {
+      // No reason on record: the job holds none, or could not be read. So whether a person
+      // pressed Button 2 or the board refused is not known either.
+      if (!reason) {
+        return description('warn', 'ban', 'Refused or declined',
+          `This update was turned down on the board before anything was installed.${ranThen}${since}`,
+          steps(1, { failed: 1, ended: true }), again());
+      }
       const why = entryOf(REFUSALS, reason);
       const said = why ? `Refused: ${why}.` : 'The board refused this update before installing anything.';
       // Offered again, a board that already runs this version gives the same answer.
       const way = reason === 'not_newer'
         ? { next: 'To put something else on it, upload a newer version and deploy that.' }
-        : { ...again, next: 'Deal with that first, then start a new deployment.' };
-      return description('warn', 'ban', 'Refused by the board', `${said}${reports}`,
+        : again('Deal with that first, then start a new deployment.');
+      return description('warn', 'ban', 'Refused by the board', `${said}${ranThen}${since}`,
         steps(1, { failed: 1, ended: true, refusal: 'Refused' }), { code: why ? null : reason, ...way });
     }
     case 'failed': {
       const failure = entryOf(FAILURES, reason);
       if (failure) {
-        return description('bad', 'x-circle', failure.title, `${failure.text}${kept}${reports}`,
+        return description('bad', 'x-circle', failure.title, `${failure.text}${kept}${since}`,
           steps(failure.at ?? DOWNLOADED,
             failure.at === null ? { stopped: DOWNLOADED, ended: true } : { failed: failure.at, ended: true }),
-          again);
+          again());
       }
       // A refusal reported once the update was under way arrives as a failure.
       const why = entryOf(REFUSALS, reason);
       const said = why ? `The board stopped: ${why}.` : 'The board reported that the update failed.';
-      return description('bad', 'x-circle', 'Failed', `${said}${kept}${reports}`,
-        steps(DOWNLOADED, { stopped: DOWNLOADED, ended: true }), { code: why ? null : reason, ...again });
+      // With no reason on record, where it stopped is not on record either.
+      return description('bad', 'x-circle', 'Failed', `${said}${kept}${since}`,
+        steps(DOWNLOADED, reason ? { stopped: DOWNLOADED, ended: true } : { unknown: true }), { code: why ? null : reason, ...again() });
     }
     case 'cancelled': {
-      // What the board runs now, against what this deployment offered. `running` is what it
-      // reports today, which can be long after this deployment ended.
-      const [now, offered] = [running, version].map((text) => (text ? parseVersion(text) : null));
+      // What the board runs now, against what this deployment offered. `reported` is what it
+      // says today, which can be long after this deployment ended. How it got there, and
+      // when, is not on record: a deployment, a USB cable or a serial port, before or after.
+      const [now, offered] = [reported, version].map((text) => (text ? parseVersion(text) : null));
       const movedOn = Boolean(now && offered) && compareVersions(now, offered) > 0;
-      const runsIt = Boolean(running) && running === version;
+      const runsIt = Boolean(reported) && reported === version;
       if (!startedAt) {
         // The offer was made, and withdrawn before the board acted on it. If the board runs
-        // this version or a newer one all the same, that came from another deployment, and
-        // offering this one again would only be refused.
+        // this version or a newer one all the same, this deployment is not what put it there,
+        // and offering this one again would only be refused.
         if (runsIt || movedOn) {
           const installedBy = runsIt ? otherInstall(history, deployment, version) : null;
           return description('idle', 'stop', 'Cancelled',
-            `Cancelled before the board started, so this deployment installed nothing. A later one put ${running} on the board.`,
-            steps(APPROVED, { ended: true }), { laterCame: true, ...(installedBy ? { installedBy } : {}) });
+            `Cancelled before the board started, so this deployment installed nothing.${reports}`,
+            steps(APPROVED, { ended: true }), installedBy ? { installedBy } : {});
         }
         return description('idle', 'stop', 'Cancelled',
           `Cancelled before the board started. Nothing was installed.${reports}`,
-          steps(APPROVED, { ended: true }), again);
+          steps(APPROVED, { ended: true }), again());
       }
       // It stopped when it was told to, and a later deployment is what installed the version.
       const installedBy = runsIt ? otherInstall(history, deployment, version) : null;
       if (installedBy) {
         return description('idle', 'stop', 'Cancelled',
-          `Cancelled after the board had started, and it stopped there. Another deployment installed ${running}.`,
+          `Cancelled after the board had started, and it stopped there. Another deployment installed ${reported}.`,
           steps(DOWNLOADED, { stopped: DOWNLOADED, ended: true }), { installedBy });
       }
       // A newer version came later. Whether this update had finished before that is not on
@@ -1666,30 +1792,42 @@ export function describeExecution(execution, { board = null, deployment = null, 
       // this version is not offered again, because the board would refuse it.
       if (movedOn) {
         return description('idle', 'stop', 'Cancelled',
-          `Cancelled after the board had started. The board has since moved on to ${running}, so ` +
-          'this page cannot tell how this update ended.',
+          `Cancelled after the board had started.${reports} This page cannot tell how this update ended.`,
           steps(DOWNLOADED, { unknown: true }), { unsure: true });
       }
-      // A board that was past its last look at AWS when the cancellation came: it ends
-      // up on the new firmware all the same, and AWS has no more to say about it.
-      if (runsIt && history !== null) {
+      // A board that was past its last look at AWS when the cancellation came ends up on the
+      // new firmware all the same, and AWS has no more to say about it. So does one flashed
+      // with this version by other means, so this takes the board's own word that its last
+      // update went through, and a whole list of updates with no other job that can have done it.
+      const wentThrough = runsIt && board?.fw?.confirmed && board.ota?.last === 'succeeded' &&
+        Array.isArray(history) && !historyCut && !outsideInstall(history);
+      if (wentThrough) {
         return description('warn', 'alert', 'Installed despite the cancellation',
-          `This deployment was cancelled, but the board had gone too far to be stopped. It now runs ${running}.`,
-          steps(board?.fw && !board.fw.confirmed ? TESTED : STEPS.length, { current: TESTED, ended: true }),
+          'This deployment was cancelled, but the board had gone too far to be stopped. ' +
+          `${online ? 'It now runs' : 'When last seen, it ran'} ${reported}.`,
+          steps(STEPS.length),
           { next: 'To replace it, upload a newer version and deploy that.', installed: true });
       }
       const reached = board?.ota && board.ota.job === deployment ? board.ota.state : null;
       if (reached === 'rebooting' || reached === 'testing') {
         const at = reached === 'rebooting' ? RESTARTED : TESTED;
+        if (!online) {
+          return description('idle', 'restart',
+            `Was ${reached === 'rebooting' ? `restarting into ${target}` : `on trial with ${target}`} when last seen`,
+            'This deployment was cancelled, but the board was already restarting into the new firmware, and it ' +
+            'has gone offline since. What it ends up running will show here.',
+            steps(at, { stopped: at, unknown: true, lastSeen: true }));
+        }
         return description('live', 'restart', 'Finishing despite the cancellation',
           'This deployment was cancelled, but the board was already restarting into the new firmware ' +
           'and cannot be stopped. What it ends up running will show here.',
           steps(at, { current: at, ended: true }));
       }
-      // The board runs this version, and how it got there is not known yet: nothing is claimed.
+      // The board runs this version, and nothing says how it got there: nothing is claimed.
       if (runsIt) {
         return description('idle', 'stop', 'Cancelled',
-          `Cancelled after the board had started. The board now runs ${running}.`,
+          `Cancelled after the board had started. ${online ? 'The board now runs' : 'When last seen, the board ran'} ${reported}; ` +
+          'how it got there is not on record.',
           steps(DOWNLOADED, { unknown: true }), { unsure: true });
       }
       // The board list decides between "it stopped" and "it is restarting and cannot be
@@ -1704,13 +1842,13 @@ export function describeExecution(execution, { board = null, deployment = null, 
         `there and keeps the firmware it had.${reports}`,
         steps(reached === 'verifying' ? VERIFIED : DOWNLOADED,
           { stopped: reached === 'verifying' ? VERIFIED : DOWNLOADED, ended: true }),
-        again);
+        again());
     }
     case 'timed_out':
       return description('bad', 'hourglass', 'Timed out',
         `The board started but did not report a result before the time limit.${reports}`,
         steps(DOWNLOADED, { stopped: DOWNLOADED, ended: true }),
-        { ...again, next: 'Check that the board is powered and online, then start a new deployment.' });
+        again('Check that the board is powered and online, then start a new deployment.'));
     case 'removed':
       return description('idle', 'minus', 'Removed', 'This board was taken out of the deployment.',
         steps(0, { ended: true }));
@@ -1793,7 +1931,8 @@ export function describeUpdate(device) {
       const refusal = entryOf(REFUSALS, ota.error);
       const why = entryOf(FAILURES, ota.error)?.title ?? (refusal ? `Because ${refusal}.` : '');
       const text = ota.last === 'failed' || ota.last === 'refused' ? why : '';
-      return { ...last, ...settled, text };
+      const told = last === LAST_UPDATE.none && !online ? { title: 'No update in progress when last seen' } : null;
+      return { ...last, ...told, ...settled, text };
     }
     case 'awaiting_user':
       return live('act', 'press', `Press ${BUTTON_1} on the board`,
@@ -1814,11 +1953,31 @@ export function describeUpdate(device) {
 }
 
 /**
+ * Where the boards of a deployment that went through stand today. That it went through is
+ * on record for good; that they still run it is for them to say.
+ *
+ *   'current'   every one of them is online, on this version, and has confirmed it
+ *   'unheard'   nothing speaks against it, but not all of them can say so
+ *   'moved'     `moved` holds the ones that report another version
+ */
+export function installStanding(deployment, devices) {
+  const boards = (devices ?? []).filter((device) => deployment.things.includes(device.thing));
+  const moved = deployment.version === null
+    ? []
+    : boards.filter((device) => device.fw && device.fw.version !== deployment.version);
+  if (moved.length > 0) return { state: 'moved', boards, moved };
+  const current = boards.length > 0 && boards.length === deployment.things.length && boards.every((device) =>
+    device.online && device.fw?.version === deployment.version && device.fw.confirmed);
+  return { state: current ? 'current' : 'unheard', boards, moved };
+}
+
+/**
  * The badge for a deployment as a whole. `said` is the sentence for one that is over and
  * has something to tell, good or bad, on a page that would otherwise only say that nothing
- * is going on.
+ * is going on. `devices` is the board list, where it has been read: without it, what a
+ * deployment installed is only told as something that happened.
  */
-export function describeDeployment(deployment) {
+export function describeDeployment(deployment, devices = null) {
   const { status, counts, things } = deployment;
   const total = things.length || COUNTS.reduce((sum, name) => sum + counts[name], 0);
   switch (status) {
@@ -1829,11 +1988,12 @@ export function describeDeployment(deployment) {
     case 'COMPLETED':
       if (total > 0 && counts.succeeded === total) {
         const what = deployment.version ?? 'The update';
+        const verb = installStanding(deployment, devices).state === 'current' ? 'is' : 'was';
         return {
           tone: 'good',
           icon: 'check-circle',
           label: 'Succeeded',
-          said: total === 1 ? `${what} is installed and confirmed.` : `${what} is installed and confirmed on ${total} boards.`,
+          said: `${what} ${verb} installed and confirmed${total === 1 ? '' : ` on ${total} boards`}.`,
         };
       }
       if (counts.succeeded > 0) {
@@ -1932,12 +2092,22 @@ export function nameOf(person) {
 
 // A deployment is named by the version it installs: the words that end in "of" lose it
 // when an entry has no target.
+// `triedAlone` is the whole sentence for a request refused before it named anything.
 const AUDIT_ACTIONS = {
-  'firmware.upload': { done: 'uploaded firmware', tried: 'tried to upload', icon: 'upload' },
-  'firmware.revoke': { done: 'revoked firmware', tried: 'tried to revoke firmware', icon: 'ban' },
-  'deployment.create': { done: 'started a deployment of', tried: 'tried to deploy', icon: 'send' },
+  'firmware.upload': {
+    done: 'uploaded firmware', tried: 'tried to upload', triedAlone: 'tried to upload a file', icon: 'upload',
+  },
+  'firmware.revoke': {
+    done: 'revoked firmware', tried: 'tried to revoke firmware', triedAlone: 'tried to revoke a release', icon: 'ban',
+  },
+  'deployment.create': {
+    done: 'started a deployment of', tried: 'tried to deploy', triedAlone: 'tried to start a deployment', icon: 'send',
+  },
   'deployment.cancel': {
-    done: 'cancelled the deployment of', tried: 'tried to cancel the deployment of', icon: 'stop',
+    done: 'cancelled the deployment of',
+    tried: 'tried to cancel the deployment of',
+    triedAlone: 'tried to cancel a deployment',
+    icon: 'stop',
   },
 };
 
@@ -1953,8 +2123,38 @@ const AUDIT_OUTCOMES = {
   error: { tone: 'bad', icon: 'alert', label: 'Server error' },
 };
 
-// Why the server refused a request, in words, for a log line that only has the code.
-const REFUSAL_WORDS = {
+// Why the server refused a request or failed at it, in words, for a log line that only has
+// the code. Every code the API can record is here: a test goes through its source for them.
+export const REFUSAL_WORDS = {
+  account_inactive: 'The account is not active',
+  already_cancelled: 'That deployment was already cancelled',
+  already_finished: 'That deployment had already finished',
+  already_revoked: 'That release was already revoked',
+  audit_failed: 'The change could not be written to this log',
+  bad_header: 'The image header cannot be read',
+  bad_signing_key: 'The server’s signing key cannot be read',
+  cancel_refused: 'AWS IoT would not cancel it',
+  forbidden: 'This account may not do that',
+  internal_error: 'Something went wrong on the server',
+  invalid_body: 'The request could not be read',
+  invalid_deployment: 'Not a valid deployment ID',
+  invalid_filename: 'The file name has characters the server does not accept, or is too long',
+  invalid_json: 'The request could not be read',
+  invalid_thing: 'Not a valid board name',
+  invalid_things: 'The list of boards is not valid',
+  invalid_version: 'Not a valid version number',
+  not_found: 'There is nothing at that address',
+  payload_too_large: 'The request was too large',
+  release_manager_required: 'Only a release manager can do this',
+  revoke_incomplete: 'The revocation did not finish',
+  throttled: 'AWS asked the server to slow down',
+  timeout: 'The server ran out of time',
+  unauthorized: 'The sign-in was not accepted',
+  unknown_deployment: 'There is no such deployment',
+  unknown_device: 'A board is not registered',
+  unknown_version: 'There is no such release',
+  unsupported_flags: 'Uses image options this project does not',
+  upload_conflict: 'Another upload was under way at that moment',
   wrong_key: 'Signed with a different key than this project’s',
   bad_signature: 'The signature is not valid',
   unsigned: 'Not signed',
@@ -1976,8 +2176,15 @@ const REFUSAL_WORDS = {
   release_revoked: 'The release is revoked',
 };
 
-function yesOrNo(value) {
-  if (value === 'true') return 'yes';
+/** What a cancellation asked for, in the words of the dialog it is asked for in. */
+function forceAsked(value) {
+  if (value === 'true') return 'withdraw the offer and stop boards that had started';
+  return value === 'false' ? 'withdraw the offer' : value;
+}
+
+/** Set when a request failed after AWS had cancelled the job: the entry says so all the same. */
+function cancelledAnyway(value) {
+  if (value === 'true') return 'all the same';
   return value === 'false' ? 'no' : value;
 }
 
@@ -2002,9 +2209,9 @@ const AUDIT_DETAILS = {
   filename: { label: 'File', code: true },
   version: { label: 'Version', code: true },
   things: { label: 'Boards' },
-  force: { label: 'Forced', say: yesOrNo },
+  force: { label: 'Asked to', say: forceAsked },
   reason: { label: 'Reason', sentence: true },
-  cancelled: { label: 'Cancelled', say: yesOrNo },
+  cancelled: { label: 'Cancelled', say: cancelledAnyway },
   size: { label: 'Size', say: (value) => exactBytes(Number(value)) || value },
   sha256: { label: 'SHA-256', code: true },
 };
@@ -2044,7 +2251,8 @@ export function describeAudit(entry) {
   const resumed = entry.action === 'firmware.revoke' && ok && details.get('resumed') === 'true';
   let words = entry.action || 'did something';
   if (resumed) words = 'finished revoking firmware';
-  else if (action) words = ok ? action.done : action.tried;
+  else if (action && ok) words = action.done;
+  else if (action) words = label ? action.tried : action.triedAlone;
 
   const order = [...Object.keys(AUDIT_DETAILS), ...details.keys()];
   const facts = [];

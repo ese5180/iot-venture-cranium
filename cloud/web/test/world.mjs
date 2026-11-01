@@ -73,7 +73,11 @@ export function revoked(completion = {}) {
   return { by: MANAGER, at: ago(1980), reason: REASON, ...completion };
 }
 
+/** The statuses of the ends a board reports itself: see firmwareOf in the API. */
+const ENDS_ON_RECORD = new Set(['SUCCEEDED', 'FAILED', 'REJECTED']);
+
 export function execution(thing, phase, changes = {}) {
+  const onRecord = ENDS_ON_RECORD.has(changes.status);
   return {
     thing,
     status: 'QUEUED',
@@ -81,7 +85,8 @@ export function execution(thing, phase, changes = {}) {
     progress: null,
     reason: null,
     detail: null,
-    running: '1.2.3+4',
+    ranAtEnd: onRecord ? '1.2.3+4' : null,
+    reported: onRecord ? null : '1.2.3+4',
     online: true,
     queuedAt: ago(360),
     startedAt: null,

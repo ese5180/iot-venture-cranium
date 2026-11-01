@@ -338,7 +338,8 @@ test('a cancelled deployment whose board is still installing counts as in progre
     createdAt: ago(1200),
     executions: [execution(INSTALLING, 'cancelled', { status: 'CANCELED' })],
   });
-  const later = await consoleState({ ...WORLD, deployments: [stopped, WORLD.deployments[2]] });
+  const idle = [device(WAITING), device(INSTALLING)];
+  const later = await consoleState({ ...WORLD, devices: idle, deployments: [stopped, WORLD.deployments[2]] });
   assert.match(textOf(page(views.overviewView, later)),
     /No update is in progress\. Last deployment: 1\.2\.4\+0 Cancelled started 20 min ago/);
 });
@@ -347,8 +348,8 @@ test('the overview does not read as all well right after a rollout went wrong', 
   const ended = (executions, changes = {}) => deployment(OFFERED, {
     status: 'COMPLETED', completedAt: ago(120), executions, ...changes,
   });
-  const updates = async (executions, changes) => {
-    const state = await consoleState({ ...EMPTY, devices: WORLD.devices, deployments: [ended(executions, changes)] });
+  const updates = async (executions, changes, devices = [device(WAITING), device(INSTALLING)]) => {
+    const state = await consoleState({ ...EMPTY, devices, deployments: [ended(executions, changes)] });
     return one(page(views.overviewView, state), 'section.overview-updates');
   };
   const titleOf = (card) => one(card, 'p.calm-title');
@@ -373,8 +374,9 @@ test('the overview does not read as all well right after a rollout went wrong', 
   assert.equal(textOf(titleOf(declined)), 'No update is in progress.');
   assert.equal(titleOf(declined).getAttribute('class'), 'calm-title is-idle');
 
-  const fine = await updates([execution(WAITING, 'succeeded', { status: 'SUCCEEDED' })]);
-  // Gone through: said out loud, not only with a tick.
+  const fine = await updates([execution(WAITING, 'succeeded', { status: 'SUCCEEDED' })], {},
+    [device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } })]);
+  // Gone through, and that is what the board reports right now: said out loud, not only with a tick.
   assert.equal(textOf(titleOf(fine)), '1.2.3+5 is installed and confirmed.');
   assert.equal(titleOf(fine).getAttribute('class'), 'calm-title is-good');
   assert.equal(all(fine, 'div.calm.is-good').length, 1);
@@ -385,8 +387,9 @@ test('a last deployment that went wrong opens the panel with its outcome, and a 
   const ended = (executions, changes = {}) => deployment(OFFERED, {
     status: 'COMPLETED', completedAt: ago(120), executions, ...changes,
   });
-  const updates = async (executions) => {
-    const state = await consoleState({ ...EMPTY, devices: WORLD.devices, deployments: [ended(executions)] });
+  const onIt = [WAITING, INSTALLING].map((thing) => device(thing, { fw: { version: '1.2.3+5', confirmed: true } }));
+  const updates = async (executions, devices = WORLD.devices) => {
+    const state = await consoleState({ ...EMPTY, devices, deployments: [ended(executions)] });
     return one(page(views.overviewView, state), 'section.overview-updates');
   };
   const failed = await updates([execution(WAITING, 'rolled_back', { status: 'FAILED', reason: 'rolled_back' })]);
@@ -412,7 +415,7 @@ test('a last deployment that went wrong opens the panel with its outcome, and a 
   const fineTwo = await updates([
     execution(WAITING, 'succeeded', { status: 'SUCCEEDED' }),
     execution(INSTALLING, 'succeeded', { status: 'SUCCEEDED' }),
-  ]);
+  ], onIt);
   assert.equal(all(fineTwo, 'div.calm-outcome').length, 1);
   const called = await updates([execution(WAITING, 'declined', { status: 'REJECTED', reason: 'declined' })]);
   assert.equal(all(called, 'div.calm-outcome').length, 0);
@@ -650,7 +653,7 @@ test('a board that said no is amber, and one that failed is red', async () => {
   const rolledBack = await oneCard('rolled_back', { status: 'FAILED', reason: 'rolled_back', startedAt: ago(30) });
   assert.equal(one(rolledBack, 'ol.steps').getAttribute('class'), 'steps is-bad');
   assert.equal(all(rolledBack, 'div.return-path.is-bad').length, 1);
-  assert.match(textOf(one(rolledBack, 'p.return-label')), /^Back on the previous firmware/);
+  assert.match(textOf(one(rolledBack, 'p.return-label')), /^It went back to the previous firmware/);
 });
 
 test('the way back is drawn from where an update failed, and not from where it was stopped', async () => {
@@ -724,9 +727,9 @@ test('the map of a cancelled update says the same as the words above it', async 
     return one(page(views.deploymentView, state, { id }), 'article.execution');
   };
 
-  // Stopped on its way: the board stays on what it had.
+  // Stopped on its way: the board stays on what it had, which no job holds, so no version is named.
   const stopped = await withBoard({}, device(WAITING));
-  assert.match(primary(stopped), /1\.2\.3\+4/);
+  assert.match(primary(stopped), /Previous firmware Stayed in place/);
   assert.match(secondary(stopped), /1\.2\.3\+5 Not installed/);
 
   // Too far along to be stopped.
@@ -736,17 +739,23 @@ test('the map of a cancelled update says the same as the words above it', async 
   assert.doesNotMatch(secondary(restart), /Not installed/);
 
   // And there it is.
-  const installed = await withBoard({ running: '1.2.3+5' }, device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } }));
+  const wentThrough = { state: 'idle', job: null, progress: 0, last: 'succeeded', error: '' };
+  const installed = await withBoard({ reported: '1.2.3+5' }, device(WAITING, { fw: { version: '1.2.3+5', confirmed: true }, ota: wentThrough }));
   assert.equal(textOf(one(installed, 'p.execution-title')), 'Installed despite the cancellation');
+  assert.match(textOf(one(installed, 'section.flash')), /^Flash memory now/);
   assert.match(primary(installed), /1\.2\.3\+5 Runs from here, confirmed/);
   assert.doesNotMatch(secondary(installed), /Not installed/);
-  const trial = await withBoard({ running: '1.2.3+5' }, device(WAITING, { fw: { version: '1.2.3+5', confirmed: false } }));
-  assert.match(primary(trial), /1\.2\.3\+5 Runs on trial/);
+  // Without the board's word for it, or on its way out of a trial: nothing is claimed.
+  const trial = await withBoard({ reported: '1.2.3+5' }, device(WAITING, { fw: { version: '1.2.3+5', confirmed: false }, ota: wentThrough }));
+  assert.match(primary(trial), /1\.2\.3\+5 What the board reports/);
+  assert.match(secondary(trial), /How this update ended is not known/);
+  assert.equal(textOf(one(trial, 'p.execution-title')), 'Cancelled');
+  assert.match(textOf(one(trial, 'p.execution-text')), /The board now runs 1\.2\.3\+5; how it got there is not on record\./);
 
   // Since then it has moved on to something newer. How this one ended is not on record, so
   // there is no map of that, only what the board reports today, and no way to offer it again.
   const movedOnPage = async () => {
-    const run = deployment(id, { status: 'CANCELED', executions: [execution(WAITING, 'cancelled', { ...started, running: '1.3.0+0' })] });
+    const run = deployment(id, { status: 'CANCELED', executions: [execution(WAITING, 'cancelled', { ...started, reported: '1.3.0+0' })] });
     const state = await consoleState({ ...WORLD, devices: [device(WAITING, { fw: { version: '1.3.0+0', confirmed: true } })], deployments: [run] });
     return page(views.deploymentView, state, { id });
   };
@@ -759,14 +768,14 @@ test('the map of a cancelled update says the same as the words above it', async 
   assert.equal(controls(movedOnDrawn).includes('Offer again'), false);
 
   // Cancelled at the button, and a later deployment installed it: not what ran when this ended.
-  const atButton = await withBoard({ startedAt: null, running: '1.2.3+5' }, device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } }));
+  const atButton = await withBoard({ startedAt: null, reported: '1.2.3+5' }, device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } }));
   assert.match(primary(atButton), /Previous firmware Stayed in place/);
   assert.match(secondary(atButton), /Nothing written/);
   assert.doesNotMatch(textOf(atButton), /To try again/);
 
   // The board runs that version because of another deployment: this one stopped.
   const later = 'cranium-1-2-3-b5-20261010T115800Z-0d0d';
-  const replaced = await withBoard({ running: '1.2.3+5' },
+  const replaced = await withBoard({ reported: '1.2.3+5' },
     device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } }), [{ id: later, status: 'SUCCEEDED' }]);
   assert.equal(textOf(one(replaced, 'p.execution-title')), 'Cancelled');
   assert.match(textOf(replaced), /Another deployment installed 1\.2\.3\+5\./);
@@ -790,8 +799,8 @@ test('a board that a cancellation found restarting is not shown as online', asyn
 });
 
 test('a copy of a board\'s history from before it ran this version does not settle how it got there', async () => {
-  const running = { fw: { version: '1.2.3+5', confirmed: true } };
-  const run = deployment(OFFERED, { status: 'CANCELED', executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), running: '1.2.3+5' })] });
+  const running = { fw: { version: '1.2.3+5', confirmed: true }, ota: { state: 'idle', job: null, progress: 0, last: 'succeeded', error: '' } };
+  const run = deployment(OFFERED, { status: 'CANCELED', executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), reported: '1.2.3+5' })] });
   const world = { ...WORLD, devices: [device(WAITING, running)], deployments: [run] };
   const state = await consoleState(world);
   const drawn = (changes) => page(views.deploymentView, { ...state, ...changes }, { id: OFFERED });
@@ -804,7 +813,7 @@ test('a copy of a board\'s history from before it ran this version does not sett
   stale.set(WAITING, { ...fresh, value: { ...fresh.value, device: device(WAITING) } });
   const pending = drawn({ deviceDetails: stale });
   assert.doesNotMatch(textOf(pending), /Installed despite/);
-  assert.match(textOf(pending), /The board now runs 1\.2\.3\+5\./);
+  assert.match(textOf(pending), /The board now runs 1\.2\.3\+5; how it got there is not on record\./);
   assert.equal(all(pending, 'div.notice.is-bad').length, 0);
   assert.equal(controls(pending).includes('Offer again'), false);
 
@@ -840,7 +849,7 @@ test('the overview does not say that nothing is going on while a board restarts 
 });
 
 test('with the deployments out of date the overview does not say that nothing is going on', async () => {
-  const state = await consoleState({ ...EMPTY, devices: WORLD.devices, releases: WORLD.releases, deployments: [] });
+  const state = await consoleState({ ...EMPTY, devices: [device(WAITING)], releases: WORLD.releases, deployments: [] });
   const failed = { ...state.deployments, error: new core.ApiError(503, 'gateway', 'Service Unavailable') };
   const overview = page(views.overviewView, { ...state, deployments: failed });
   assert.doesNotMatch(textOf(overview), /No update is in progress/);
@@ -1043,19 +1052,20 @@ test('the log says what happened in the words of the console', async () => {
   assert.deepEqual(detail(lines[0]),
     [`Reason: ${REASON}`, 'Deployments cancelled 1', 'Account 0b1c2d3e…', 'Request req-1']);
   assert.deepEqual(detail(lines[1]),
-    ['Forced no', `Deployment ${WITHDRAWN}`, 'Account f9e8d7c6…', 'Request req-1']);
+    ['Asked to withdraw the offer', `Deployment ${WITHDRAWN}`, 'Account f9e8d7c6…', 'Request req-1']);
   assert.deepEqual(detail(lines[2]),
     ['Boards 1', `Deployment ${OFFERED}`, 'Account 0b1c2d3e…', 'Request req-1']);
-  // A refusal in words, with its code after them; the file is what the sentence names already,
+  // A refusal in words, with its code only for whoever points at them; the file is what the sentence names already,
   // and a digest is shortened beside a button that copies all of it.
   assert.deepEqual(detail(lines[3]), [
-    'Signed with a different key than this project’s (wrong_key)', 'Size 1,264 bytes',
+    'Signed with a different key than this project’s.', 'Size 1,264 bytes',
     `SHA-256 ${'c'.repeat(12)}…`, 'Account 7a7a7a7a…', 'Request req-1',
   ]);
   assert.equal(one(lines[3], 'button').getAttribute('aria-label'), `Copy the SHA-256 of ${'c'.repeat(12)}…`);
   // A reason is prose; an identifier is set as one.
   assert.equal(all(one(lines[0], 'span', 'Reason:'), 'span.mono').length, 0);
-  assert.equal(textOf(one(one(lines[3], 'span', 'Signed with'), 'span.mono')), 'wrong_key');
+  assert.equal(all(one(lines[3], 'span', 'Signed with'), 'span.mono').length, 0);
+  assert.equal(one(lines[3], 'span', 'Signed with').getAttribute('title'), 'Code wrong_key');
   // The deployment links to its page under the name of its version.
   assert.equal(one(lines[2], 'a.log-target').getAttribute('href'), `#/deployments/${OFFERED}`);
 });
@@ -1213,10 +1223,11 @@ test('a message at the foot of the page can be closed', () => {
 
 test('versions and file names in a sentence are set like everywhere else', async () => {
   const run = deployment(OFFERED, {
-    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', running: '1.2.3+5' })],
+    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', ranAtEnd: '1.2.3+5' })],
     status: 'COMPLETED',
   });
-  const drawn = page(views.deploymentView, await consoleState({ ...WORLD, deployments: [run] }), { id: OFFERED });
+  const onIt = device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } });
+  const drawn = page(views.deploymentView, await consoleState({ ...WORLD, devices: [onIt], deployments: [run] }), { id: OFFERED });
   assert.equal(textOf(one(drawn, 'p.execution-text')), 'The board runs 1.2.3+5 and has confirmed it.');
   assert.equal(textOf(one(one(drawn, 'p.execution-text'), 'span.mono')), '1.2.3+5');
 });
@@ -1935,4 +1946,736 @@ test('a dialog says that a request failed next to its buttons, outside the part 
     assert.equal(textOf(one(one(dialog, 'div.dialog-error'), 'span.notice-said')),
       `It is not certain whether this went through. ${failed.message}`, name);
   }
+});
+
+// What a page can truly say about a board it cannot hear, or that has left what is on record.
+
+const CURRENT = 'cranium-1-2-3-b5-20261010T090000Z-0e0e';
+const onVersion = (version, changes = {}) => device(WAITING, { fw: { version, confirmed: true }, ...changes });
+const quiet = { online: false, lastSeen: ago(3600) };
+const installedRun = (changes = {}) => deployment(CURRENT, {
+  status: 'COMPLETED',
+  createdAt: ago(7200),
+  completedAt: ago(7000),
+  executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', startedAt: ago(7100), ranAtEnd: '1.2.3+5', ...changes })],
+});
+const RELEASES = [release('1.2.3+5'), release('1.2.3+4')];
+const worldOf = (board, run = installedRun({ online: board.online })) =>
+  ({ ...EMPTY, devices: [board], releases: RELEASES, deployments: [run] });
+const titleOf = (drawn) => one(drawn, 'p.calm-title');
+const fleetOf = (drawn) => one(drawn, 'section.card', 'Firmware in the fleet');
+
+test('an offline board\'s last report is told as that, with when, across the overview', async () => {
+  const drawn = page(views.overviewView, await consoleState(worldOf(onVersion('1.2.3+5', quiet))));
+  assert.equal(textOf(titleOf(drawn)), '1.2.3+5 was installed and confirmed.');
+  assert.match(textOf(one(drawn, 'p.calm-since')), /^As last reported: the board is offline, last seen 1 h ago\.$/);
+  assert.match(textOf(one(fleetOf(drawn), 'p.fleet-note')), /^As last reported 1 h ago\.$/);
+  assert.match(textOf(one(drawn, 'p.page-lede')), /^What the boards last reported/);
+  assert.doesNotMatch(textOf(drawn), /What the fleet runs|is installed and confirmed/);
+
+  // Heard right now, on that version: then it is so.
+  const live = page(views.overviewView, await consoleState(worldOf(onVersion('1.2.3+5'))));
+  assert.equal(textOf(titleOf(live)), '1.2.3+5 is installed and confirmed.');
+  assert.equal(all(live, 'p.calm-since').length, 0);
+  assert.equal(all(live, 'p.fleet-note').length, 0);
+
+  // Several boards, some offline: the note counts them and says how old the oldest report is.
+  const two = [onVersion('1.2.3+5', quiet), device(INSTALLING, { online: false, lastSeen: ago(7200), fw: { version: '1.2.3+5', confirmed: true } })];
+  const run = deployment(CURRENT, {
+    status: 'COMPLETED', completedAt: ago(9000),
+    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', online: false }), execution(INSTALLING, 'succeeded', { status: 'SUCCEEDED', online: false })],
+  });
+  const fleet = page(views.overviewView, await consoleState({ ...EMPTY, devices: two, releases: RELEASES, deployments: [run] }));
+  assert.match(textOf(one(fleet, 'p.calm-since')), /^As last reported: 2 of them are offline, the oldest report 2 h ago\.$/);
+  assert.match(textOf(one(fleet, 'p.fleet-note')), /^As last reported, the oldest 2 h ago\.$/);
+});
+
+test('a deployment page does not say what an offline board runs now', async () => {
+  const drawn = page(views.deploymentView, await consoleState(worldOf(onVersion('1.2.3+5', quiet))), { id: CURRENT });
+  assert.equal(textOf(one(drawn, 'p.execution-text')), 'The board confirmed 1.2.3+5 when this update ended.');
+  assert.match(textOf(one(drawn, 'section.flash')), /^Flash memory when this update ended/);
+  assert.match(textOf(one(drawn, 'section.moments')), /Board last seen 1 h ago/);
+
+  // Waiting for it, or how an update ended unknown: the flash map is of when it was last seen.
+  const waiting = deployment(OFFERED, { executions: [execution(WAITING, 'waiting_for_device', { online: false })] });
+  const away = page(views.deploymentView, await consoleState({ ...WORLD, devices: [onVersion('1.2.3+4', quiet)], deployments: [waiting] }), { id: OFFERED });
+  assert.match(textOf(one(away, 'section.flash')), /^Flash memory when last seen/);
+
+  const cancelled = deployment(OFFERED, {
+    status: 'CANCELED',
+    executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), reported: '1.3.0+0', online: false })],
+  });
+  const forced = page(views.deploymentView, await consoleState({ ...WORLD, devices: [onVersion('1.3.0+0', quiet)], deployments: [cancelled] }), { id: OFFERED });
+  const flash = one(forced, 'section.flash');
+  assert.match(textOf(flash), /^Flash memory when last seen/);
+  assert.match(textOf(flash), /1\.3\.0\+0 ?What the board last reported/);
+  assert.doesNotMatch(textOf(forced), /Flash memory now|What the board reports/);
+  assert.equal(textOf(one(forced, 'p.execution-text')),
+    'Cancelled after the board had started. When last seen, the board reported 1.3.0+0. This page cannot tell how this update ended.');
+});
+
+test('a board on firmware that is no release does not read as behind, and says what it runs', async () => {
+  const usb = onVersion('1.3.0+0');
+  const drawn = page(views.overviewView, await consoleState(worldOf(usb)));
+  assert.equal(textOf(titleOf(drawn)), 'The board runs 1.3.0+0, which is not a registered release.');
+  assert.equal(titleOf(drawn).getAttribute('class'), 'calm-title is-warn');
+  assert.equal(all(drawn, 'div.calm.is-warn').length, 1);
+  // The last deployment is still told as what it was, and does not stand as what the board runs.
+  assert.match(textOf(one(drawn, 'p.calm-note')), /^Last deployment: 1\.2\.3\+5 Succeeded 1 h ago\. No update is in progress\.$/);
+  assert.doesNotMatch(textOf(drawn), /installed and confirmed/);
+  // No "0 of 1 on the newest release".
+  const fleet = fleetOf(drawn);
+  assert.equal(textOf(one(fleet, 'p.fleet-headline')), '1 of 1 on firmware that is not a registered release');
+  assert.doesNotMatch(textOf(fleet), /on the newest release/);
+  assert.match(textOf(one(fleet, 'li.fleet-line')), /^1\.3\.0\+0 ?Not a registered release/);
+  assert.match(textOf(one(drawn, 'li.board-line')), /Not a registered release/);
+
+  // On the other pages too, and offline it is told as what the board last reported.
+  const state = await consoleState(worldOf(usb));
+  assert.match(textOf(one(page(views.devicesView, state), 'article.device')), /Not a registered release/);
+  assert.match(textOf(one(page(views.deviceView, state, { thing: WAITING }), 'section.device')), /Not a registered release/);
+  const gone = page(views.overviewView, await consoleState(worldOf(onVersion('1.3.0+0', quiet))));
+  assert.equal(textOf(titleOf(gone)), 'The board last reported 1.3.0+0, which is not a registered release.');
+  assert.match(textOf(one(gone, 'p.calm-since')), /last seen 1 h ago/);
+
+  // Any version not on the list: one older than every release as well.
+  const older = page(views.overviewView, await consoleState(worldOf(onVersion('1.1.5+0'))));
+  assert.equal(textOf(titleOf(older)), 'The board runs 1.1.5+0, which is not a registered release.');
+  assert.equal(textOf(one(fleetOf(older), 'p.fleet-headline')), '1 of 1 on firmware that is not a registered release');
+});
+
+test('among several boards one on firmware that is no release is one row, and the figure stays what it counts', async () => {
+  const boards = [
+    onVersion('1.2.3+5'),
+    device(INSTALLING, { fw: { version: '1.3.0+0', confirmed: true } }),
+    device(NEVER, { fw: { version: '1.2.3+4', confirmed: true } }),
+  ];
+  const run = deployment(CURRENT, {
+    status: 'COMPLETED', completedAt: ago(100),
+    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', ranAtEnd: '1.2.3+5' })],
+  });
+  const drawn = page(views.overviewView, await consoleState({ ...EMPTY, devices: boards, releases: RELEASES, deployments: [run] }));
+  // What the last deployment installed is what its board runs now, so that is the news.
+  assert.equal(textOf(titleOf(drawn)), '1.2.3+5 is installed and confirmed.');
+  const fleet = fleetOf(drawn);
+  assert.equal(textOf(one(fleet, 'p.fleet-headline')), '1 of 3 on the newest release');
+  const rows = all(fleet, 'li.fleet-line');
+  assert.deepEqual(rows.map((row) => all(row, 'span.tag').map(textOf)),
+    [['Not a registered release'], ['Newest release'], []]);
+  assert.equal(all(rows[0], 'span.tile.is-unregistered').length, 1);
+  assert.equal(all(rows[2], 'span.tile.is-older-1').length, 1, 'the first older release is the first step back');
+  // Without a deployment that is what the boards run, the board off the list is what there is to say.
+  const none = page(views.overviewView, await consoleState({ ...EMPTY, devices: boards, releases: RELEASES }));
+  assert.equal(textOf(titleOf(none)), '1 board runs firmware that is not a registered release.');
+  assert.match(textOf(one(none, 'section.overview-updates')), /No update is in progress\./);
+  // A revoked release is on the list, and has its own tag. Before any upload there is no list to be off.
+  const onRevoked = page(views.overviewView, await consoleState(worldOf(onVersion('2.0.0+0'),
+    installedRun())));
+  assert.match(textOf(fleetOf(onRevoked)), /Not a registered release/);
+  const revokedOne = page(views.devicesView, await consoleState({ ...WORLD, devices: [onVersion('2.0.0+0')] }));
+  assert.doesNotMatch(textOf(revokedOne), /Not a registered release/);
+  const noList = page(views.devicesView, await consoleState({ ...EMPTY, devices: [onVersion('1.3.0+0')] }));
+  assert.doesNotMatch(textOf(noList), /Not a registered release/);
+});
+
+test('a board that moved on to another release is said to have, and nothing is ticked off', async () => {
+  const drawn = page(views.overviewView, await consoleState(worldOf(onVersion('1.2.3+4'))));
+  assert.equal(textOf(titleOf(drawn)), 'No update is in progress.');
+  assert.equal(titleOf(drawn).getAttribute('class'), 'calm-title is-idle');
+  assert.equal(textOf(one(drawn, 'p.calm-since')), 'The board has since moved to 1.2.3+4.');
+  const gone = page(views.overviewView, await consoleState(worldOf(onVersion('1.2.3+4', quiet))));
+  assert.equal(textOf(one(gone, 'p.calm-since')), 'When last seen, 1 h ago, the board had moved to 1.2.3+4.');
+
+  // Of several, the note counts them.
+  const boards = [onVersion('1.2.3+4'), device(INSTALLING, { fw: { version: '1.2.3+5', confirmed: true } }), device(NEVER, { fw: { version: '1.2.3+5', confirmed: true } })];
+  const run = deployment(CURRENT, {
+    status: 'COMPLETED', completedAt: ago(100),
+    executions: [WAITING, INSTALLING, NEVER].map((thing) => execution(thing, 'succeeded', { status: 'SUCCEEDED' })),
+  });
+  const three = page(views.overviewView, await consoleState({ ...EMPTY, devices: boards, releases: RELEASES, deployments: [run] }));
+  assert.equal(textOf(one(three, 'p.calm-since')), '1 of 3 boards has moved to other firmware since.');
+});
+
+test('nothing is said about what can be deployed while the releases have not been read', async () => {
+  const state = await consoleState(worldOf(onVersion('1.2.3+5')));
+  const unread = { ...state, firmware: { value: null, error: null, loading: true, loadedAt: 0 } };
+  const fleet = fleetOf(page(views.overviewView, unread));
+  assert.doesNotMatch(textOf(fleet), /No release can be deployed|registered/);
+  assert.match(textOf(one(fleet, 'li.fleet-line')), /^1\.2\.3\+5/);
+  // Once they have been, and there are none, it is so.
+  const none = await consoleState({ ...EMPTY, devices: [onVersion('1.2.3+5')] });
+  assert.match(textOf(fleetOf(page(views.overviewView, none))), /No release can be deployed/);
+});
+
+test('the release list does not say a board is on a release when it was last seen so', async () => {
+  const count = async (board) => textOf(one(one(page(views.firmwareView, await consoleState({ ...WORLD, devices: [board] })), 'li.station.is-newest'), 'span.station-boards'));
+  assert.equal(await count(device(WAITING, { fw: { version: '1.2.4+0', confirmed: true } })), '1 board on it');
+  assert.equal(await count(device(WAITING, { fw: { version: '1.2.4+0', confirmed: true }, ...quiet })), '1 board on it when last seen');
+});
+
+test('a signal an offline board last gave is not told as a signal it has', async () => {
+  const pages = (state) => [
+    one(page(views.overviewView, state), 'span.board-line-signal'),
+    one(page(views.devicesView, state), 'span.signal-fact'),
+    one(page(views.deviceView, state, { thing: WAITING }), 'span.signal-fact'),
+  ];
+  const gone = await consoleState(worldOf(onVersion('1.2.3+5', { ...quiet, rssi: -54 })));
+  for (const cell of pages(gone)) {
+    assert.match(textOf(cell), /^−54 dBm when last seen$/);
+    assert.doesNotMatch(textOf(cell), /Excellent|Good|Fair|Weak/);
+    assert.equal(all(cell, 'svg.signal.is-old').length, 1);
+    assert.equal(all(cell, 'span.quiet').length, 1);
+  }
+  // No needle on a scale: that says where the signal is.
+  assert.equal(all(page(views.deviceView, gone, { thing: WAITING }), 'span.signal-needle').length, 0);
+  assert.doesNotMatch(textOf(page(views.deviceView, gone, { thing: WAITING })), /Excellent/);
+
+  const heard = await consoleState(worldOf(onVersion('1.2.3+5', { rssi: -54 })));
+  const [row, listed, own] = pages(heard);
+  assert.equal(textOf(row), 'Excellent');
+  assert.equal(textOf(listed), 'Excellent · −54 dBm');
+  assert.equal(textOf(own), 'Excellent · −54 dBm');
+  assert.equal(all(row, 'svg.is-old').length, 0);
+  assert.equal(all(page(views.deviceView, heard, { thing: WAITING }), 'span.signal-needle').length, 1);
+});
+
+test('a board\'s update history says when it is cut, and an arrow means a link', async () => {
+  const OUTSIDE = 'cranium-bench-20261010T100000-0a0a';
+  const state = await consoleState(worldOf(onVersion('1.2.3+5')));
+  const rows = [
+    { deployment: CURRENT, version: '1.2.3+5', status: 'SUCCEEDED', queuedAt: ago(7200), startedAt: ago(7100), lastUpdatedAt: ago(7000) },
+    { deployment: OUTSIDE, version: null, status: 'FAILED', queuedAt: ago(9000), startedAt: ago(8900), lastUpdatedAt: ago(8800) },
+  ];
+  const withRows = (older) => {
+    const details = new Map(state.deviceDetails);
+    const resource = details.get(WAITING);
+    details.set(WAITING, { ...resource, value: { ...resource.value, executions: rows, olderExecutions: older } });
+    return page(views.deviceView, { ...state, deviceDetails: details }, { thing: WAITING });
+  };
+  const drawn = withRows(0);
+  const [own, outside] = all(drawn, 'li.history-row');
+  assert.equal(all(own, 'a.cover-link').length, 1);
+  assert.equal(all(own, 'span.row-chevron').length, 1);
+  assert.doesNotMatch(textOf(own), /outside this console/);
+  assert.equal(all(outside, 'a').length, 0);
+  assert.equal(all(outside, 'span.row-chevron').length, 0, 'no arrow on a row that leads nowhere');
+  assert.equal(all(outside, 'span.cover-link').length, 0);
+  assert.match(textOf(outside), new RegExp(`^${OUTSIDE}.*Started outside this console`));
+  assert.equal(all(drawn, 'p.history-cut').length, 0);
+
+  assert.equal(textOf(one(withRows(7), 'p.history-cut')), 'The newest 2 are shown. 7 older updates are not listed.');
+  assert.equal(textOf(one(withRows(1), 'p.history-cut')), 'The newest 2 are shown. 1 older update is not listed.');
+});
+
+test('the activity log says what it covers, without claiming more', async () => {
+  const drawn = page(views.activityView, await consoleState(WORLD));
+  const lede = textOf(one(drawn, 'p.page-lede'));
+  assert.match(lede, /made through this console’s API/);
+  assert.match(lede, /A job made directly in AWS IoT does not pass through that API, so it is not in this log/);
+  assert.match(textOf(one(drawn, 'p.log-summary')), /^All 4 entries/);
+  assert.equal(textOf(one(drawn, 'div.log-more')), 'That is every entry in this log.');
+  assert.doesNotMatch(textOf(drawn), /whole log/);
+  assert.match(textOf(one(page(views.deploymentsView, await consoleState(WORLD)), 'p.page-lede')),
+    /A job made directly in AWS IoT is not listed here/);
+});
+
+test('a declined deployment is told as what it was, and is offered again only where that can work', async () => {
+  const run = deployment(OFFERED, {
+    status: 'COMPLETED',
+    completedAt: ago(100),
+    executions: [execution(WAITING, 'declined', { status: 'REJECTED', reason: 'declined', ranAtEnd: '1.2.3+3', online: false })],
+  });
+  const pageOf = async (board) => page(views.deploymentView,
+    await consoleState({ ...WORLD, devices: [board], deployments: [run] }), { id: OFFERED });
+  const offered = (drawn) => all(drawn, 'button').some((item) => textOf(item).includes('Offer again'));
+
+  // It has moved past what this release is, so it would refuse it.
+  const ahead = await pageOf(onVersion('1.2.4+0', quiet));
+  const text = textOf(one(ahead, 'p.execution-text'));
+  assert.equal(text, 'Someone pressed Button 2 on the board to decline this update. Nothing was installed. ' +
+    'The board was running 1.2.3+3 at the time. When last seen, it had moved to 1.2.4+0.');
+  assert.doesNotMatch(textOf(ahead), /reports that it runs|Still on|To try again/);
+  assert.equal(textOf(one(ahead, 'p.return-label')), 'Nothing was installed. It stayed on 1.2.3+3');
+  assert.match(textOf(one(ahead, 'li.flash-row', 'Primary slot')), /1\.2\.3\+3.*Ran from here, not touched/);
+  assert.equal(offered(ahead), false);
+  assert.equal(all(ahead, 'p.execution-next').length, 0);
+
+  // On exactly this version, the same.
+  assert.equal(offered(await pageOf(onVersion('1.2.3+5'))), false);
+  // Still behind it: an offer can work, and the page says so.
+  const behind = await pageOf(onVersion('1.2.3+3', quiet));
+  assert.equal(offered(behind), true);
+  assert.equal(textOf(one(behind, 'p.execution-next')), 'To try again, start a new deployment.');
+  assert.doesNotMatch(textOf(one(behind, 'p.execution-text')), /moved/);
+  // Until the boards have been read it cannot be told, so it is not offered.
+  const unread = await consoleState({ ...WORLD, devices: [onVersion('1.2.3+3')], deployments: [run] });
+  const notYet = page(views.deploymentView, { ...unread, devices: { ...unread.devices, value: null } }, { id: OFFERED });
+  assert.equal(offered(notYet), false);
+});
+
+test('the tag on a script\'s line is explained once, in words on the page', async () => {
+  const scripted = (seconds, target) => entry('deployment.create', target, {
+    at: ago(seconds), requestId: `bench-${seconds}`, detail: { version: target, things: '1' },
+  });
+  const entries = [scripted(10, '1.2.3+5'), scripted(20, '1.2.3+4'), WORLD.entries[0]];
+  const state = await consoleState({ ...WORLD, entries });
+  for (const drawn of [page(views.activityView, state), one(page(views.overviewView, state), 'section.overview-activity')]) {
+    assert.equal(all(drawn, 'li.log-line').filter((line) => textOf(line).includes('Script, no sign-in')).length, 2);
+    const key = one(drawn, 'p.log-key');
+    assert.equal(all(drawn, 'p.log-key').length, 1, 'once');
+    // What the code that sets the tag and the API function do: see SCRIPTED_REQUEST and the README.
+    assert.match(textOf(key), /^Script, no sign-in Sent by a script .* with AWS credentials, directly to the API function\. Nobody signed in\./);
+    assert.match(textOf(key), /has to be an active release manager, so the entry does not show that this person did it\.$/);
+    // A tooltip cannot be reached on a touch screen, and would only say it again.
+    for (const tag of all(drawn, 'span.tag.is-warn')) assert.equal(tag.getAttribute('title'), null);
+  }
+  const plain = await consoleState(WORLD);
+  assert.equal(all(page(views.activityView, plain), 'p.log-key').length, 0);
+  assert.equal(all(page(views.overviewView, plain), 'p.log-key').length, 0);
+});
+
+test('a line under a day says the time of that day, and old times do not say their day twice', async () => {
+  const old = ago(30 * 86400);
+  const state = await consoleState({ ...WORLD, entries: [entry('firmware.upload', '1.2.3+4', { at: old, detail: { size: '1' } })] });
+  const when = one(page(views.activityView, state), 'span.log-when');
+  assert.equal(textOf(when), core.timeOfDay(old));
+  assert.equal(one(when, 'time').getAttribute('datetime'), old);
+  assert.equal(one(when, 'time').getAttribute('title'), core.exactTime(old));
+  // The short form has no day above it.
+  const short = one(one(page(views.overviewView, state), 'section.overview-activity'), 'span.log-when');
+  assert.equal(textOf(short), core.timeAgo(old, NOW));
+
+  const run = deployment(OFFERED, { status: 'COMPLETED', createdAt: old, completedAt: old, executions: [execution(WAITING, 'declined', { status: 'REJECTED', reason: 'declined', queuedAt: old })] });
+  const meta = one(page(views.deploymentView, await consoleState({ ...WORLD, deployments: [run] }), { id: OFFERED }), 'div.page-meta');
+  const told = core.dateAndTime(old);
+  assert.ok(textOf(meta).includes(`Started ${told} by`), textOf(meta));
+  assert.ok(textOf(meta).includes(`finished ${told}`), textOf(meta));
+  assert.doesNotMatch(textOf(meta), /\(/, 'no time of day in brackets after a date');
+  // A recent one still says how long ago, and when.
+  const recent = one(page(views.deploymentView, await consoleState(WORLD), { id: OFFERED }), 'div.page-meta');
+  assert.match(textOf(recent), /Started 6 min ago \(/);
+});
+
+test('a release signed with an earlier key says so, and the panel says what that means', async () => {
+  const OTHER = 'a'.repeat(64);
+  const world = { ...WORLD, releases: [release('1.2.3+5'), release('1.2.3+4', { keyHash: OTHER }), release('1.2.3+3', { keyHash: OTHER })] };
+  const drawn = page(views.firmwareView, await consoleState(world));
+  const signed = (version) => textOf(one(one(drawn, 'li.release', version), 'div.fact', 'Signed with'));
+  assert.match(signed('1.2.3+5'), /Matches this project’s signing key\.$/);
+  assert.match(signed('1.2.3+4'), /Not the current signing key\. This release was signed with an earlier key, which has been replaced since\.$/);
+  assert.equal(textOf(one(drawn, 'p.fingerprint-note')),
+    '2 older releases were signed with an earlier key, which has been replaced since, so they show another fingerprint.');
+
+  const same = page(views.firmwareView, await consoleState(WORLD));
+  assert.equal(all(same, 'p.fingerprint-note').length, 0);
+});
+
+test('the firmware rows of one board have no tile to look like a box to tick', async () => {
+  const one_ = page(views.overviewView, await consoleState(worldOf(onVersion('1.2.3+5'))));
+  assert.equal(all(fleetOf(one_), 'span.tile').length, 0);
+  assert.match(textOf(one(fleetOf(one_), 'li.fleet-line')), /1 board$/);
+  const two = page(views.overviewView, await consoleState({ ...worldOf(onVersion('1.2.3+5')), devices: [onVersion('1.2.3+5'), device(INSTALLING)] }));
+  assert.equal(all(fleetOf(two), 'span.tile').length, 2);
+});
+
+test('the wizard does not say what an offline board runs', async () => {
+  const model = {
+    step: 1, version: '1.2.3+5', things: new Set(), busy: new Map(), releases: RELEASES, loading: false, loadError: null,
+    devices: [onVersion('1.2.3+4', quiet), device(INSTALLING)],
+  };
+  const drawn = draw(views.deployDialog(model, { state: { now: NOW, me: { canWrite: true } }, actions: {} }));
+  const [gone, here] = all(drawn, 'label.choice');
+  assert.match(textOf(gone), /Last reported 1\.2\.3\+4 · last seen 1 h ago/);
+  assert.match(textOf(here), /Runs 1\.2\.3\+4/);
+});
+
+// What a page may say about a board, for every state that reaches it.
+
+const finishedRun = (phase, status, changes = {}) => deployment(CURRENT, {
+  status: 'COMPLETED',
+  createdAt: ago(7200),
+  completedAt: ago(7000),
+  executions: [execution(WAITING, phase, { status, startedAt: ago(7100), ranAtEnd: null, ...changes })],
+});
+const primaryOf = (drawn) => textOf(one(drawn, 'li.flash-row', 'Primary slot'));
+const secondaryOf = (drawn) => textOf(one(drawn, 'li.flash-row', 'Secondary slot'));
+const pageOfRun = async (run, board) => page(views.deploymentView,
+  await consoleState({ ...EMPTY, devices: [board], releases: RELEASES, deployments: [run] }), { id: run.id });
+
+test('an update with no version on record says so by naming none, whatever the board runs today', async () => {
+  const today = onVersion('1.3.0+0');
+  const cases = [
+    ['succeeded', 'SUCCEEDED', {}, /^Primary slot ?1\.2\.3\+5 ?Ran from here, confirmed/, /^Secondary slot ?Previous firmware ?No longer needed/, null],
+    ['declined', 'REJECTED', { reason: 'declined' }, /^Primary slot ?Previous firmware ?Ran from here, not touched/, /Nothing written/, 'Nothing was installed'],
+    ['refused', 'REJECTED', { reason: 'too_large' }, /^Primary slot ?Previous firmware ?Ran from here, not touched/, /Nothing written/, 'Nothing was installed'],
+    ['failed', 'FAILED', { reason: 'digest_mismatch' }, /^Primary slot ?Previous firmware ?Ran from here, not touched/, /1\.2\.3\+5 ?Not installed/, 'It stayed on the firmware it had'],
+    ['rolled_back', 'FAILED', { reason: 'rolled_back' }, /^Primary slot ?Previous firmware ?Put back by the bootloader/, /1\.2\.3\+5 ?Started but never confirmed/, 'It went back to the previous firmware'],
+  ];
+  for (const [phase, status, changes, primary, secondary, way] of cases) {
+    const drawn = await pageOfRun(finishedRun(phase, status, changes), today);
+    assert.match(textOf(one(drawn, 'section.flash')), /^Flash memory when this update ended/, phase);
+    assert.match(primaryOf(drawn), primary, phase);
+    assert.match(secondaryOf(drawn), secondary, phase);
+    // None of today's version, in the words, on the map or on the way back.
+    assert.doesNotMatch(textOf(one(drawn, 'p.execution-text')), /1\.3\.0\+0/, phase);
+    assert.doesNotMatch(textOf(one(drawn, 'section.flash')), /1\.3\.0\+0/, phase);
+    if (way) assert.equal(textOf(one(drawn, 'p.return-label')), way, phase);
+    // It is said once, as what it is.
+    assert.match(textOf(one(drawn, 'section.moments')), /Board now reports 1\.3\.0\+0/, phase);
+    const gone = await pageOfRun(finishedRun(phase, status, { ...changes, online: false }), onVersion('1.3.0+0', quiet));
+    assert.match(textOf(one(gone, 'section.moments')), /Board last reported 1\.3\.0\+0/, phase);
+    assert.doesNotMatch(textOf(gone), /Board now reports/, phase);
+  }
+  // Where the job holds one, that is the one, and today's is no moment of its own.
+  const recorded = { ranAtEnd: '1.2.3+3' };
+  const kept = await pageOfRun(finishedRun('failed', 'FAILED', { reason: 'digest_mismatch', ...recorded }), today);
+  assert.equal(textOf(one(kept, 'p.return-label')), 'It stayed on the firmware it had: 1.2.3+3');
+  assert.match(primaryOf(kept), /^Primary slot ?1\.2\.3\+3 ?Ran from here, not touched/);
+  assert.doesNotMatch(textOf(one(kept, 'section.moments')), /Board now reports/);
+  const back = await pageOfRun(finishedRun('rolled_back', 'FAILED', { reason: 'rolled_back', ...recorded }), today);
+  assert.equal(textOf(one(back, 'p.return-label')), 'It went back to the previous firmware: 1.2.3+3');
+  assert.match(primaryOf(back), /^Primary slot ?1\.2\.3\+3 ?Put back by the bootloader/);
+  const done = await pageOfRun(finishedRun('succeeded', 'SUCCEEDED', { ranAtEnd: '1.2.3+5' }), today);
+  assert.match(primaryOf(done), /^Primary slot ?1\.2\.3\+5 ?Ran from here, confirmed/);
+  assert.match(textOf(one(done, 'p.execution-text')), /^The board confirmed 1\.2\.3\+5 when this update ended\. It has since moved to 1\.3\.0\+0\.$/);
+});
+
+test('a map of now names what the execution says of the board, or else the board list', async () => {
+  const waiting = (changes) => deployment(OFFERED, { executions: [execution(WAITING, 'waiting_for_device', changes)] });
+  const told = await pageOfRun(waiting({ reported: '1.2.3+3' }), onVersion('1.2.3+4'));
+  assert.match(primaryOf(told), /^Primary slot ?1\.2\.3\+3 ?Runs from here, not touched/);
+  const unsaid = await pageOfRun(waiting({ reported: null }), onVersion('1.2.3+4'));
+  assert.match(primaryOf(unsaid), /^Primary slot ?1\.2\.3\+4 ?Runs from here, not touched/);
+});
+
+test('the map of when an update went through names what the job recorded, or else what it offered', async () => {
+  const done = (changes) => deployment(CURRENT, {
+    status: 'COMPLETED',
+    executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', startedAt: ago(100), ...changes })],
+  });
+  assert.match(primaryOf(await pageOfRun(done({ ranAtEnd: '1.2.3+6' }), onVersion('1.3.0+0'))), /^Primary slot ?1\.2\.3\+6 ?Ran from here/);
+  assert.match(primaryOf(await pageOfRun(done({ ranAtEnd: null }), onVersion('1.3.0+0'))), /^Primary slot ?1\.2\.3\+5 ?Ran from here/);
+});
+
+test('the map of when a cancelled update ended does not hold what the board reports today', async () => {
+  const run = (changes) => deployment(CURRENT, {
+    status: 'CANCELED', executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', ...changes })],
+  });
+  for (const [online, board, words] of [
+    [true, onVersion('1.2.3+3'), /The board reports that it runs 1\.2\.3\+3\.$/],
+    [false, onVersion('1.2.3+3', quiet), /When last seen, the board reported 1\.2\.3\+3\.$/],
+  ]) {
+    for (const [startedAt, secondary] of [[null, /Nothing written/], [ago(100), /1\.2\.3\+5 ?Not installed/]]) {
+      const drawn = await pageOfRun(run({ reported: '1.2.3+3', online, startedAt }), board);
+      assert.match(textOf(one(drawn, 'section.flash')), /^Flash memory when this update ended/);
+      assert.match(primaryOf(drawn), /^Primary slot ?Previous firmware ?Stayed in place/);
+      assert.match(secondaryOf(drawn), secondary);
+      assert.doesNotMatch(textOf(one(drawn, 'section.flash')), /1\.2\.3\+3/);
+      // The words above it say what it reports, as that, and once.
+      assert.match(textOf(one(drawn, 'p.execution-text')), words);
+      assert.doesNotMatch(textOf(one(drawn, 'section.moments')), /Board (?:now|last) report/);
+    }
+  }
+});
+
+test('a board that goes offline during an update is told as that wherever the update is shown', async () => {
+  const run = (phase, online, changes = {}) => deployment(OFFERED, {
+    executions: [execution(WAITING, phase, {
+      status: 'IN_PROGRESS', startedAt: ago(700), secondsLeft: 1200, reported: '1.2.3+4', online, ...changes,
+    })],
+  });
+  const board = (state, online) => device(WAITING, {
+    online, lastSeen: online ? ago(20) : ago(600), ota: { state, job: OFFERED, progress: 40, last: 'none', error: '' },
+  });
+  const world = (phase, state, online, changes) => ({ ...WORLD, devices: [board(state, online)], deployments: [run(phase, online, changes)] });
+  const cases = [
+    ['downloading', 'downloading', 'Was downloading 1.2.3+5 when last seen', /1\.2\.3\+5 ?Was receiving the image/, /^Primary slot ?1\.2\.3\+4 ?Ran from here, not touched/],
+    ['verifying', 'verifying', 'Was checking the download of 1.2.3+5 when last seen', /1\.2\.3\+5 ?Was being checked/, /^Primary slot ?1\.2\.3\+4 ?Ran from here, not touched/],
+    ['rebooting', 'rebooting', 'Was restarting into 1.2.3+5 when last seen', /1\.2\.3\+5 ?Was with the bootloader/, /^Primary slot ?1\.2\.3\+4 ?Was being replaced/],
+    ['testing', 'testing', 'Was on trial with 1.2.3+5 when last seen', /Kept to fall back on/, /^Primary slot ?1\.2\.3\+5 ?Was on trial/],
+  ];
+  for (const [phase, state, title, secondary, primary] of cases) {
+    const progress = phase === 'downloading' ? { progress: 40 } : {};
+    const drawn = page(views.deploymentView, await consoleState(world(phase, state, false, progress)), { id: OFFERED });
+    assert.equal(textOf(one(drawn, 'p.execution-title')), title, phase);
+    assert.equal(all(drawn, 'article.execution.is-idle').length, 1, phase);
+    assert.equal(textOf(one(one(drawn, 'header.execution-head'), 'span.badge')), 'Offline', phase);
+    assert.match(textOf(one(drawn, 'section.flash')), /^Flash memory when last seen/, phase);
+    assert.match(primaryOf(drawn), primary, phase);
+    assert.match(secondaryOf(drawn), secondary, phase);
+    assert.equal(all(drawn, 'div.meter').length, 0, phase);
+    assert.equal(all(drawn, 'p.execution-figure').length, 0, phase);
+    assert.equal(all(drawn, 'li.flash-row.is-receiving').length, 0, phase);
+    assert.equal(all(drawn, 'li.flash-row.is-live').length, 0, phase);
+    assert.equal(all(drawn, 'li.flash-swap').length, 0, phase);
+    assert.equal(all(drawn, 'li.step.is-current').length, 0, phase);
+    assert.equal(textOf(one(one(drawn, 'li.step.is-stopped'), 'span.step-state')), 'last seen here', phase);
+    assert.match(textOf(one(drawn, 'section.moments')), /Times out in 20 min/, phase);
+    assert.match(textOf(one(drawn, 'section.moments')), /Board last seen 10 min ago/, phase);
+
+    // On the overview too.
+    const overview = page(views.overviewView, await consoleState(world(phase, state, false, progress)));
+    const line = one(overview, 'li.board-run');
+    assert.match(textOf(line), new RegExp(title.replace(/[.+]/g, '\\$&')), phase);
+    assert.match(textOf(one(line, 'span.board-run-note')), /Last seen 10 min ago\.$/, phase);
+    assert.equal(all(line, 'div.meter').length, 0, phase);
+    assert.equal(all(line, 'p.board-run-figure').length, 0, phase);
+    assert.equal(all(line, 'li.step.is-current').length, 0, phase);
+  }
+  assert.equal(textOf(one(one(page(views.overviewView, await consoleState(world('downloading', 'downloading', false, { progress: 40 }))), 'li.board-run'), 'span.board-run-note')),
+    'The board went offline with the download at 40%. Last seen 10 min ago.');
+
+  // A board that is there is at it, in the present and with its bar.
+  const heard = page(views.deploymentView, await consoleState(world('downloading', 'downloading', true, { progress: 40 })), { id: OFFERED });
+  assert.match(textOf(one(heard, 'p.execution-title')), /^Downloading 40%/);
+  assert.match(textOf(one(heard, 'section.flash')), /^Flash memory now/);
+  assert.match(primaryOf(heard), /Runs from here, not touched/);
+  assert.match(secondaryOf(heard), /1\.2\.3\+5 ?Receiving the image/);
+  assert.equal(all(heard, 'li.flash-row.is-receiving').length, 1);
+  assert.equal(one(heard, 'li.flash-row.is-receiving').getAttribute('class'), 'flash-row is-live is-receiving');
+  assert.equal(all(heard, 'div.meter').length, 1);
+  assert.equal(textOf(one(one(heard, 'li.step.is-current'), 'span.step-state')), 'in progress');
+  const overview = one(page(views.overviewView, await consoleState(world('downloading', 'downloading', true, { progress: 40 }))), 'li.board-run');
+  assert.equal(all(overview, 'p.board-run-figure').length, 1);
+  assert.doesNotMatch(textOf(overview), /Last seen/);
+  const restarting = page(views.deploymentView, await consoleState(world('rebooting', 'rebooting', true)), { id: OFFERED });
+  assert.match(primaryOf(restarting), /Being replaced/);
+  assert.match(secondaryOf(restarting), /Bootloader checks the signature/);
+  assert.equal(all(restarting, 'li.flash-swap').length, 1);
+  const trial = page(views.deploymentView, await consoleState(world('testing', 'testing', true)), { id: OFFERED });
+  assert.match(primaryOf(trial), /1\.2\.3\+5 ?Runs on trial/);
+  const checking = page(views.deploymentView, await consoleState(world('verifying', 'verifying', true)), { id: OFFERED });
+  assert.match(secondaryOf(checking), /Written, being checked/);
+});
+
+test('the overview does not say that nothing is going on while a board reports an update', async () => {
+  const OUTSIDE = (changes = {}) => ({ ota: { state: 'downloading', job: null, progress: 40, last: 'none', error: '' }, ...changes });
+  const OWN = (changes = {}) => ({ ota: { state: 'downloading', job: CURRENT, progress: 40, last: 'none', error: '' }, ...changes });
+  const card = async (devices, deployments = []) => one(page(views.overviewView,
+    await consoleState({ ...EMPTY, devices, releases: RELEASES, deployments })), 'section.overview-updates');
+  const title = (drawn) => textOf(one(drawn, 'p.calm-title'));
+  const b = (thing, changes) => device(thing, { fw: { version: '1.2.3+5', confirmed: true }, ...changes });
+
+  // Made directly in AWS IoT, and nothing else to tell: that is the headline.
+  const direct = await card([b(WAITING, OUTSIDE())]);
+  assert.equal(title(direct), 'The board is working on an update that this console did not start.');
+  const shape = (svg) => svg.childNodes.map((part) => part.getAttribute('d') ?? part.getAttribute('points') ?? part.localName).join(' ');
+  const pictured = (name) => shape(one(draw(views.icon(name)), 'svg'));
+  assert.equal(shape(one(one(direct, 'p.calm-title'), 'svg.icon')), pictured('restart'));
+  assert.equal(shape(one(one(await card([b(WAITING)]), 'p.calm-title'), 'svg.icon')), pictured('minus-circle'));
+  assert.doesNotMatch(textOf(direct), /No update is in progress/);
+  assert.match(textOf(direct), /Deployments from this console appear here while boards are being updated\./);
+  assert.equal(textOf(one(direct, 'h2')), 'Updates');
+
+  // Several, and some of several.
+  assert.equal(title(await card([b(WAITING, OUTSIDE()), b(INSTALLING, OUTSIDE())])), '2 boards are working on updates that this console did not start.');
+  assert.equal(title(await card([b(WAITING, OUTSIDE()), b(INSTALLING)])), '1 board is working on an update that this console did not start.');
+
+  // Offline, where it can only be said of when it was last seen.
+  assert.equal(title(await card([b(WAITING, OUTSIDE(quiet))])), 'When last seen, the board was working on an update that this console did not start.');
+  assert.equal(title(await card([b(WAITING, OUTSIDE(quiet)), b(INSTALLING, OUTSIDE(quiet))])), 'When last seen, 2 boards were working on updates that this console did not start.');
+  assert.equal(title(await card([b(WAITING, OUTSIDE(quiet)), b(INSTALLING, OUTSIDE())])), 'When last seen, 2 boards were working on updates that this console did not start.');
+
+  // Naming a deployment of this console that is over: this console did start that one.
+  assert.equal(title(await card([b(WAITING, OWN())])), 'The board reports an update in progress.');
+  assert.equal(title(await card([b(WAITING, OWN()), b(INSTALLING, OWN())])), '2 boards report updates in progress.');
+  assert.equal(title(await card([b(WAITING, OWN(quiet))])), 'When last seen, the board reported an update in progress.');
+  assert.equal(title(await card([b(WAITING, OWN(quiet)), b(INSTALLING, OWN(quiet))])), 'When last seen, 2 boards reported updates in progress.');
+  assert.equal(title(await card([b(WAITING, OUTSIDE()), b(INSTALLING, OWN())])), '2 boards report updates in progress.');
+
+  // With a finished deployment to tell about, that stays the headline, and this goes under it.
+  const last = deployment(CURRENT, { status: 'COMPLETED', completedAt: ago(3600), executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED' })] });
+  const beside = await card([b(WAITING, OUTSIDE())], [last]);
+  assert.equal(title(beside), '1.2.3+5 is installed and confirmed.');
+  assert.equal(textOf(one(beside, 'p.calm-note')), '1.2.3+5 Succeeded 1 h ago');
+  assert.equal(textOf(one(beside, 'p.calm-work')), 'The board is working on an update that this console did not start.');
+  assert.doesNotMatch(textOf(beside), /No update is in progress/);
+
+  // A board that is idle says that it is: the sentence is true, and stays.
+  const calm = await card([b(WAITING)], [last]);
+  assert.equal(textOf(one(calm, 'p.calm-note')), '1.2.3+5 Succeeded 1 h ago. No update is in progress.');
+  assert.equal(all(calm, 'p.calm-work').length, 0);
+  assert.equal(title(await card([b(WAITING)])), 'No update is in progress.');
+  // With nothing on record but a stranger on the list, it is also said in the note.
+  const off = await card([b(WAITING, { fw: { version: '9.9.9+9', confirmed: true } })]);
+  assert.match(textOf(one(off, 'div.calm')), /No update is in progress\. Deployments from this console appear here/);
+  const offAtWork = await card([b(WAITING, { fw: { version: '9.9.9+9', confirmed: true }, ...OUTSIDE() })]);
+  assert.doesNotMatch(textOf(offAtWork), /No update is in progress/);
+  assert.equal(textOf(one(offAtWork, 'p.calm-work')), 'The board is working on an update that this console did not start.');
+
+  // The boards have not been read, or could not be: nothing is said about it.
+  const base = await consoleState({ ...EMPTY, devices: [b(WAITING)], releases: RELEASES, deployments: [last] });
+  const drawnWith = (devices) => one(page(views.overviewView, { ...base, devices }), 'section.overview-updates');
+  const onItsWay = drawnWith({ value: null, error: null, loading: true, loadedAt: 0 });
+  assert.doesNotMatch(textOf(onItsWay), /No update is in progress/);
+  assert.equal(all(onItsWay, 'p.calm-title').length, 0);
+  // A deployment that is under way does not wait for them.
+  const open = deployment(OFFERED, { executions: [execution(WAITING, 'waiting_for_device', { online: false })] });
+  const underWay = await consoleState({ ...EMPTY, devices: [b(WAITING)], releases: RELEASES, deployments: [open] });
+  assert.equal(all(one(page(views.overviewView, { ...underWay, devices: { value: null, error: null, loading: true, loadedAt: 0 } }), 'section.overview-updates'), 'li.run').length, 1);
+  const error = new core.ApiError(503, 'gateway', 'Service Unavailable');
+  const unread = drawnWith({ value: null, error, loading: false, loadedAt: 0 });
+  assert.doesNotMatch(textOf(unread), /No update is in progress/);
+  assert.equal(title(unread), '1.2.3+5 was installed and confirmed.');
+  assert.equal(all(unread, 'p.calm-work').length, 0);
+  const none = await consoleState({ ...EMPTY, devices: [b(WAITING)], releases: RELEASES, deployments: [] });
+  assert.equal(title(one(page(views.overviewView, { ...none, devices: { value: null, error, loading: false, loadedAt: 0 } }), 'section.overview-updates')),
+    'Whether an update is in progress cannot be told right now.');
+  const stale = drawnWith({ ...base.devices, error });
+  assert.doesNotMatch(textOf(stale), /No update is in progress/);
+  // A list that could not be read again says nothing about a job either.
+  const staleAtWork = await consoleState({ ...EMPTY, devices: [b(WAITING, OUTSIDE())], releases: RELEASES, deployments: [] });
+  const quietly = one(page(views.overviewView, { ...staleAtWork, devices: { ...staleAtWork.devices, error } }), 'section.overview-updates');
+  assert.equal(title(quietly), 'Whether an update is in progress cannot be told right now.');
+});
+
+test('in a fleet, the note under the unregistered headline is about the boards it names', async () => {
+  const A = device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } });
+  const stranger = (changes) => device(INSTALLING, { fw: { version: '1.3.0+0', confirmed: true }, ...changes });
+  const run = deployment(CURRENT, { status: 'COMPLETED', completedAt: ago(3600), executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED', online: false })] });
+  const moved = deployment(CURRENT, { status: 'COMPLETED', completedAt: ago(3600), executions: [execution(WAITING, 'succeeded', { status: 'SUCCEEDED' })] });
+  const drawn = async (devices, deployments = [run]) => page(views.overviewView,
+    await consoleState({ ...EMPTY, devices, releases: RELEASES, deployments }));
+
+  // Board A, of the deployment, is offline. The stranger is online: nothing to hedge about it.
+  const online = await drawn([{ ...A, ...quiet }, stranger()]);
+  assert.equal(textOf(titleOf(online)), '1 board runs firmware that is not a registered release.');
+  assert.equal(all(online, 'p.calm-since').length, 0);
+
+  // The stranger is offline, A has moved on: the note has its time, and does not say "the board".
+  const offline = await drawn([onVersion('1.2.3+4'), stranger(quiet)], [moved]);
+  assert.equal(textOf(titleOf(offline)), '1 board last reported firmware that is not a registered release.');
+  assert.equal(textOf(one(offline, 'p.calm-since')), 'As last reported: that board is offline, last seen 1 h ago.');
+
+  // One of several that the deployment put it on: the count is of those.
+  const three = deployment(CURRENT, {
+    status: 'COMPLETED', completedAt: ago(3600),
+    executions: [WAITING, INSTALLING].map((thing) => execution(thing, 'succeeded', { status: 'SUCCEEDED' })),
+  });
+  const someAway = await drawn([device(WAITING, { fw: { version: '1.2.3+5', confirmed: true } }), device(INSTALLING, { fw: { version: '1.2.3+5', confirmed: true }, ...quiet })], [three]);
+  assert.equal(textOf(one(someAway, 'p.calm-since')), 'As last reported: 1 of them is offline, last seen 1 h ago.');
+
+  // Several of them.
+  const both = await drawn([stranger(quiet), device(WAITING, { fw: { version: '1.3.0+1', confirmed: true }, online: false, lastSeen: ago(7200) })], [moved]);
+  assert.equal(textOf(titleOf(both)), '2 boards last reported firmware that is not a registered release.');
+  assert.equal(textOf(one(both, 'p.calm-since')), 'As last reported: 2 of them are offline, the oldest report 2 h ago.');
+
+  // Of one board in the fleet, "the board" is the one.
+  const alone = await drawn([onVersion('1.3.0+0', quiet)]);
+  assert.equal(textOf(titleOf(alone)), 'The board last reported 1.3.0+0, which is not a registered release.');
+  assert.equal(textOf(one(alone, 'p.calm-since')), 'As last reported: the board is offline, last seen 1 h ago.');
+  // The same, with no deployment to go on: only the board's own absence can say it.
+  const never = await drawn([onVersion('1.3.0+0', quiet)], []);
+  assert.equal(textOf(one(never, 'p.calm-since')), 'As last reported: the board is offline, last seen 1 h ago.');
+});
+
+test('a stranger on the list does not take the headline from a deployment that went wrong, or from a list out of date', async () => {
+  const usb = onVersion('1.3.0+0');
+  const run = (executions, changes = {}) => deployment(CURRENT, { status: 'COMPLETED', completedAt: ago(3600), executions, ...changes });
+  const drawnWith = async (executions) => page(views.overviewView,
+    await consoleState({ ...EMPTY, devices: [usb, device(INSTALLING, { fw: { version: '1.2.3+5', confirmed: true } })], releases: RELEASES, deployments: [run(executions)] }));
+  const failed = await drawnWith([execution(WAITING, 'failed', { status: 'FAILED' }), execution(INSTALLING, 'failed', { status: 'FAILED' })]);
+  assert.equal(textOf(titleOf(failed)), 'The last deployment failed.');
+  assert.equal(titleOf(failed).getAttribute('class'), 'calm-title is-bad');
+  const partly = await drawnWith([execution(WAITING, 'succeeded', { status: 'SUCCEEDED' }), execution(INSTALLING, 'failed', { status: 'FAILED' })]);
+  assert.equal(textOf(titleOf(partly)), 'The last deployment partly succeeded.');
+  assert.equal(titleOf(partly).getAttribute('class'), 'calm-title is-warn');
+
+  const state = await consoleState(worldOf(usb));
+  const failure = { ...state.deployments, error: new core.ApiError(503, 'gateway', 'Service Unavailable') };
+  const dated = page(views.overviewView, { ...state, deployments: failure });
+  assert.equal(textOf(titleOf(dated)), 'Whether an update is in progress cannot be told right now.');
+  assert.equal(titleOf(dated).getAttribute('class'), 'calm-title is-idle');
+  assert.equal(all(dated, 'p.calm-since').length, 0);
+  // Nor a note on where the boards of a deployment stand.
+  const away = await consoleState(worldOf(onVersion('1.2.3+5', quiet)));
+  assert.equal(all(page(views.overviewView, { ...away, deployments: { ...away.deployments, error: failure.error } }), 'p.calm-since').length, 0);
+});
+
+test('of an offline board, the version and its confirmation are told as last seen, and its place on the list is not', async () => {
+  const facts = (drawn) => one(drawn, 'div.fact', 'Firmware');
+  for (const view of [(state) => page(views.devicesView, state), (state) => page(views.deviceView, state, { thing: WAITING })]) {
+    const gone = view(await consoleState(worldOf(onVersion('1.2.3+5', { ...quiet, uptime: 3700 }))));
+    assert.match(textOf(facts(gone)), /^Firmware ?1\.2\.3\+5 when last seen ?Confirmed/);
+    assert.match(textOf(one(gone, 'div.fact', 'Uptime')), /when last seen$/);
+    const stranger = view(await consoleState(worldOf(onVersion('1.3.0+0', quiet))));
+    assert.match(textOf(facts(stranger)), /^Firmware ?1\.3\.0\+0 when last seen ?Confirmed ?Not a registered release$/);
+    const heard = view(await consoleState(worldOf(onVersion('1.2.3+5', { uptime: 3700 }))));
+    assert.doesNotMatch(textOf(facts(heard)), /when last seen/);
+    assert.doesNotMatch(textOf(one(heard, 'div.fact', 'Uptime')), /when last seen/);
+  }
+});
+
+test('the flash map on a board\'s page is in the past for a board that is offline', async () => {
+  const map = async (board) => primaryOf(page(views.deviceView, await consoleState(worldOf(board)), { thing: WAITING }));
+  assert.match(await map(onVersion('1.2.3+5')), /Runs from here, confirmed/);
+  assert.match(await map(onVersion('1.2.3+5', quiet)), /Ran from here, confirmed/);
+  const trial = { fw: { version: '1.2.3+5', confirmed: false } };
+  assert.match(await map(device(WAITING, trial)), /Runs on trial/);
+  assert.match(await map(device(WAITING, { ...trial, ...quiet })), /Was on trial/);
+  const testing = { ...trial, ota: { state: 'testing', job: CURRENT, progress: 0, last: 'none', error: '' } };
+  assert.match(await map(device(WAITING, testing)), /Runs on trial/);
+  assert.match(await map(device(WAITING, { ...testing, ...quiet })), /Was on trial/);
+});
+
+test('the note on an earlier signing key fits the count, and a key is only called earlier against a current one', async () => {
+  const OTHER = 'a'.repeat(64);
+  const drawn = page(views.firmwareView, await consoleState({ ...WORLD, releases: [release('1.2.3+5'), release('1.2.3+4', { keyHash: OTHER })] }));
+  assert.equal(textOf(one(drawn, 'p.fingerprint-note')),
+    '1 older release was signed with an earlier key, which has been replaced since, so it shows another fingerprint.');
+
+  // A server that names no key of its own: nothing to compare with.
+  const world = { ...WORLD, releases: [release('1.2.3+5'), release('1.2.3+4', { keyHash: OTHER })] };
+  const state = await consoleState(world);
+  const nameless = page(views.firmwareView, { ...state, firmware: { ...state.firmware, value: { ...state.firmware.value, fingerprint: '' } } });
+  const signed = (version) => textOf(one(one(nameless, 'li.release', version), 'div.fact', 'Signed with'));
+  assert.doesNotMatch(signed('1.2.3+4'), /Not the current signing key/);
+  assert.match(signed('1.2.3+4'), /Fingerprint of the key that signed it\.$/);
+  // A release that names no key is not signed with an earlier one.
+  const unnamed = page(views.firmwareView, await consoleState({ ...WORLD, releases: [release('1.2.3+5'), release('1.2.3+4', { keyHash: '' })] }));
+  assert.equal(all(unnamed, 'p.fingerprint-note').length, 0);
+});
+
+test('the number of older updates the client read is what the board page says', async () => {
+  const state = await consoleState(worldOf(onVersion('1.2.3+5')));
+  const api = core.createApi({
+    auth: { accessToken: () => 'TOKEN' },
+    crypto: globalThis.crypto,
+    clock: core.createClock(() => NOW),
+    onUnauthorized: () => assert.fail('the token was refused'),
+    fetch: async () => Response.json({
+      device: onVersion('1.2.3+5'),
+      certificates: [],
+      executions: [{ deployment: CURRENT, version: '1.2.3+5', status: 'SUCCEEDED', queuedAt: ago(7200), startedAt: ago(7100), lastUpdatedAt: ago(7000) }],
+      olderExecutions: 3,
+    }),
+  });
+  const details = new Map(state.deviceDetails);
+  details.set(WAITING, loaded(await api.device(WAITING)));
+  assert.equal(textOf(one(page(views.deviceView, { ...state, deviceDetails: details }, { thing: WAITING }), 'p.history-cut')),
+    'The newest 1 are shown. 3 older updates are not listed.');
+});
+
+test('a cancelled update on a board with a cut list of updates is not said to have gone through', async () => {
+  const wentThrough = { state: 'idle', job: null, progress: 0, last: 'succeeded', error: '' };
+  const run = deployment(OFFERED, { status: 'CANCELED', executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), reported: '1.2.3+5' })] });
+  const state = await consoleState({ ...WORLD, devices: [device(WAITING, { fw: { version: '1.2.3+5', confirmed: true }, ota: wentThrough })], deployments: [run] });
+  const withOlder = (older) => {
+    const details = new Map(state.deviceDetails);
+    const resource = details.get(WAITING);
+    details.set(WAITING, { ...resource, value: { ...resource.value, olderExecutions: older } });
+    return page(views.deploymentView, { ...state, deviceDetails: details }, { id: OFFERED });
+  };
+  assert.equal(textOf(one(withOlder(0), 'p.execution-title')), 'Installed despite the cancellation');
+  const cut = withOlder(2);
+  assert.equal(textOf(one(cut, 'p.execution-title')), 'Cancelled');
+  assert.equal(textOf(one(cut, 'p.execution-text')), 'Cancelled after the board had started. The board now runs 1.2.3+5; how it got there is not on record.');
+  assert.match(textOf(one(cut, 'li.flash-row', 'Secondary slot')), /How this update ended is not known/);
+
+  // Offline: the map is of when it was last seen, in the past.
+  const gone = await consoleState({ ...WORLD, devices: [device(WAITING, { fw: { version: '1.2.3+5', confirmed: true }, ota: wentThrough, ...quiet })],
+    deployments: [deployment(OFFERED, { status: 'CANCELED', executions: [execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100), reported: '1.2.3+5', online: false })] })] });
+  const away = page(views.deploymentView, gone, { id: OFFERED });
+  assert.match(textOf(one(away, 'section.flash')), /^Flash memory when last seen/);
+  assert.match(textOf(one(away, 'li.flash-row', 'Primary slot')), /1\.2\.3\+5 ?Ran from here, confirmed/);
 });

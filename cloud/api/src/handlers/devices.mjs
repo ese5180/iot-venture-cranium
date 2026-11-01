@@ -14,7 +14,9 @@ import { isThing, parseJobId, requireThing } from '../lib/validate.mjs';
 
 const SHADOW_CACHE_MS = 5000;
 const MAX_CACHED_SHADOWS = 512;
-const MAX_HISTORY = 20;
+// AWS has been asked for all of a board's executions by the time this applies, so it only
+// limits the size of the reply. The reply says how many were left out (olderExecutions).
+const MAX_HISTORY = 50;
 
 const CERTIFICATE_ARN = /^arn:[a-z0-9-]+:iot:[a-z0-9-]+:\d{12}:cert\/([0-9a-f]{64})$/;
 const ANY_JOB_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -29,7 +31,7 @@ function certificateIds(principals) {
   return [...ids].sort();
 }
 
-/** The newest executions of a thing as ExecutionSummary records. */
+/** All executions of a thing as ExecutionSummary records, newest first. */
 function history(executions) {
   const rows = [];
   for (const execution of executions) {
@@ -49,7 +51,7 @@ function history(executions) {
   }
   rows.sort((a, b) => (a.queuedAt < b.queuedAt ? 1 : a.queuedAt > b.queuedAt ? -1 :
     a.deployment < b.deployment ? 1 : -1));
-  return rows.slice(0, MAX_HISTORY);
+  return rows;
 }
 
 export function createDeviceHandlers({ aws, now, log }) {
@@ -104,8 +106,14 @@ export function createDeviceHandlers({ aws, now, log }) {
         aws.listThingPrincipals(thing),
         aws.listJobExecutionsForThing(thing),
       ]);
+      const rows = history(executions);
       return {
-        body: { device, certificates: certificateIds(principals), executions: history(executions) },
+        body: {
+          device,
+          certificates: certificateIds(principals),
+          executions: rows.slice(0, MAX_HISTORY),
+          olderExecutions: Math.max(0, rows.length - MAX_HISTORY),
+        },
       };
     },
   };

@@ -14,7 +14,7 @@ import { after, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
-  LIMIT, buildHistory, cleanSubject, tagsOf, writeHistory,
+  LIMIT, buildHistory, cleanSubject, readCommits, tagsOf, writeHistory,
 } from '../build-history.mjs';
 import { loadSite } from '../src/server.mjs';
 import {
@@ -128,6 +128,55 @@ test('it says what the deployment was built from, and when', () => {
   // Run by hand, it looks up the commit and does not claim to know the state of the tree.
   assert.deepEqual(buildHistory({ repo, now: new Date(NOW) }).deployment,
     { commit: NEWEST, tree: 'unknown', deployedAt: new Date(NOW).toISOString() });
+});
+
+test('a commit is dated by when it was written, not by when it was last rewritten', () => {
+  const rewritten = join(work, 'rewritten');
+  mkdirSync(rewritten);
+  // A rebase leaves the committer date of all of them at one moment.
+  const written = [1700000000, 1700090000, 1700180000];
+  let stream = '';
+  written.forEach((at, index) => {
+    stream += `commit refs/heads/main\nauthor A <${ADDRESS}> ${at} +0000\ncommitter A <${ADDRESS}> 1700999000 +0000\n` +
+      `data ${`commit ${index}`.length}\ncommit ${index}\nM 100644 inline tools/f\ndata 1\n${index}\n\n`;
+  });
+  execFileSync('git', ['-C', rewritten, 'init', '-q', '-b', 'main']);
+  execFileSync('git', ['-C', rewritten, 'fast-import', '--quiet'], { input: stream });
+  const { commits } = buildHistory({ repo: rewritten });
+  assert.deepEqual(commits.map((item) => item.subject), ['commit 2', 'commit 1', 'commit 0']);
+  assert.deepEqual(commits.map((item) => Date.parse(item.date) / 1000), [...written].reverse());
+});
+
+test('commits stand in the order of the dates they show, whatever order a rebase left them in', () => {
+  const reordered = join(work, 'reordered');
+  mkdirSync(reordered);
+  // The second commit in the history was written before the first.
+  const written = [1700090000, 1700000000, 1700180000];
+  let stream = '';
+  written.forEach((at, index) => {
+    stream += `commit refs/heads/main\nauthor A <${ADDRESS}> ${at} +0000\ncommitter A <${ADDRESS}> 1700999000 +0000\n` +
+      `data ${`commit ${index}`.length}\ncommit ${index}\nM 100644 inline tools/f\ndata 1\n${index}\n\n`;
+  });
+  execFileSync('git', ['-C', reordered, 'init', '-q', '-b', 'main']);
+  execFileSync('git', ['-C', reordered, 'fast-import', '--quiet'], { input: stream });
+  const { commits } = buildHistory({ repo: reordered });
+  assert.deepEqual(commits.map((item) => item.subject), ['commit 2', 'commit 0', 'commit 1']);
+});
+
+test('of two branches, the commits kept are the newest by the date they show', () => {
+  const branched = join(work, 'branched');
+  mkdirSync(branched);
+  const commit = (ref, mark, subject, written, committed, parents = '') =>
+    `commit refs/heads/${ref}\nmark :${mark}\nauthor A <${ADDRESS}> ${written} +0000\ncommitter A <${ADDRESS}> ${committed} +0000\n` +
+    `data ${subject.length}\n${subject}\n${parents}M 100644 inline tools/${mark}\ndata 1\nx\n\n`;
+  // Rewritten since: "written last" carries an old committer date, "written first" a new one.
+  const stream = commit('main', 1, 'root', 1700000000, 1700000000) +
+    commit('late', 2, 'written last', 1700300000, 1700100000, 'from :1\n') +
+    commit('early', 3, 'written first', 1700100000, 1700300000, 'from :1\n') +
+    commit('main', 4, 'merged', 1700400000, 1700400000, 'from :2\nmerge :3\n');
+  execFileSync('git', ['-C', branched, 'init', '-q', '-b', 'main']);
+  execFileSync('git', ['-C', branched, 'fast-import', '--quiet'], { input: stream });
+  assert.deepEqual(readCommits(branched, 2).map((item) => item.subject), ['merged', 'written last']);
 });
 
 test('only the newest commits are kept', () => {

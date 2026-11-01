@@ -16,11 +16,12 @@
  */
 
 import {
-  SESSION_WARNING_S, STEPS, alreadyRuns, busyBoards, canRetryUpload, clockTime, compareVersions, dayLabel,
+  SESSION_WARNING_S, STEPS, alreadyRuns, busyBoards, canRetryUpload, clockTime, compareVersions, dateAndTime, dayLabel,
   deploymentHref, describeAudit, describeCounts, describeDeployment, describeExecution, describeHistory,
   describeUpdate, deviceActivity, deviceHref, duration, exactBytes, exactTime, failedCheck, fileSize, IMAGE_CHECKS,
-  isRefusal, isRestarting, isUnderWay, isUnfinished, nameOf, parseVersion, plainMessage, plural, reviewImage,
-  revocationState, sentence, shortAccount, signalQuality, singleLine, stillFinishing, timeAgo, versionOfDeployment,
+  installStanding, isRefusal, isRestarting, isUnderWay, isUnfinished, isUnregistered, nameOf, parseVersion, plainMessage,
+  plural, reviewImage, revocationState, sentence, shortAccount, signalQuality, singleLine, stillFinishing, timeAgo,
+  timeOfDay, toldByDate, versionOfDeployment,
 } from './core.js';
 
 // Drawing.
@@ -389,7 +390,15 @@ function when(iso, now, prefix = '') {
 /** The same, with the time of day written out: for where the exact moment matters. */
 function whenAt(iso, now, prefix = '') {
   if (!iso) return null;
+  // Old enough to be told by its date already: the day is not said twice.
+  if (toldByDate(iso, now)) return h('time', { datetime: iso, title: exactTime(iso) }, `${prefix}${dateAndTime(iso)}`);
   return [when(iso, now, prefix), ` (${clockTime(iso, now)})`];
+}
+
+/** The time of day alone: for an entry under a heading that names its day. */
+function whenInDay(iso) {
+  if (!iso) return null;
+  return h('time', { datetime: iso, title: exactTime(iso) }, timeOfDay(iso));
 }
 
 function whenLoaded(resource, now) {
@@ -688,8 +697,8 @@ function releaseBadge(release) {
   ];
 }
 
-function signalBars(quality) {
-  return h('svg', { class: 'signal', viewBox: '0 0 22 16', 'aria-hidden': 'true', focusable: 'false' },
+function signalBars(quality, old = false) {
+  return h('svg', { class: `signal ${old ? 'is-old' : ''}`.trim(), viewBox: '0 0 22 16', 'aria-hidden': 'true', focusable: 'false' },
     [0, 1, 2, 3].map((index) => h('rect', {
       key: String(index),
       class: index < quality.bars ? 'is-on' : null,
@@ -779,84 +788,86 @@ const FLASH_NOW = 'Flash memory now';
 const FLASH_ENDED = 'Flash memory when this update ended';
 const FLASH_SEEN = 'Flash memory when last seen';
 
+// A map of the moment an update ended, for a board whose version then is not on record.
+const STAYED_IN_PLACE = { none: 'Previous firmware', state: 'Stayed in place', tone: 'run' };
+
 /**
  * What each slot holds at this point of an update, told from the phase the board last
  * reported. Null where the phase does not say.
  *
  * `description` is what describeExecution() made of the same execution: a cancelled
  * update can end in several ways, and the map says the same as the words above it.
+ *
+ * A map headed "when this update ended" only ever names what the job recorded then, or
+ * no version: what the board reports today is another moment, on a map headed that way.
  */
 function slotsOfExecution(execution, known, target, description, deployment) {
-  const { phase, running, progress, startedAt } = execution;
-  const reported = known?.fw?.version ?? null;
-  const before = running ?? reported;
-  const previous = before && before !== target ? before : null;
-  const stays = { version: before, none: 'Version not reported', state: 'Runs from here, not touched', tone: 'run' };
+  const { phase, ranAtEnd, reported, progress, startedAt, online } = execution;
+  // What an offline board last said is not what its flash holds now.
+  const flashNow = online ? FLASH_NOW : FLASH_SEEN;
+  const latest = reported ?? known?.fw?.version ?? null;
+  const previous = latest && latest !== target ? latest : null;
+  const stays = {
+    version: latest, none: 'Version not reported', state: online ? 'Runs from here, not touched' : 'Ran from here, not touched', tone: 'run',
+  };
   const old = { version: previous, none: 'Previous firmware' };
-  const restarting = () => flashMap(FLASH_NOW, { ...stays, state: 'Being replaced', tone: 'live', iconName: 'restart' },
-    { version: target, state: 'Bootloader checks the signature', tone: 'live', iconName: 'shield' }, { swapping: true });
-  const onTrial = () => flashMap(FLASH_NOW, { version: target, state: 'Runs on trial', tone: 'live', iconName: 'pulse' },
+  // A slot at work, or what it was at when a board that has gone offline was last heard of.
+  const atWork = (state, was, iconName) => (online ? { state, tone: 'live', iconName } : { state: was, tone: 'idle' });
+  const restarting = () => flashMap(flashNow, { ...stays, ...atWork('Being replaced', 'Was being replaced', 'restart') },
+    { version: target, ...atWork('Bootloader checks the signature', 'Was with the bootloader', 'shield') }, { swapping: online });
+  const onTrial = () => flashMap(flashNow, { version: target, ...atWork('Runs on trial', 'Was on trial', 'pulse') },
     { ...old, state: 'Kept to fall back on' });
+  const ranFromHere = { version: ranAtEnd, none: 'Previous firmware', state: 'Ran from here, not touched', tone: 'run' };
 
   switch (phase) {
     case 'waiting_for_device':
-      return flashMap(FLASH_NOW, stays, { state: 'Nothing written yet' });
+      return flashMap(flashNow, stays, { state: 'Nothing written yet' });
     case 'waiting_for_button':
-      return flashMap(FLASH_NOW, stays, { state: 'Nothing is written until Button 1 is pressed' });
+      return flashMap(flashNow, stays, { state: 'Nothing is written until Button 1 is pressed' });
     case 'downloading':
-      return flashMap(FLASH_NOW, stays, {
+      return flashMap(flashNow, stays, {
         version: target,
-        state: 'Receiving the image',
-        tone: 'live',
-        iconName: 'download',
-        receiving: progress ?? 0,
+        ...atWork('Receiving the image', 'Was receiving the image', 'download'),
+        receiving: online ? progress ?? 0 : null,
       });
     case 'verifying':
-      return flashMap(FLASH_NOW, stays, { version: target, state: 'Written, being checked', tone: 'live', iconName: 'shield' });
+      return flashMap(flashNow, stays, { version: target, ...atWork('Written, being checked', 'Was being checked', 'shield') });
     case 'rebooting':
       return restarting();
     case 'testing':
       return onTrial();
     case 'succeeded':
-      return flashMap(FLASH_ENDED, { version: running ?? target, state: 'Runs from here, confirmed', tone: 'good', iconName: 'check' },
-        { ...old, state: 'No longer needed' });
+      return flashMap(FLASH_ENDED, {
+        version: ranAtEnd ?? target, state: 'Ran from here, confirmed', tone: 'good', iconName: 'check',
+      }, { none: 'Previous firmware', state: 'No longer needed' });
     case 'rolled_back':
-      return flashMap(FLASH_ENDED, { ...stays, state: 'Put back by the bootloader', tone: 'good', iconName: 'undo' },
+      return flashMap(FLASH_ENDED, { ...ranFromHere, state: 'Put back by the bootloader', tone: 'good', iconName: 'undo' },
         { version: target, state: 'Started but never confirmed', tone: 'bad', iconName: 'x-circle' });
     case 'declined':
     case 'refused':
-      return flashMap(FLASH_ENDED, stays, { state: 'Nothing written' });
+      return flashMap(FLASH_ENDED, ranFromHere, { state: 'Nothing written' });
     case 'failed':
-      return flashMap(FLASH_ENDED, stays, { version: target, state: 'Not installed', tone: 'bad', iconName: 'x-circle' });
+      return flashMap(FLASH_ENDED, ranFromHere, { version: target, state: 'Not installed', tone: 'bad', iconName: 'x-circle' });
     case 'cancelled': {
-      // The board runs this version or a newer one now, and a later deployment put it there.
-      // When this one ended it still ran what it had before.
-      if (description.laterCame) {
-        return flashMap(FLASH_ENDED, { none: 'Previous firmware', state: 'Stayed in place', tone: 'run' }, { state: 'Nothing written' });
-      }
-      if (!startedAt) return flashMap(FLASH_ENDED, stays, { state: 'Nothing written' });
-      // It had gone too far to be stopped: the new firmware is what runs.
+      // No job holds what a cancelled board ran. Before it started, it ran what it had before.
+      if (!startedAt) return flashMap(FLASH_ENDED, STAYED_IN_PLACE, { state: 'Nothing written' });
+      // It had gone too far to be stopped: the new firmware is what the board reports.
       if (description.installed) {
-        return known?.fw && !known.fw.confirmed
-          ? onTrial()
-          : flashMap(FLASH_ENDED, { version: target, state: 'Runs from here, confirmed', tone: 'good', iconName: 'check' },
-            { none: 'Previous firmware', state: 'No longer needed' });
+        return flashMap(flashNow, {
+          version: target, state: online ? 'Runs from here, confirmed' : 'Ran from here, confirmed', tone: 'good', iconName: 'check',
+        }, { none: 'Previous firmware', state: 'No longer needed' });
       }
       const reached = known?.ota?.job === deployment ? known.ota.state : null;
       if (reached === 'rebooting') return restarting();
       if (reached === 'testing') return onTrial();
-      // How it ended is not known, so there is no map of that: only what the board says today.
+      // How it ended is not known, so there is no map of that: only the board's latest report.
       if (description.unsure) {
-        return flashMap(FLASH_NOW, { ...stays, state: 'What the board reports', iconName: null },
+        return flashMap(flashNow, { ...stays, state: online ? 'What the board reports' : 'What the board last reported', iconName: null },
           { none: 'Not reported by the board', state: 'How this update ended is not known' },
           { note: 'A board that AWS has cancelled cannot report the end of that update.' });
       }
-      // Another deployment installed it later: when this one ended, the board had not.
-      if (description.installedBy) {
-        return flashMap(FLASH_ENDED, { none: 'Previous firmware', state: 'Stayed in place', tone: 'run' },
-          { version: target, state: 'Not installed' });
-      }
-      return flashMap(FLASH_ENDED, stays, { version: target, state: 'Not installed' });
+      // It stopped there, or another deployment installed it later: when this one ended, the board had not.
+      return flashMap(FLASH_ENDED, STAYED_IN_PLACE, { version: target, state: 'Not installed' });
     }
     default:
       return null;
@@ -866,10 +877,13 @@ function slotsOfExecution(execution, known, target, description, deployment) {
 /** The same, told from what a board last reported about itself. */
 function slotsOfDevice(device) {
   const { fw, ota, online } = device;
+  // On a map of when an offline board was last seen, that is over.
+  const onTrialWords = online ? 'Runs on trial' : 'Was on trial';
+  const confirmedWords = online ? 'Runs from here, confirmed' : 'Ran from here, confirmed';
   const running = {
     version: fw?.version ?? null,
     none: 'Version not reported',
-    state: fw?.confirmed ? 'Runs from here, confirmed' : fw ? 'Runs on trial' : 'Nothing reported',
+    state: fw?.confirmed ? confirmedWords : fw ? onTrialWords : 'Nothing reported',
     tone: fw?.confirmed ? 'good' : fw ? 'live' : 'idle',
     iconName: fw?.confirmed ? 'check' : fw ? 'pulse' : null,
   };
@@ -890,7 +904,7 @@ function slotsOfDevice(device) {
     }, options);
   }
   if (ota.state === 'testing') {
-    return flashMap(title, { ...running, state: 'Runs on trial', tone: online ? 'live' : 'idle', iconName: 'pulse' },
+    return flashMap(title, { ...running, state: onTrialWords, tone: online ? 'live' : 'idle', iconName: 'pulse' },
       { none: 'Previous firmware', state: 'Kept to fall back on' }, options);
   }
   // It went quiet in the middle of this, and may have moved on since: old news is told as old news.
@@ -966,7 +980,7 @@ function stepList(description, { compact = false, preview = false, viewer = fals
       preview ? null : h('span', { class: 'sr-only' }, ': '),
       preview
         ? null
-        : h('span', { class: 'step-state' }, current ? currentWord(description.tone, viewer) ?? state.label : state.label));
+        : h('span', { class: 'step-state' }, step.word ?? (current ? currentWord(description.tone, viewer) ?? state.label : state.label)));
     }));
 }
 
@@ -978,12 +992,13 @@ function stepList(description, { compact = false, preview = false, viewer = fals
 function returnPath(execution, description) {
   const at = description.steps.findIndex((step) => step.state === 'failed');
   if (at < 1) return null;
-  const { phase, running } = execution;
-  let words = ['Still on the firmware it had', running ? [': ', mono(running)] : null];
+  const { phase, ranAtEnd } = execution;
+  // What the job recorded when it ended, which says nothing about the board today.
+  let words = ['It stayed on the firmware it had', ranAtEnd ? [': ', mono(ranAtEnd)] : null];
   if (phase === 'rolled_back') {
-    words = ['Back on the previous firmware', running ? [': ', mono(running)] : null];
+    words = ['It went back to the previous firmware', ranAtEnd ? [': ', mono(ranAtEnd)] : null];
   } else if (phase === 'declined' || phase === 'refused') {
-    words = ['Nothing was installed', running ? ['. Still on ', mono(running)] : null];
+    words = ['Nothing was installed', ranAtEnd ? ['. It stayed on ', mono(ranAtEnd)] : null];
   }
   return h('div', {
     class: `return-path is-${description.tone} ${at < 3 ? 'is-short' : ''}`.trim(),
@@ -1099,8 +1114,17 @@ export function accountView(ctx) {
 
 // Overview.
 
-const SCRIPTED_NOTE = 'Sent by a script with AWS credentials, directly to the API function. Nobody signed in: ' +
-  'the name is the one the script gave, and it was checked only to be an active release manager.';
+const SCRIPTED_TAG = 'Script, no sign-in';
+const SCRIPTED_NOTE = 'Sent by a script (the test bench or scripts/ota.sh) with AWS credentials, directly to the API ' +
+  'function. Nobody signed in. The name is the one the script gave, which has to be an active release manager, ' +
+  'so the entry does not show that this person did it.';
+
+/** What the tag on such a line means, said once, in words a touch screen can reach. */
+function scriptedKey(entries, className) {
+  if (!entries.some((entry) => describeAudit(entry).scripted)) return null;
+  return h('p', { class: `log-key ${className}`.trim(), key: 'scripted' },
+    h('span', { class: 'tag is-warn' }, SCRIPTED_TAG), ` ${SCRIPTED_NOTE}`);
+}
 
 /** One entry of the activity log. The short form is for the overview. */
 function activityLine(entry, ctx, compact) {
@@ -1134,9 +1158,7 @@ function activityLine(entry, ctx, compact) {
           : null,
         outcome,
         ending ? [' ', badge(ending.tone, ending.icon, ending.label)] : null,
-        description.scripted
-          ? [' ', h('span', { class: 'tag is-warn', title: SCRIPTED_NOTE }, 'Script, no sign-in')]
-          : null),
+        description.scripted ? [' ', h('span', { class: 'tag is-warn' }, SCRIPTED_TAG)] : null),
       compact
         ? null
         : h('p', { class: 'log-detail dotted' },
@@ -1149,7 +1171,8 @@ function activityLine(entry, ctx, compact) {
           entry.requestId
             ? h('span', { key: 'request', class: 'log-ref' }, 'Request ', mono(entry.requestId))
             : null)),
-    h('span', { class: 'log-when' }, when(entry.at, ctx.state.now)));
+    // The full log files its lines under the day, so a line says when in that day.
+    h('span', { class: 'log-when' }, compact ? when(entry.at, ctx.state.now) : whenInDay(entry.at)));
 }
 
 /** One fact of a log entry. A digest is shortened: the button next to it copies all of it. */
@@ -1160,7 +1183,7 @@ function auditFact(fact, ctx) {
       copyButton(fact.value, `the SHA-256 of ${fact.value.slice(0, 12)}…`, ctx));
   }
   if (fact.words) {
-    return h('span', { key: `fact-${fact.key}` }, `${fact.words} (`, mono(fact.value), ')');
+    return h('span', { key: `fact-${fact.key}`, title: `Code ${fact.value}` }, `${fact.words}.`);
   }
   return h('span', { key: `fact-${fact.key}` },
     fact.phrase ? `${fact.label} ` : `${fact.label}: `,
@@ -1185,7 +1208,7 @@ function boardLine(execution, deployment, ctx, known) {
     board: known ?? null, deployment: deployment.id, version: deployment.version, unread: ctx.state.devices.value === null,
   });
   const lastSeen = known?.lastSeen ?? null;
-  const offline = execution.phase === 'waiting_for_device' && !execution.online;
+  const offline = !execution.online;
   return h('li', { key: execution.thing, class: `board-run is-${description.tone}` },
     h('div', { class: 'board-run-head' },
       h('div', { class: 'board-run-who' },
@@ -1215,6 +1238,48 @@ function startedBy(deployment, now, stamp = when) {
     stamp(deployment.createdAt, now),
     deployment.createdBy ? [' by ', who(deployment.createdBy)] : null,
   ];
+}
+
+const NOT_REGISTERED = 'Not a registered release';
+
+/** The list of releases, or null while it has not been read. */
+function releaseList(ctx) {
+  return ctx.state.firmware.value?.releases ?? null;
+}
+
+/** The boards that report a version that is not in the list of releases. */
+function offList(devices, ctx) {
+  return (devices ?? []).filter((device) => isUnregistered(device.fw?.version, releaseList(ctx)));
+}
+
+/** The oldest of what these boards last said. */
+function oldestSeen(boards) {
+  return boards.reduce((oldest, device) => (Date.parse(device.lastSeen) < Date.parse(oldest.lastSeen) ? device : oldest));
+}
+
+/**
+ * That what is said of these boards is what they last said, and when, for those that are
+ * offline. They are the boards the sentence above this one is about, which may not be all
+ * there are. `alone` says that "the board" can only be taken for the one that is meant.
+ */
+function offlineWords(boards, now, alone = boards.length === 1) {
+  const quiet = boards.filter((device) => !device.online && device.lastSeen);
+  if (quiet.length === 0) return null;
+  const seen = when(oldestSeen(quiet).lastSeen, now);
+  if (alone) return ['As last reported: the board is offline, last seen ', seen, '.'];
+  if (boards.length === 1) return ['As last reported: that board is offline, last seen ', seen, '.'];
+  return quiet.length === 1
+    ? ['As last reported: 1 of them is offline, last seen ', seen, '.']
+    : [`As last reported: ${quiet.length} of them are offline, the oldest report `, seen, '.'];
+}
+
+/** The same in a few words, under a figure that counts boards by what they run. */
+function asReported(devices, now) {
+  const quiet = devices.filter((device) => device.fw && !device.online && device.lastSeen);
+  if (quiet.length === 0) return null;
+  const seen = when(oldestSeen(quiet).lastSeen, now);
+  return h('p', { class: 'card-note fleet-note', key: 'reported' },
+    quiet.length === 1 ? 'As last reported ' : 'As last reported, the oldest ', seen, '.');
 }
 
 /** The versions of the releases that are revoked, as far as they are known here. */
@@ -1337,7 +1402,6 @@ function boardsCard(ctx, devices) {
       h('span', null, 'Board'), h('span', null, 'Firmware'), h('span', null, 'Signal'), h('span', null, 'Update'));
     body = [
       h('ul', { class: 'board-list', key: 'list' }, head, devices.slice(0, BOARDS_SHOWN).map((device) => {
-        const quality = signalQuality(device.rssi);
         const reported = describeUpdate(device);
         // The panel above and this row say one percentage: the board list is read less often.
         const own = state.deploymentDetails.get(device.ota?.job)?.value?.executions
@@ -1363,10 +1427,12 @@ function boardsCard(ctx, devices) {
               ? [mono(device.fw.version),
                 device.fw.confirmed
                   ? h('span', { class: 'board-line-mark', title: 'Confirmed' }, icon('check', 'is-small'), h('span', { class: 'sr-only' }, ' confirmed'))
-                  : h('span', { class: 'tag is-warn' }, 'On trial')]
+                  : h('span', { class: 'tag is-warn' }, 'On trial'),
+                isUnregistered(device.fw.version, releaseList(ctx))
+                  ? h('span', { class: 'tag is-warn' }, NOT_REGISTERED)
+                  : null]
               : h('span', { class: 'quiet' }, 'Not reported')),
-          h('span', { class: 'board-line-signal' },
-            quality ? [signalBars(quality), quality.label] : h('span', { class: 'quiet' }, 'Not reported')),
+          h('span', { class: 'board-line-signal' }, signalWords(device, (quality) => [signalBars(quality), quality.label])),
           h('span', { class: 'board-line-update' },
             statusLine(update, update.progress !== null ? h('span', { class: 'status-value' }, `${update.progress}%`) : null)));
       })),
@@ -1404,12 +1470,17 @@ const OLDER_SHADES = 3;
  * The fleet by firmware: a row per version with one tile per board. Rows label themselves,
  * so one board is a tile, not a bar that fills the width to say "1".
  */
-function versionRows(devices, newest, revokedOnes) {
+function versionRows(devices, newest, revokedOnes, releases) {
   let behind = 0;
+  // One board is said by the row: a tile on its own would measure nothing.
+  const tiled = devices.length > 1;
   return h('ul', { class: 'fleet-list', key: 'versions' }, versionGroups(devices).map(({ version, members }) => {
     let tone = 'none';
+    const unregistered = isUnregistered(version, releases);
     if (version && version === newest?.version) {
       tone = 'newest';
+    } else if (unregistered) {
+      tone = 'unregistered';
     } else if (version) {
       behind = Math.min(behind + 1, OLDER_SHADES);
       tone = `older-${behind}`;
@@ -1419,11 +1490,14 @@ function versionRows(devices, newest, revokedOnes) {
       h('span', { class: 'fleet-name' },
         version ? mono(version, 'fleet-version') : h('span', { class: 'fleet-version quiet' }, 'Not reported'),
         version && newest?.version === version ? h('span', { class: 'tag' }, 'Newest release') : null,
+        unregistered ? h('span', { class: 'tag is-warn' }, NOT_REGISTERED) : null,
         onTrial > 0 ? h('span', { class: 'tag is-warn' }, `${onTrial} on trial`) : null),
       h('span', { class: 'fleet-count' }, plural(members.length, 'board'),
         revokedOnes.has(version) ? h('span', { class: 'tag is-bad' }, 'Revoked release') : null),
-      h('span', { class: 'tiles', 'aria-hidden': 'true' }, members.map((device) =>
-        h('span', { key: device.thing, class: `tile is-${tone}`, title: device.thing }))));
+      tiled
+        ? h('span', { class: 'tiles', 'aria-hidden': 'true' }, members.map((device) =>
+          h('span', { key: device.thing, class: `tile is-${tone}`, title: device.thing })))
+        : null);
   }));
 }
 
@@ -1436,13 +1510,24 @@ function fleetCard(ctx, devices, newest) {
     body = h('p', { class: 'quiet' }, 'Versions appear here once a board has reported.');
   } else {
     const current = groups.find(({ version }) => version && version === newest?.version)?.members.length ?? 0;
+    const others = offList(devices, ctx).length;
+    // None on the newest release because they are on something that is not a release at
+    // all is not the same as being behind, and must not read as that.
+    const figure = current === 0 && others > 0
+      ? [others, ` of ${devices.length} on firmware that is not a registered release`]
+      : [current, ` of ${devices.length} on the newest release`];
+    let headline = null;
+    if (newest) {
+      headline = h('p', { class: 'figure fleet-headline', key: 'headline' },
+        h('span', { class: 'figure-value' }, String(figure[0])),
+        h('span', { class: 'figure-unit' }, figure[1]));
+    } else if (ctx.state.firmware.value) {
+      headline = h('p', { class: 'fleet-headline', key: 'headline' }, 'No release can be deployed.');
+    }
     body = [
-      newest
-        ? h('p', { class: 'figure fleet-headline', key: 'headline' },
-          h('span', { class: 'figure-value' }, String(current)),
-          h('span', { class: 'figure-unit' }, ` of ${devices.length} on the newest release`))
-        : h('p', { class: 'fleet-headline', key: 'headline' }, 'No release can be deployed.'),
-      versionRows(devices, newest, revokedVersions(ctx)),
+      headline,
+      asReported(devices, ctx.state.now),
+      versionRows(devices, newest, revokedVersions(ctx), releaseList(ctx)),
     ];
   }
   return card({
@@ -1494,6 +1579,52 @@ function releaseCard(ctx, newest) {
   }, body);
 }
 
+/** The headline for boards that run something that is not a release. */
+function unregisteredWords(strangers, devices) {
+  const heard = strangers.every((device) => device.online);
+  if (devices.length === 1) {
+    const [{ fw }] = strangers;
+    return `The board ${heard ? 'runs' : 'last reported'} ${fw.version}, which is not a registered release.`;
+  }
+  const count = strangers.length;
+  if (!heard) return `${plural(count, 'board')} last reported firmware that is not a registered release.`;
+  return `${plural(count, 'board runs', 'boards run')} firmware that is not a registered release.`;
+}
+
+/** Boards that left what the last deployment installed. How they got there is not on record. */
+function movedWords(standing, deployment, now) {
+  const { moved } = standing;
+  if (deployment.things.length > 1) {
+    return `${moved.length} of ${deployment.things.length} boards ${moved.length === 1 ? 'has' : 'have'} moved to other firmware since.`;
+  }
+  const [board] = moved;
+  return board.online
+    ? ['The board has since moved to ', mono(board.fw.version), '.']
+    : ['When last seen, ', when(board.lastSeen, now), ', the board had moved to ', mono(board.fw.version), '.'];
+}
+
+/**
+ * Boards that report an update, for when no deployment of this console is under way: a job
+ * made directly in AWS IoT is not among the deployments. A board names a job of this console
+ * by its id, and any other job as none. An offline board only says what it was at, then.
+ */
+function workWords(devices) {
+  const busy = devices.filter((device) => device.ota && device.ota.state !== 'idle');
+  if (busy.length === 0) return null;
+  const count = busy.length;
+  const alone = devices.length === 1;
+  const heard = busy.every((device) => device.online);
+  const opening = heard ? '' : 'When last seen, ';
+  const who = alone ? `${heard ? 'The' : 'the'} board` : plural(count, 'board');
+  const update = count === 1 ? 'an update' : 'updates';
+  if (busy.every((device) => device.ota.job === null)) {
+    const verb = count === 1 ? (heard ? 'is' : 'was') : (heard ? 'are' : 'were');
+    return `${opening}${who} ${verb} working on ${update} that this console did not start.`;
+  }
+  if (!heard) return `${opening}${who} reported ${update} in progress.`;
+  return `${who} ${count === 1 ? 'reports' : 'report'} ${update} in progress.`;
+}
+
 function updatesCard(ctx, devices) {
   const { state } = ctx;
   const { now } = state;
@@ -1510,25 +1641,58 @@ function updatesCard(ctx, devices) {
   let body;
   if (deployments === null) {
     body = pending(state.deployments, 'deployments');
+  } else if (active.length === 0 && devices === null && !state.devices.error) {
+    // That nothing is going on is for the boards to say as well, and they are on their way.
+    body = pending(state.devices, 'boards');
   } else if (active.length === 0) {
     // The tick is for updates that have been through, and only for those: a page that
     // says all is well right after a rollout failed would mislead at a glance. A
     // deployment that went wrong is what the panel opens with, in words, an icon and its
     // outcome bar. Before the first deployment there is nothing to tick off.
-    const ending = lastDone ? describeDeployment(lastDone) : null;
-    const tone = outOfDate ? 'idle' : ending?.tone ?? 'idle';
-    const news = outOfDate ? null : ending?.said ?? null;
-    const iconName = tone === 'idle' ? 'minus-circle' : ending.icon;
+    const ending = lastDone ? describeDeployment(lastDone, devices) : null;
+    // That a deployment went through is on record. Whether that is still what the boards run
+    // is for the boards to say, and an offline board can only say what it last reported.
+    const standing = ending?.tone === 'good' ? installStanding(lastDone, devices) : null;
+    const strangers = offList(devices, ctx);
+    const movedOn = standing?.state === 'moved';
+    // A board on firmware that is not a release is what there is to tell, unless the last
+    // deployment went wrong or is what the boards report right now.
+    const offRecord = !outOfDate && strangers.length > 0 &&
+      ending?.tone !== 'bad' && ending?.tone !== 'warn' && standing?.state !== 'current';
+    // The deployments do not hold a job that was made directly in AWS IoT. The boards tell.
+    const work = state.devices.error ? null : workWords(devices);
+
+    let tone = outOfDate ? 'idle' : ending?.tone ?? 'idle';
+    let news = outOfDate ? null : ending?.said ?? null;
+    if (offRecord) {
+      tone = 'warn';
+      news = unregisteredWords(strangers, devices);
+    } else if (movedOn) {
+      // Nothing to tick off: the boards have left what that deployment installed.
+      tone = 'idle';
+      news = null;
+    }
+    let iconName = ending?.icon;
+    if (tone === 'idle') iconName = news === null && work ? 'restart' : 'minus-circle';
+    else if (offRecord) iconName = 'alert';
     // Called off or one board's result: the words say it. A bar that is one block across
     // measures nothing, so it is for what several boards did.
     const boards = lastDone?.things.length ?? 0;
     const showBar = boards > 1 && (tone === 'bad' || tone === 'warn' || tone === 'good');
-    const resting = outOfDate ? 'Whether an update is in progress cannot be told right now.' : 'No update is in progress.';
+    // Neither list can say that nothing is going on while it could not be read.
+    const unknown = outOfDate || Boolean(state.devices.error);
+    const atRest = !unknown && !work;
+    const resting = unknown ? 'Whether an update is in progress cannot be told right now.' : 'No update is in progress.';
+    let since = null;
+    // The headline is about these boards, so the note is too, whatever the last deployment did.
+    if (offRecord) since = offlineWords(strangers, now, devices.length === 1);
+    else if (!outOfDate && movedOn) since = movedWords(standing, lastDone, now);
+    else if (!outOfDate && standing && standing.state !== 'current') since = offlineWords(standing.boards, now);
     body = h('div', { class: `calm is-${tone}` },
-      h('p', { class: `calm-title is-${tone}` }, icon(iconName), news ?? resting),
+      h('p', { class: `calm-title is-${tone}` }, icon(iconName ?? 'minus-circle'), news ?? work ?? resting),
       lastDone
         ? h('p', { class: 'card-note calm-note' },
-          news ? null : 'Last deployment: ',
+          news && !offRecord ? null : 'Last deployment: ',
           linkTo(deploymentHref(lastDone.id), { class: 'mono' }, lastDone.version ?? lastDone.id),
           ' ', badge(ending.tone, ending.icon, ending.label), ' ',
           h('span', null,
@@ -1536,8 +1700,11 @@ function updatesCard(ctx, devices) {
             lastDone.completedAt
               ? when(lastDone.completedAt, now)
               : when(lastDone.createdAt, now, 'started '),
-            news ? '. No update is in progress.' : null))
-        : h('p', { class: 'card-note' }, 'Deployments appear here while boards are being updated.'),
+            news && atRest ? '. No update is in progress.' : null))
+        : h('p', { class: 'card-note' },
+          news && atRest ? 'No update is in progress. ' : null, 'Deployments from this console appear here while boards are being updated.'),
+      news && work ? h('p', { class: 'card-note calm-work', key: 'work' }, work) : null,
+      since ? h('p', { class: 'card-note calm-since', key: 'since' }, since) : null,
       showBar
         ? h('div', { class: 'calm-outcome' },
           segments(countParts(lastDone.counts), `Boards: ${countWords(lastDone.counts)}.`, { thin: true }),
@@ -1583,8 +1750,11 @@ function activityCard(ctx) {
     body = h('p', { class: 'quiet' },
       'Nothing has been recorded yet. Uploads, deployments, cancellations and revocations will appear here.');
   } else {
-    body = h('ul', { class: 'log is-compact' },
-      recent.slice(0, 5).map((entry) => activityLine(entry, ctx, true)));
+    const shown = recent.slice(0, 5);
+    body = [
+      h('ul', { class: 'log is-compact', key: 'log' }, shown.map((entry) => activityLine(entry, ctx, true))),
+      scriptedKey(shown, 'is-below'),
+    ];
   }
   return card({
     key: 'activity',
@@ -1660,7 +1830,7 @@ export function overviewView(ctx) {
   return h('div', { class: 'page' },
     pageHead({
       title: 'Overview',
-      lede: 'What the fleet runs, and what is being updated right now.',
+      lede: 'What the boards last reported, and what is being updated right now.',
       tools: freshness(oldestRead(failed) ?? state.devices, ctx),
     }),
     loadProblems([
@@ -1681,15 +1851,24 @@ export function overviewView(ctx) {
 
 // Devices.
 
-function firmwareFact(device, revokedOnes) {
+/** Said after a value that an offline board reported. */
+function whenLastSeen(device) {
+  return device.online ? null : h('span', { class: 'quiet' }, ' when last seen');
+}
+
+function firmwareFact(device, revokedOnes, releases) {
   if (!device.fw) return h('span', { class: 'quiet' }, 'Not reported');
   return [
     mono(device.fw.version, 'fact-strong device-version'),
+    // Said of the version and of whether it was confirmed. Whether it is a registered
+    // release is a fact about today's list of releases.
+    whenLastSeen(device),
     device.fw.confirmed
       ? badge('good', 'check', 'Confirmed')
       : badge('warn', 'pulse', 'On trial',
         'Not confirmed yet. The bootloader goes back to the previous firmware if the board ' +
         'restarts before it confirms.'),
+    isUnregistered(device.fw.version, releases) ? badge('warn', 'alert', NOT_REGISTERED) : null,
     // Revoking does not touch a board that runs the release.
     revokedOnes.has(device.fw.version)
       ? [
@@ -1722,23 +1901,34 @@ function updateFact(device, offer) {
       : null);
 }
 
-function signalFact(device, withScale) {
+/**
+ * A board's signal as words and bars. An offline board has no signal to speak of, only the
+ * reading it last gave: that is what it is called, in muted type, with no verdict on it.
+ */
+function signalWords(device, live) {
   const quality = signalQuality(device.rssi);
   if (!quality) return h('span', { class: 'quiet' }, 'Not reported');
+  if (device.online) return live(quality);
+  return [signalBars(quality, true), h('span', { class: 'quiet signal-old' }, `${signed(device.rssi)} dBm when last seen`)];
+}
+
+function signalFact(device, withScale) {
   return [
-    h('span', { class: 'signal-fact' }, signalBars(quality), `${quality.label} · ${signed(device.rssi)} dBm`),
-    withScale ? signalScale(device) : null,
+    h('span', { class: 'signal-fact' },
+      signalWords(device, (quality) => [signalBars(quality), `${quality.label} · ${signed(device.rssi)} dBm`])),
+    // A needle says where the signal is now. There is no such thing for an offline board.
+    withScale && device.online ? signalScale(device) : null,
   ];
 }
 
 function uptimeFact(device) {
   if (device.uptime === null) return h('span', { class: 'quiet' }, 'Not reported');
-  return [duration(device.uptime), device.online ? null : h('span', { class: 'quiet' }, ' when last seen')];
+  return [duration(device.uptime), whenLastSeen(device)];
 }
 
 function deviceFacts(device, ctx, { offer = openOffer(device, ctx), withScale = false } = {}) {
   return facts([
-    ['Firmware', firmwareFact(device, revokedVersions(ctx))],
+    ['Firmware', firmwareFact(device, revokedVersions(ctx), releaseList(ctx))],
     ['Update', updateFact(device, offer)],
     ['Signal', signalFact(device, withScale)],
     ['Uptime', uptimeFact(device)],
@@ -1783,7 +1973,8 @@ function devicesPanel(devices, ctx) {
       devices.length > 1 ? tileWords(devices, [['updating now', updating], ['on trial', onTrial]]) : null),
     h('div', { class: 'devices-versions' },
       h('h2', { class: 'eyebrow' }, 'Firmware in the fleet'),
-      versionRows(devices, newest, revokedVersions(ctx))));
+      asReported(devices, ctx.state.now),
+      versionRows(devices, newest, revokedVersions(ctx), releaseList(ctx))));
 }
 
 const DEVICE_COLUMNS = ['Board', 'Status', 'Firmware', 'Update', 'Signal', 'Uptime'];
@@ -1829,15 +2020,19 @@ const NOT_LOADED = Object.freeze({ value: null, error: null, loading: true, load
 
 function historyRow(execution, now, last) {
   const version = execution.version ?? versionOfDeployment(execution.deployment);
+  // Only a job with this console's kind of name has a page here. Any other was made some
+  // other way, directly in AWS IoT, and all this console knows of it is this line.
+  const href = deploymentHref(execution.deployment);
   return h('li', { key: execution.deployment, class: 'row history-row' },
     h('div', { class: 'row-main' },
-      linkTo(deploymentHref(execution.deployment), { class: 'mono row-title cover-link' },
+      linkTo(href, { class: `mono row-title ${href ? 'cover-link' : ''}`.trim() },
         version ?? execution.deployment),
       h('span', { class: 'row-note' },
         'Offered ', when(execution.queuedAt, now),
-        isUnfinished(execution.status) ? null : [' · ended ', when(execution.lastUpdatedAt, now)])),
+        isUnfinished(execution.status) ? null : [' · ended ', when(execution.lastUpdatedAt, now)]),
+      href ? null : h('span', { class: 'row-note history-outside' }, 'Started outside this console')),
     statusLine(describeHistory(execution.status, last)),
-    h('span', { class: 'row-chevron' }, icon('arrow-right')));
+    href ? h('span', { class: 'row-chevron' }, icon('arrow-right')) : null);
 }
 
 /** The entry of a board's history that the board's own last report speaks of: the one that ended last. */
@@ -1912,7 +2107,7 @@ export function deviceView(ctx) {
       head, loadProblem(resource, 'this board', ctx), pending(resource, 'the board'));
   }
 
-  const { device, certificates, executions } = detail;
+  const { device, certificates, executions, olderExecutions: older } = detail;
   const ended = newestEnded(executions);
   // The board's own history says whether it has an update waiting, without any other list.
   const queued = executions.find((execution) => execution.status === 'QUEUED') ?? null;
@@ -1942,8 +2137,14 @@ export function deviceView(ctx) {
         card({ key: 'history', title: 'Update history' },
           executions.length === 0
             ? h('p', { class: 'quiet' }, 'This board has not been offered an update yet.')
-            : h('ul', { class: 'rows' }, executions.map((execution) =>
-              historyRow(execution, state.now, execution === ended ? device.ota?.last ?? null : null)))))));
+            : [
+              h('ul', { class: 'rows', key: 'rows' }, executions.map((execution) =>
+                historyRow(execution, state.now, execution === ended ? device.ota?.last ?? null : null))),
+              older > 0
+                ? h('p', { class: 'card-note history-cut', key: 'cut' },
+                  `The newest ${executions.length} are shown. ${plural(older, 'older update is', 'older updates are')} not listed.`)
+                : null,
+            ]))));
 }
 
 // Firmware.
@@ -1954,8 +2155,16 @@ const CHAIN = [
   ['chip', 'Checked at boot', 'By the board’s bootloader'],
 ];
 
+/** A release whose image was checked against a key that is not this project's current one. */
+function signedWithOldKey(release, fingerprint) {
+  return Boolean(fingerprint) && Boolean(release.keyHash) && release.keyHash !== fingerprint;
+}
+
 function trustPanel(ctx) {
   const fingerprint = ctx.state.firmware.value?.fingerprint ?? '';
+  // An image is stored only if it checks out against the key the server holds at that
+  // moment, so a stored image with another fingerprint is from before the key was replaced.
+  const earlier = (ctx.state.firmware.value?.releases ?? []).filter((release) => signedWithOldKey(release, fingerprint)).length;
   return h('div', { class: 'trust' },
     h('h2', { class: 'trust-title' }, icon('shield'), 'The server verifies every upload'),
     h('ol', { class: 'chain', key: 'chain' }, CHAIN.map(([iconName, title, text]) =>
@@ -1973,7 +2182,12 @@ function trustPanel(ctx) {
       ? h('div', { class: 'fingerprint' },
         h('p', { class: 'eyebrow' }, 'Signing key fingerprint · SHA-256'),
         h('div', { class: 'digest-row' },
-          mono(fingerprint, 'digest'), copyButton(fingerprint, 'the key fingerprint', ctx)))
+          mono(fingerprint, 'digest'), copyButton(fingerprint, 'the key fingerprint', ctx)),
+        earlier > 0
+          ? h('p', { class: 'fingerprint-note' },
+            `${plural(earlier, 'older release was', 'older releases were')} signed with an earlier key, which has been `,
+            `replaced since, so ${earlier === 1 ? 'it shows' : 'they show'} another fingerprint.`)
+          : null)
       : null);
 }
 
@@ -2318,6 +2532,11 @@ function byAccount(person) {
   return factNote(['by ', nameOf(person), person?.sub ? [' · account ', mono(person.sub)] : null]);
 }
 
+function signedWords(release, fingerprint) {
+  if (signedWithOldKey(release, fingerprint)) return 'Not the current signing key. This release was signed with an earlier key, which has been replaced since.';
+  return release.keyHash === fingerprint ? 'Matches this project’s signing key.' : 'Fingerprint of the key that signed it.';
+}
+
 function releaseDetails(release, fingerprint) {
   const sizes = `${exactBytes(release.size)}: ${exactBytes(release.headerSize)} of header, ` +
     `${exactBytes(release.payloadSize)} of firmware, then the signature`;
@@ -2330,10 +2549,7 @@ function releaseDetails(release, fingerprint) {
       ['File SHA-256', mono(release.sha256, 'digest'), factNote('What a board checks after downloading.')],
       ['Image hash', mono(release.imageHash, 'digest'),
         factNote('What the signature covers and the bootloader verifies.')],
-      ['Signed with', mono(release.keyHash, 'digest'),
-        factNote(release.keyHash === fingerprint
-          ? 'Matches this project’s signing key.'
-          : 'Fingerprint of the key that signed it.')],
+      ['Signed with', mono(release.keyHash, 'digest'), factNote(signedWords(release, fingerprint))],
       ['Load address', mono(`0x${(release.loadAddress ?? 0).toString(16)}`)],
       ['Uploaded', exactTime(release.uploadedAt), byAccount(release.uploadedBy)],
       revoked ? ['Revoked', exactTime(revoked.at), byAccount(revoked.by)] : null,
@@ -2373,8 +2589,11 @@ function releaseTimeline(firmware, devices, now, onInk) {
   const earlier = releases.length - shown.length;
   const revoked = releases.filter((release) => release.status !== 'active').length;
   const counted = new Map();
+  const quiet = new Set();
   for (const device of devices ?? []) {
-    if (device.fw) counted.set(device.fw.version, (counted.get(device.fw.version) ?? 0) + 1);
+    if (!device.fw) continue;
+    counted.set(device.fw.version, (counted.get(device.fw.version) ?? 0) + 1);
+    if (!device.online) quiet.add(device.fw.version);
   }
   const gap = (from, to) => {
     const seconds = (to - Date.parse(from)) / 1000;
@@ -2406,7 +2625,7 @@ function releaseTimeline(firmware, devices, now, onInk) {
           h('span', { class: 'station-state' }, word),
           h('span', { class: 'station-when' }, when(release.uploadedAt, now)),
           devices && boards > 0
-            ? h('span', { class: 'station-boards' }, `${plural(boards, 'board')} on it`)
+            ? h('span', { class: 'station-boards' }, `${plural(boards, 'board')} on it${quiet.has(release.version) ? ' when last seen' : ''}`)
             : null,
           h('span', {
             class: 'station-gap',
@@ -2653,7 +2872,8 @@ export function deploymentsView(ctx) {
     pageHead({
       title: 'Deployments',
       lede: 'A deployment offers one release to a set of boards. ' +
-        'Each board installs it when someone presses its Button 1.',
+        'Each board installs it when someone presses its Button 1. ' +
+        'A job made directly in AWS IoT is not listed here; its board’s page shows it.',
       tools: [freshness(state.deployments, ctx), start],
     }),
     loadProblem(state.deployments, 'the deployments', ctx),
@@ -2685,15 +2905,15 @@ const FULL_TONES = new Set(['act', 'live', 'bad']);
  */
 function historyOf(execution, ctx) {
   const detail = ctx.state.deviceDetails.get(execution.thing)?.value ?? null;
-  if (detail === null || detail.device.fw?.version !== execution.running) return null;
-  return detail.executions;
+  if (detail === null || detail.device.fw?.version !== execution.reported) return { history: null, historyCut: false };
+  return { history: detail.executions, historyCut: detail.olderExecutions > 0 };
 }
 
 /** The boards of a deployment whose own list of updates is needed to say how it ended, and cannot be read. */
 function unreadHistories(deployment, ctx) {
   return deployment.executions
-    .filter((execution) => execution.status === 'CANCELED' && execution.running === deployment.version &&
-      historyOf(execution, ctx) === null)
+    .filter((execution) => execution.status === 'CANCELED' && execution.reported === deployment.version &&
+      historyOf(execution, ctx).history === null)
     .map((execution) => ctx.state.deviceDetails.get(execution.thing))
     .filter((resource) => resource?.error);
 }
@@ -2704,7 +2924,7 @@ function executionCard(execution, deployment, ctx, boards = 1) {
   const known = (ctx.state.devices.value?.devices ?? []).find((device) => device.thing === execution.thing);
   const unread = ctx.state.devices.value === null;
   const description = describeExecution(execution, {
-    board: known ?? null, deployment: deployment.id, version: deployment.version, history: historyOf(execution, ctx), unread,
+    board: known ?? null, deployment: deployment.id, version: deployment.version, ...historyOf(execution, ctx), unread,
   });
   const target = deployment.version ?? versionOfDeployment(deployment.id);
   const finished = !isUnfinished(execution.status);
@@ -2725,8 +2945,10 @@ function executionCard(execution, deployment, ctx, boards = 1) {
     execution.status === 'IN_PROGRESS' && execution.secondsLeft !== null
       ? `Times out in ${duration(execution.secondsLeft)}`
       : null,
-    // The board's own word on what it runs, when the deployment's record has none.
-    finished && !execution.running && known?.fw ? ['Board now reports ', mono(known.fw.version)] : null,
+    // The board's own word on what it runs, when the deployment's record names no version.
+    finished && !execution.ranAtEnd && !execution.reported && known?.fw
+      ? [known.online ? 'Board now reports ' : 'Board last reported ', mono(known.fw.version)]
+      : null,
     !execution.online && known?.lastSeen ? ['Board last seen ', when(known.lastSeen, now)] : null,
   ].filter(Boolean);
   const flash = compact ? null : slotsOfExecution(execution, known, target, description, deployment.id);
@@ -2833,14 +3055,14 @@ export function deploymentView(ctx) {
   const withdrawn = unfinished && deployment.status === 'CANCELED';
   const atWork = withdrawn && deployment.executions.some((execution) => execution.status === 'IN_PROGRESS');
   const { by, because } = deployment ? cancellation(deployment, ctx) : { by: null, because: null };
-  // A deployment that ended short can be offered again, if its release is still there.
+  // A deployment that ended short can be offered again, if its release is still there and a
+  // board would not refuse it, which describeExecution() has weighed.
   const boards = state.devices.value?.devices ?? [];
   const shortOfDone = deployment && !unfinished && !isUnderWay(deployment) && deployment.executions.some(
     (execution) => describeExecution(execution, {
       board: boards.find((device) => device.thing === execution.thing) ?? null,
       deployment: id,
       version: deployment.version,
-      history: historyOf(execution, ctx),
       unread: state.devices.value === null,
     }).retry);
   const offerAgain = shortOfDone && state.me.canWrite && state.firmware.value !== null &&
@@ -2949,7 +3171,9 @@ function activityPanel(audit) {
   ].filter(([amount]) => amount > 0);
   return h('p', { class: 'log-summary dotted', key: 'summary' },
     h('span', { key: 'scope', class: 'log-scope' },
-      audit.next ? `The latest ${plural(entries.length, 'entry', 'entries')}` : `The whole log, ${plural(entries.length, 'entry', 'entries')}`),
+      audit.next
+        ? `The latest ${plural(entries.length, 'entry', 'entries')}`
+        : `${entries.length === 1 ? 'The only entry' : `All ${entries.length} entries`}`),
     said.map(([amount, one, many]) => h('span', { key: one }, plural(amount, one, many))),
     refused > 0
       ? h('span', { key: 'refused', class: 'status is-warn' }, icon('alert', 'is-small'), `${refused} refused or failed`)
@@ -2973,12 +3197,13 @@ export function activityView(ctx) {
     body = card({ key: 'none' }, empty({
       iconName: 'list',
       title: 'Nothing has been recorded yet.',
-      text: 'Uploads, deployments, cancellations and revocations will appear here, ' +
+      text: 'Uploads, deployments, cancellations and revocations made through this console’s API will appear here, ' +
         'including attempts that were refused.',
     }));
   } else {
     body = [
       activityPanel(audit),
+      scriptedKey(audit.entries, ''),
       days.map((day) => h('section', { key: day.label, class: 'log-day' },
         h('h2', { class: 'log-day-title' }, day.label),
         h('ul', { class: 'log' }, day.entries.map((entry) => activityLine(entry, ctx, false))))),
@@ -2990,15 +3215,17 @@ export function activityView(ctx) {
             disabled: state.audit.loadingMore,
             onClick: ctx.actions.loadMoreActivity,
           }, state.audit.loadingMore ? 'Loading…' : 'Load more')
-          : h('p', { class: 'quiet' }, 'That is the whole log.'),
+          : h('p', { class: 'quiet' }, 'That is every entry in this log.'),
         state.audit.moreError ? failure('Could not load more.', state.audit.moreError) : null),
     ];
   }
   return h('div', { class: 'page' },
     pageHead({
       title: 'Activity',
-      lede: 'Every upload, deployment, cancellation and revocation, with who asked for it and whether ' +
-        'it went through. A deployment that is over shows how it ended. This console has no way to change an entry.',
+      lede: 'Every upload, deployment, cancellation and revocation made through this console’s API, with who asked ' +
+        'for it and whether it went through. A job made directly in AWS IoT does not pass through that API, so it is ' +
+        'not in this log, though its board’s page lists it. A deployment that is over shows how it ended. ' +
+        'This console has no way to change an entry.',
       tools: freshness(state.audit, ctx),
     }),
     loadProblem(state.audit, 'the activity log', ctx),
@@ -3123,7 +3350,7 @@ function wizardBoard(device, model, now) {
   },
   [mono(device.thing), presence(device, now)],
   h('span', { class: 'choice-note' },
-    device.fw ? ['Runs ', mono(device.fw.version)] : 'Has not reported a version',
+    device.fw ? [device.online ? 'Runs ' : 'Last reported ', mono(device.fw.version)] : 'Has not reported a version',
     device.online || !device.lastSeen ? null : [' · last seen ', when(device.lastSeen, now)]),
   remark);
 }

@@ -420,7 +420,7 @@ test('colours mean what they mean inside the upload panel too', () => {
 
 test('what grows with the text is measured in text, not in pixels', () => {
   assert.equal(declared('.flash-row').get('grid-template-columns'), '7rem minmax(0, 0.9fr) minmax(0, 1.5fr)');
-  assert.equal(declared('.flash-row', '@container flash (max-width: 34rem)').get('grid-template-columns'), 'minmax(0, 1fr) auto');
+  assert.equal(declared('.flash-row', '@container flash (max-width: 34rem)').get('grid-template-columns'), 'auto minmax(0, 1fr)');
   assert.equal(declared('.flash-row', '@container flash (max-width: 16rem)').get('grid-template-columns'), 'minmax(0, 1fr)');
   assert.match(declared('.device-grid', '@container page (min-width: 64rem)').get('--device-columns'), /^minmax\(14\.5rem, 1\.5fr\) minmax\(8\.5rem, 0\.7fr\)/);
   assert.equal(declared('.upload-stage-mark').get('width'), '1.625rem');
@@ -493,4 +493,34 @@ test('no file of the site contains an e-mail address', () => {
   for (const [name, text] of [...sources, ['index.html', page], [styles[0], css]]) {
     assert.doesNotMatch(text, /[\w.+-]+@[\w-]+\.[a-z]{2,}/i, name);
   }
+});
+
+test('a finished update has no room kept for a next phase, and a headline is not hyphenated', () => {
+  const stylesheet = readFileSync(new URL('../src/site/assets/app.css', import.meta.url), 'utf8');
+  const rule = (selector) => new RegExp(`${selector.replace(/[.:()]/g, '\\$&')}[^{}]*\\{[^}]*\\}`).exec(stylesheet)?.[0] ?? '';
+  // Only while an update can still move on: live, waiting for a person, waiting for the board.
+  const keeping = rule('.execution.is-live:not(.is-compact) .execution-state');
+  assert.match(keeping, /\.execution\.is-act:not\(\.is-compact\) \.execution-state/);
+  assert.match(keeping, /\.execution\.is-wait:not\(\.is-compact\) \.execution-state/);
+  assert.match(keeping, /min-height: 9\.625rem/);
+  assert.doesNotMatch(stylesheet, /(?:^|\n)\s*\.execution:not\(\.is-compact\) \.execution-state \{[^}]*min-height/);
+  // At 360 px it broke as "in-stalled".
+  assert.doesNotMatch(rule('.calm-title'), /hyphens/);
+});
+
+test('a percentage and the name of a slot stay in one piece', () => {
+  const stylesheet = readFileSync(new URL('../src/site/assets/app.css', import.meta.url), 'utf8');
+  // In a narrow column of the overview it broke as "40" and "%" on two lines.
+  assert.match(stylesheet, /(?:^|\n)\.status-value \{[^}]*white-space: nowrap/);
+  // On a board's page at 360 px it broke as "Secondar" and "y slot".
+  assert.match(stylesheet, /(?:^|\n)\.flash-name \{[^}]*white-space: nowrap/);
+});
+
+test('the place of an arrow is set for the row it belongs to', () => {
+  const stylesheet = readFileSync(new URL('../src/site/assets/app.css', import.meta.url), 'utf8');
+  // Moved into the second column of a board's update history, it put the status into the
+  // width of an arrow, one letter to a line.
+  assert.doesNotMatch(stylesheet, /(?:^|\n)\s*\.row-chevron \{[^}]*grid-(?:column|row)/);
+  assert.match(stylesheet, /\.deployment-row > \.row-chevron \{[^}]*grid-column: 2/);
+  assert.match(stylesheet, /\.rows > \.history-row \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto 18px/);
 });

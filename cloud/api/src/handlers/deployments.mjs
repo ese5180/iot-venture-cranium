@@ -121,6 +121,26 @@ function put(cache, key, value) {
   cache.set(key, value);
 }
 
+// The ends of an update that a board reports itself, and writes what it ran into the job.
+const REPORTED_ENDS = Object.freeze(['SUCCEEDED', 'FAILED', 'REJECTED']);
+
+/**
+ * What an execution says about the firmware on its board. These are two different things,
+ * so they are two fields, and only ever one of them holds a value:
+ *
+ *   ranAtEnd   What the job holds: the version the board said it ran when it finished the
+ *              update. History, which stays true whatever the board runs later. Null if
+ *              the job holds none, or could not be read: never the board's report of today.
+ *   reported   For an execution the board did not finish (open, cancelled, timed out,
+ *              removed): what is known of the board at this moment, which is what it told
+ *              the job or else its shadow. It says nothing about the time the update ended.
+ */
+function firmwareOf(row, device) {
+  return REPORTED_ENDS.includes(row.status)
+    ? { ranAtEnd: row.details.running, reported: null }
+    : { ranAtEnd: null, reported: row.details.running ?? device.fw?.version ?? null };
+}
+
 /** The execution of a board that a new job names: queued since the job was created. */
 function queuedRow(thing, createdAt) {
   return {
@@ -208,9 +228,7 @@ export function createDeploymentHandlers({ aws, config, now, randomHex, log }, {
       progress,
       reason: row.details.reason,
       detail: row.details.detail,
-      // What the board said when it finished. For an execution it could not finish
-      // (still open, cancelled, timed out) this is what it reports now.
-      running: row.details.running ?? device.fw?.version ?? null,
+      ...firmwareOf(row, device),
       online: device.online,
       queuedAt,
       startedAt: isoTime(row.startedAt),
