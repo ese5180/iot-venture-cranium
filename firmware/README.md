@@ -20,7 +20,8 @@ files derived from it keep Nordic's copyright notice and licence identifier.
    team key at `~/.cranium/mcuboot_signing_key.pem`
    (see [`secrets/README.md`](../secrets/README.md)). The build stops with an
    explanation if it is missing.
-3. From an nRF Connect SDK terminal:
+3. To make an image to install, run `scripts/build.sh` from any terminal. It takes the next unused version and leaves
+   the signed image in `binaries/`. To build and flash by hand, from an nRF Connect SDK terminal:
 
    ```sh
    west build -b nrf7002dk/nrf5340/cpuapp/ns --sysbuild firmware/app

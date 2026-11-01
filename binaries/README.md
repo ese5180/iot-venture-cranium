@@ -1,6 +1,7 @@
 # binaries
 
-Every `west build` of this checkout stores its signed image here, by itself. Git ignores
+`scripts/build.sh` builds the firmware with the next unused version, and its signed image lands
+here, named by that version. Any `west build` of this checkout stores its image here too. Git ignores
 everything in this folder except this file.
 
 | File | What it is |
@@ -19,8 +20,8 @@ Two ways to put an image on a board over the air:
   checks its signature against the project's public key before it stores anything, and
   then offers to deploy it.
 
-A release must be newer than every release uploaded before it, so set a new version in
-`firmware/app/VERSION` before you build. Images built by the test bench, images with a
+A release must be newer than every release uploaded before it. `scripts/build.sh` takes care of that,
+or set a new version in `firmware/app/VERSION` before a plain `west build`. Images built by the test bench, images with a
 test fault built in and images built for Bluetooth are not kept here.
 
 **Before a demo on the website.** A file dropped on the console's Firmware page must be newer than
