@@ -2014,6 +2014,27 @@ test('a deployment page does not say what an offline board runs now', async () =
     'Cancelled after the board had started. When last seen, the board reported 1.3.0+0. This page cannot tell how this update ended.');
 });
 
+test('the newest release says when no board runs it, and says nothing when one does', async () => {
+  const noteOf = async (devices) => {
+    const drawn = page(views.overviewView, await consoleState({ ...WORLD, devices }));
+    const card = all(drawn, 'section.card').find((item) => textOf(one(item, 'h2')) === 'Newest release');
+    return textOf(card);
+  };
+  const on = (version, extra = {}) => device(WAITING, { fw: { version, confirmed: true }, ...extra });
+
+  assert.match(await noteOf([on('1.3.0+0')]), /The board runs 1\.3\.0\+0, not this release\./);
+  assert.match(await noteOf([on('1.3.0+0', { online: false })]), /The board last reported 1\.3\.0\+0, not this release\./);
+  const other = 'cranium-0000000000000000';
+  assert.match(await noteOf([on('1.3.0+0'), on('1.1.0+0', { thing: other })]), /No board runs this release\./);
+
+  // A board on it, even one of several, or no board that has said anything: nothing to explain.
+  const silent = /not this release|No board runs/;
+  assert.doesNotMatch(await noteOf([on('1.2.4+0')]), silent);
+  assert.doesNotMatch(await noteOf([on('1.2.4+0'), on('1.3.0+0', { thing: other })]), silent);
+  assert.doesNotMatch(await noteOf([device(WAITING, { fw: null })]), silent);
+  assert.doesNotMatch(await noteOf([]), silent);
+});
+
 test('a board on firmware that is no release does not read as behind, and says what it runs', async () => {
   const usb = onVersion('1.3.0+0');
   const drawn = page(views.overviewView, await consoleState(worldOf(usb)));
@@ -2021,7 +2042,10 @@ test('a board on firmware that is no release does not read as behind, and says w
   assert.equal(titleOf(drawn).getAttribute('class'), 'calm-title is-warn');
   assert.equal(all(drawn, 'div.calm.is-warn').length, 1);
   // The last deployment is still told as what it was, and does not stand as what the board runs.
-  assert.match(textOf(one(drawn, 'p.calm-note')), /^Last deployment: 1\.2\.3\+5 Succeeded 1 h ago\. No update is in progress\.$/);
+  assert.match(textOf(one(drawn, 'p.calm-note')), /^Last deployment from this console: 1\.2\.3\+5 Succeeded 1 h ago\. No update is in progress\.$/);
+  // Nor does the newest release: the card says that this is not what the board runs.
+  const newestCard = all(drawn, 'section.card').find((item) => textOf(one(item, 'h2')) === 'Newest release');
+  assert.match(textOf(newestCard), /The board runs 1\.3\.0\+0, not this release\./);
   assert.doesNotMatch(textOf(drawn), /installed and confirmed/);
   // No "0 of 1 on the newest release".
   const fleet = fleetOf(drawn);

@@ -464,8 +464,11 @@ test('the forms hold the commands the page was asked for, in their groups', () =
 const FIRMWARE = new URL(process.env.CRANIUM_FIRMWARE_SRC ? `file://${process.env.CRANIUM_FIRMWARE_SRC}/` : '../../../firmware/app/src/', import.meta.url);
 
 test('the table agrees with the firmware\'s table and limits', { skip: !existsSync(new URL('console_cmd.c', FIRMWARE)) }, () => {
-  const source = readFileSync(new URL('console_cmd.c', FIRMWARE), 'utf8');
-  const entry = /\{\s*"([A-Z_]+)",\s*(NULL|"\?"),\s*"[^"]*",\s*(?:"[^"]*"\s*)+,\s*SECTION_\w+,\s*(true|false),\s*(\d+),\s*(\d+),\s*cmd_\w+\s*\}/g;
+  // A command that only a build with a test fault has is no command of a released board's, so
+  // the page must not offer it.
+  const source = readFileSync(new URL('console_cmd.c', FIRMWARE), 'utf8')
+    .replace(/#if defined\(CONFIG_APP_TEST_FAULT_\w+\)[\s\S]*?#endif/g, '');
+  const entry =/\{\s*"([A-Z_]+)",\s*(NULL|"\?"),\s*"[^"]*",\s*(?:"[^"]*"\s*)+,\s*SECTION_\w+,\s*(true|false),\s*(\d+),\s*(\d+),\s*cmd_\w+\s*\}/g;
   const firmware = new Map([...source.matchAll(entry)].map(([, name, alias, factory, min, max]) =>
     [name, { alias: alias === 'NULL' ? undefined : '?', factory: factory === 'true', args: [Number(min), Number(max)] }]));
   assert.equal(firmware.size >= 20, true, `found ${firmware.size} commands in console_cmd.c`);

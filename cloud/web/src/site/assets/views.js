@@ -1546,6 +1546,9 @@ function fleetCard(ctx, devices, newest) {
 function releaseCard(ctx, newest) {
   const { state } = ctx;
   const firmware = state.firmware.value;
+  const unused = firmware && (newest ?? firmware.releases[0])
+    ? unusedReleaseWords(newest ?? firmware.releases[0], state.devices.value?.devices)
+    : null;
   const latest = firmware?.releases[0] ?? null;
   const shown = newest ?? latest;
   let body;
@@ -1569,6 +1572,7 @@ function releaseCard(ctx, newest) {
       h('p', { class: 'card-note', key: 'size' },
         fileSize(shown.size), ' · SHA-256 ', mono(`${shown.sha256.slice(0, 12)}…`)),
       note ? h('p', { class: 'card-note', key: 'note' }, note) : null,
+      unused ? h('p', { class: 'card-note', key: 'unused' }, unused) : null,
     ];
   }
   return card({
@@ -1577,6 +1581,19 @@ function releaseCard(ctx, newest) {
     className: 'is-zone',
     more: { href: '#/firmware', label: 'Firmware' },
   }, body);
+}
+
+/**
+ * The newest release is what could be deployed, which need not be what the boards run. Said
+ * when no board that has reported runs it, so that the two versions on a page do not look like
+ * a contradiction.
+ */
+function unusedReleaseWords(release, devices) {
+  const reporting = (devices ?? []).filter((device) => device.fw);
+  if (reporting.length === 0 || reporting.some((device) => device.fw.version === release.version)) return null;
+  if (reporting.length > 1) return 'No board runs this release.';
+  const [board] = reporting;
+  return ['The board ', board.online ? 'runs ' : 'last reported ', mono(board.fw.version), ', not this release.'];
 }
 
 /** The headline for boards that run something that is not a release. */
@@ -1692,7 +1709,8 @@ function updatesCard(ctx, devices) {
       h('p', { class: `calm-title is-${tone}` }, icon(iconName ?? 'minus-circle'), news ?? work ?? resting),
       lastDone
         ? h('p', { class: 'card-note calm-note' },
-          news && !offRecord ? null : 'Last deployment: ',
+          // Off the record, what the board runs did not come from a deployment: say whose this is.
+          offRecord ? 'Last deployment from this console: ' : (news ? null : 'Last deployment: '),
           linkTo(deploymentHref(lastDone.id), { class: 'mono' }, lastDone.version ?? lastDone.id),
           ' ', badge(ending.tone, ending.icon, ending.label), ' ',
           h('span', null,
