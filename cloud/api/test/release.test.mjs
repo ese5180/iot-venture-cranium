@@ -1,7 +1,8 @@
 // Tests for what stands between a build and a GitHub Release: scripts/github-release.sh, what the
 // workflow runs on a published release, and the workflow itself. They run against a real git
-// repository and a real bare origin in a temporary folder, with a stand-in for gh first on the PATH:
-// nothing here reaches GitHub, and every call to gh is written down and looked at.
+// repository and a real bare origin in a temporary folder, with a stand-in for gh first on the PATH
+// and one for ssh in each checkout's configuration: origin has a GitHub address, and nothing here
+// reaches GitHub. Every call to gh is written down and looked at.
 //
 // The images are real MCUboot images in the layout of lib/mcuboot.mjs, signed here with a key that
 // only exists in memory, so that one can hold whatever a test needs in its body.
@@ -27,6 +28,7 @@ after(() => rmSync(work, { recursive: true, force: true }));
 
 const STUB = `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$STUB_LOG"
+printf 'GH_REPO=%s GH_HOST=%s\\n' "\${GH_REPO:-}" "\${GH_HOST:-}" >> "$STUB_LOG.env"
 case "$1 $2" in
   "auth status") exit "\${STUB_AUTH:-0}" ;;
   "release view") exit "\${STUB_RELEASE_VIEW:-1}" ;;
@@ -107,7 +109,13 @@ function checkout({ versionFile = VERSION_FILE(1, 2, 3, 4), image = makeImage(),
   mkdirSync(dir, { recursive: true });
   git(root, 'init', '-q', '--bare', origin);
   git(dir, 'init', '-q');
-  git(dir, 'remote', 'add', 'origin', origin);
+  git(dir, 'remote', 'add', 'origin', 'git@github.com:owner/repo.git');
+  // Git gives this the host, and what to run there: git-upload-pack 'owner/repo.git'.
+  const ssh = join(root, 'ssh');
+  writeFileSync(ssh, `#!/usr/bin/env bash\ncd '${root}' || exit 1\ncommand=\${2/owner\\/repo.git/origin.git}\nexec sh -c "git \${command#git-}"\n`);
+  chmodSync(ssh, 0o755);
+  git(dir, 'config', 'core.sshCommand', ssh);
+  git(dir, 'config', 'ssh.variant', 'simple');
   for (const file of ['scripts/github-release.sh', 'scripts/release-lib.sh', 'scripts/verify-github-release.sh',
     'scripts/scan-tracked-files.sh', 'cloud/api/verify-image.mjs', 'cloud/api/src/lib/mcuboot.mjs', 'cloud/infra/template.yaml']) {
     mkdirSync(dirname(join(dir, file)), { recursive: true });
@@ -160,6 +168,7 @@ function script(state, name, args, env = {}) {
   return {
     ...result,
     calls: existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [],
+    ghSaw: existsSync(`${log}.env`) ? readFileSync(`${log}.env`, 'utf8').trim().split('\n') : [],
     uploads,
   };
 }
@@ -194,7 +203,7 @@ test('a dry run does every check, says what would go out, and writes nothing at 
   assert.match(result.stdout, /v1\.2\.3\+4/);
   assert.match(result.stdout, new RegExp(`${sha256(readFileSync(join(state.binaries, state.name))).toString('hex')} {2}cranium-1\\.2\\.3-4\\.signed\\.bin`));
   assert.deepEqual(created(result), []);
-  assert.deepEqual(result.calls, ['auth status', 'release view v1.2.3+4']);
+  assert.deepEqual(result.calls, ['auth status', 'release view v1.2.3+4 --repo owner/repo']);
   assert.deepEqual([snapshot(state.dir), snapshot(state.origin)], before);
   assert.equal(existsSync(result.uploads), false);
 });
@@ -205,7 +214,7 @@ test('a real run publishes the image, latest.json and SHA256SUMS on this commit,
   assert.equal(result.status, 0, result.stderr);
   const [call] = created(result);
   const head = git(state.dir, 'rev-parse', 'HEAD');
-  assert.ok(call.startsWith(`release create v1.2.3+4 --target ${head} --title Firmware 1.2.3+4 `), call);
+  assert.ok(call.startsWith(`release create v1.2.3+4 --repo owner/repo --target ${head} --title Firmware 1.2.3+4 `), call);
   assert.match(result.stdout, /https:\/\/github\.example\/owner\/repo\/releases\/tag\/v1\.2\.3\+4\n$/);
 
   assert.deepEqual(readdirSync(result.uploads).sort(), ['SHA256SUMS', 'cranium-1.2.3-4.signed.bin', 'latest.json']);
@@ -220,7 +229,7 @@ test('a version with no build number has the tag without one', () => {
   const state = checkout({ versionFile: VERSION_FILE(1, 2, 3, 0), image: makeImage({ version: [1, 2, 3, 0] }), name: 'cranium-1.2.3-0.signed.bin', version: '1.2.3+0' });
   const result = release(state, ['1.2.3']);
   assert.equal(result.status, 0, result.stderr);
-  assert.ok(created(result)[0].startsWith('release create v1.2.3 --target'));
+  assert.ok(created(result)[0].startsWith('release create v1.2.3 --repo'));
   assertRefused(release(state, ['1.2.3+0', '--dry-run']), /write 1\.2\.3\+0 as 1\.2\.3/);
 });
 
@@ -247,6 +256,18 @@ test('a change to a tracked file is refused, staged or not', () => {
   assertRefused(release(state), /tracked files have changed/);
 });
 
+test('a file that git was told not to look at is refused, changed or not', () => {
+  for (const flag of ['--skip-worktree', '--assume-unchanged']) {
+    const state = checkout();
+    git(state.dir, 'update-index', flag, 'cloud/infra/template.yaml');
+    assertRefused(release(state), /git was told not to look at/);
+    writeFileSync(join(state.dir, 'cloud/infra/template.yaml'), 'a local tweak\n');
+    const result = release(state);
+    assertRefused(result, /git was told not to look at/);
+    assert.match(result.stderr, /cloud\/infra\/template\.yaml/);
+  }
+});
+
 test('a commit that is not on origin is refused', () => {
   const state = checkout();
   writeFileSync(join(state.dir, 'firmware/app/other'), 'later');
@@ -264,6 +285,41 @@ test('what this checkout remembers about origin is not taken for what origin hol
   rmSync(join(state.origin, 'refs/heads/main'));
   assert.ok(git(state.dir, 'branch', '-r').includes('origin/main'));
   assertRefused(release(state), /on no branch of origin/);
+});
+
+test('gh is told to use the repository that the checks looked at, and nothing else can choose one', () => {
+  const state = checkout();
+  const result = release(state, ['1.2.3+4'], { GH_REPO: 'someone/else', GH_HOST: 'ghe.example' });
+  assert.equal(result.status, 0, result.stderr);
+  const releases = result.calls.filter((call) => call.startsWith('release '));
+  assert.equal(releases.length, 2);
+  for (const call of releases) assert.match(call, /^release \w+ v1\.2\.3\+4 --repo owner\/repo( |$)/);
+  assert.ok(result.ghSaw.length > 0);
+  for (const seen of result.ghSaw) assert.equal(seen, 'GH_REPO= GH_HOST=');
+});
+
+test('an origin that is not on GitHub is refused, and the repository is read from any address of one', () => {
+  const name = (address) => spawnSync('bash', ['-c', 'die() { printf "%s\\n" "$1" >&2; exit 1; }; . "$0"; github_repository_of "$1"',
+    join(REPO, 'scripts/release-lib.sh'), address], { encoding: 'utf8' });
+  for (const address of ['git@github.com:owner/repo.git', 'git@github.com:owner/repo', 'ssh://git@github.com/owner/repo.git',
+    'https://github.com/owner/repo.git', 'https://github.com/owner/repo', 'https://github.com/owner/repo/']) {
+    const result = name(address);
+    assert.equal(result.status, 0, `${address}: ${result.stderr}`);
+    assert.equal(result.stdout, 'owner/repo\n', address);
+  }
+  for (const address of ['/tmp/github.com/owner/repo.git', 'git@gitlab.com:owner/repo.git', 'https://github.com.example.org/owner/repo',
+    'https://user:token@github.com/owner/repo.git', 'git@github.com:owner/repo/more', 'git@github.com:owner', 'git@github.com:owner/$(id)']) {
+    const result = name(address);
+    assert.equal(result.status, 1, address);
+    assert.doesNotMatch(result.stderr, /token/, 'an address can hold a password');
+  }
+
+  const local = checkout();
+  git(local.dir, 'remote', 'set-url', 'origin', local.origin);
+  assertRefused(release(local), /origin is not a repository on github\.com/);
+  const none = checkout();
+  git(none.dir, 'remote', 'remove', 'origin');
+  assertRefused(release(none), /no remote called origin/);
 });
 
 test('a version that is not the one in firmware/app/VERSION is refused', () => {
@@ -371,23 +427,25 @@ test('those log lines are still what the firmware says', () => {
   assert.ok(source('bt_ota.c').includes('Bluetooth could not start'));
 });
 
+/** A checkout whose one commit has had this change made to it, built and pushed. */
+function amended(mutate) {
+  const state = checkout();
+  const image = readFileSync(join(state.binaries, state.name));
+  mutate(state, image);
+  git(state.dir, 'add', '.');
+  git(state.dir, 'commit', '-q', '--amend', '--no-edit');
+  git(state.dir, 'push', '-q', '-f', 'origin', 'main');
+  build(state, image);
+  return state;
+}
+
 test('the golden image never goes out, however it got there', () => {
-  const pinned = (mutate) => {
-    const state = checkout();
-    const image = readFileSync(join(state.binaries, state.name));
-    mutate(state, image);
-    git(state.dir, 'add', '.');
-    git(state.dir, 'commit', '-q', '--amend', '--no-edit');
-    git(state.dir, 'push', '-q', '-f', 'origin', 'main');
-    build(state, image);
-    return state;
-  };
-  const byFile = pinned((state, image) => writeFileSync(join(state.dir, 'firmware/golden.json'),
+  const byFile = amended((state, image) => writeFileSync(join(state.dir, 'firmware/golden.json'),
     JSON.stringify({ file_sha256: sha256(image).toString('hex'), hash_tlv: '11'.repeat(32) })));
   assertRefused(release(byFile), /this is the golden image/);
 
   // What MCUboot verifies is the same, and the file around it is not.
-  const byHash = pinned((state, image) => writeFileSync(join(state.dir, 'firmware/golden.json'),
+  const byHash = amended((state, image) => writeFileSync(join(state.dir, 'firmware/golden.json'),
     JSON.stringify({ file_sha256: '00'.repeat(32), hash_tlv: sha256(image.subarray(0, 0x200 + 600)).toString('hex') })));
   assertRefused(release(byHash), /this is the golden image/);
 
@@ -396,12 +454,60 @@ test('the golden image never goes out, however it got there', () => {
   copyFileSync(join(kept.binaries, kept.name), join(kept.binaries, 'golden/anything.bin'));
   assertRefused(release(kept), /same file as binaries\/golden\/anything\.bin/);
 
+  // The same firmware, and another file: ECDSA gives a new signature each time.
+  const resigned = checkout();
+  mkdirSync(join(resigned.binaries, 'golden'));
+  const again = makeImage();
+  assert.notDeepEqual(again, readFileSync(join(resigned.binaries, resigned.name)));
+  writeFileSync(join(resigned.binaries, 'golden/kept.bin'), again);
+  assertRefused(release(resigned), /same firmware as binaries\/golden\/kept\.bin/);
+
+  // Signed with another key, and the same firmware all the same.
+  const otherKey = checkout();
+  mkdirSync(join(otherKey.binaries, 'golden'));
+  writeFileSync(join(otherKey.binaries, 'golden/kept.bin'), makeImage({ key: OTHER_KEY }));
+  assertRefused(release(otherKey), /same firmware as binaries\/golden\/kept\.bin/);
+
+  // What else that folder holds is not an image, and another image is not this one.
+  const others = checkout();
+  mkdirSync(join(others.binaries, 'golden'));
+  writeFileSync(join(others.binaries, 'golden/mcuboot-before-golden.hex'), ':00000001FF\n');
+  writeFileSync(join(others.binaries, 'golden/empty'), '');
+  writeFileSync(join(others.binaries, 'golden/cut.bin'), makeImage().subarray(0, 40));
+  writeFileSync(join(others.binaries, 'golden/older.bin'), makeImage({ version: [1, 2, 3, 3] }));
+  const fine = release(others);
+  assert.equal(fine.status, 0, fine.stderr);
+
   const linked = checkout();
   mkdirSync(join(linked.binaries, 'golden'));
   copyFileSync(join(linked.binaries, linked.name), join(linked.binaries, `golden/${linked.name}`));
   rmSync(join(linked.binaries, linked.name));
   symlinkSync(join(linked.binaries, `golden/${linked.name}`), join(linked.binaries, linked.name));
   assertRefused(release(linked), /missing or is a link/);
+});
+
+test('a golden.json that cannot say what the golden image is stops a release and the check on one', () => {
+  const pins = { file_sha256: '00'.repeat(32), hash_tlv: '11'.repeat(32) };
+  const cases = [
+    ['broken', '{ "file_sha256": ', /golden\.json cannot be read as JSON/],
+    ['empty', '', /golden\.json cannot be read as JSON/],
+    ['no pins', '{}', /does not hold the golden image's digests/],
+    ['a pin missing', JSON.stringify({ hash_tlv: pins.hash_tlv }), /does not hold the golden image's digests/],
+    ['the other missing', JSON.stringify({ file_sha256: pins.file_sha256 }), /does not hold the golden image's digests/],
+    ['a pin empty', JSON.stringify({ ...pins, hash_tlv: '' }), /does not hold the golden image's digests/],
+    ['a pin null', JSON.stringify({ ...pins, file_sha256: null }), /does not hold the golden image's digests/],
+  ];
+  for (const [name, text, reason] of cases) {
+    const state = amended((made) => writeFileSync(join(made.dir, 'firmware/golden.json'), text));
+    const result = release(state);
+    assertRefused(result, reason);
+    assert.doesNotMatch(result.stdout, /^ok:/m, name);
+    assertFails(verify(published(state)), reason);
+  }
+
+  const missing = amended((state) => rmSync(join(state.dir, 'firmware/golden.json')));
+  assertRefused(release(missing), /golden\.json is missing/);
+  assertFails(verify(published(missing)), /golden\.json is missing/);
 });
 
 test('a tag or a release that exists already is refused', () => {
@@ -470,6 +576,14 @@ test('what github-release.sh publishes passes the check on the release, and that
   assert.match(result.stdout, /SHA256SUMS is right/);
   assert.match(result.stdout, /signature verifies/);
   assert.deepEqual(result.calls, []);
+});
+
+test('the check says that only latest.json names the commit, and does not claim to know', () => {
+  const result = verify(published());
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /latest\.json names commit [0-9a-f]{40}/);
+  assert.match(result.stdout, /Only latest\.json says that/);
+  assert.doesNotMatch(result.stdout, /this is firmware/i);
 });
 
 test('the check fails when SHA256SUMS is wrong, in the image, in latest.json or in itself', () => {
@@ -541,6 +655,49 @@ test('the check fails when the release holds more or less than it should', () =>
   assertFails(result, /should hold exactly/);
   assert.doesNotMatch(result.stderr, /^::add-mask::/m);
   assert.doesNotMatch(result.stderr, /::add-mask::x/);
+  // The runner reads the older form anywhere in a line.
+  rmSync(join(named.folder, '::add-mask::x'));
+  writeFileSync(join(named.folder, '##[warning]x'), '');
+  const older = verify(named);
+  assertFails(older, /should hold exactly/);
+  assert.doesNotMatch(older.stderr, /##\[/);
+});
+
+test('what a release\'s latest.json holds never reaches the log as a workflow command', () => {
+  const commands = ['::warning title=forged::pass', '::stop-commands::x', '##[warning]forged'];
+  const rewrite = (release_, text) => {
+    writeFileSync(join(release_.folder, 'latest.json'), text);
+    writeFileSync(join(release_.folder, 'SHA256SUMS'), release_.sums());
+  };
+  const assertNoCommands = (result) => {
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /^\s*::(?!error title=Release check failed::)/m);
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /##\[/);
+  };
+  for (const command of commands) {
+    // Node quotes the line that it could not parse, if it is allowed to.
+    const broken = published();
+    rewrite(broken, `{\n${command}\n}\n`);
+    const unreadable = verify(broken);
+    assertFails(unreadable, /latest\.json cannot be read as JSON/);
+    assertNoCommands(unreadable);
+    assert.doesNotMatch(unreadable.stderr, /forged|stop-commands/);
+
+    for (const field of ['version', 'file', 'commit']) {
+      const held = published();
+      const latest = JSON.parse(readFileSync(join(held.folder, 'latest.json')));
+      rewrite(held, JSON.stringify({ ...latest, [field]: `\n${command}` }));
+      const result = verify(held);
+      assert.equal(result.status, 1, field);
+      assertNoCommands(result);
+    }
+
+    const settings = published();
+    const latest = JSON.parse(readFileSync(join(settings.folder, 'latest.json')));
+    rewrite(settings, JSON.stringify({ ...latest, command_line: [`\n${command}`] }));
+    const result = verify(settings);
+    assertFails(result, /settings from the command line/);
+    assertNoCommands(result);
+  }
 });
 
 test('the check fails on a test image and on the golden image, as the script does', () => {
@@ -555,6 +712,15 @@ test('the check fails on a test image and on the golden image, as the script doe
   const image = readFileSync(join(golden.binaries, golden.name));
   writeFileSync(join(golden.dir, 'firmware/golden.json'), JSON.stringify({ file_sha256: sha256(image).toString('hex'), hash_tlv: '11'.repeat(32) }));
   assertFails(verify(published(golden)), /this is the golden image/);
+});
+
+test('a command_line that is not a list is refused, even when it reads like an empty one', () => {
+  for (const command_line of ['[]', '', null, {}, 0, false]) {
+    const state = checkout();
+    build(state, readFileSync(join(state.binaries, state.name)), { command_line });
+    assertRefused(release(state), /command_line is not a list/);
+    assertFails(verify(published(state)), /command_line is not a list/);
+  }
 });
 
 test('a tag that is not a version never gets further than that', () => {
@@ -636,6 +802,26 @@ test('the scan finds a wifi_secrets.h anywhere in the tree, and leaves alone wha
   assert.match(result.stderr, /firmware\/app\/src\/wifi_secrets\.h/);
 });
 
+test('the scan finds a wifi_secrets.h whatever the rest of its name looks like, and whatever its case', () => {
+  for (const path of ['firmwäre/wifi_secrets.h', 'a "quoted" folder/wifi_secrets.h', 'tab\there/wifi_secrets.h', 'WIFI_SECRETS.H', 'deep/Wifi_Secrets.h']) {
+    const state = checkout();
+    mkdirSync(dirname(join(state.dir, path)), { recursive: true });
+    writeFileSync(join(state.dir, path), '#define WIFI_PSK "x"\n');
+    git(state.dir, 'add', path);
+    const result = scan(state);
+    assert.equal(result.status, 1, path);
+    assert.match(result.stderr, /wifi_secrets\.h/i, path);
+  }
+  const state = checkout();
+  for (const path of ['not_wifi_secrets.h', 'wifi_secrets.h.example', 'wifi_secrets.h/other']) {
+    mkdirSync(dirname(join(state.dir, path)), { recursive: true });
+    writeFileSync(join(state.dir, path), 'x\n');
+    git(state.dir, 'add', path);
+  }
+  const result = scan(state);
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('the scan passes on this repository as it is', () => {
   const result = spawnSync('bash', [join(REPO, 'scripts/scan-tracked-files.sh')], { encoding: 'utf8', env: environment() });
   assert.equal(result.status, 0, result.stderr);
@@ -701,6 +887,41 @@ test('a cached project off its manifest revision fails, or with a change in it, 
   const unfetched = workspace();
   git(unfetched.zephyr, 'branch', '-q', '-D', 'manifest-rev');
   assert.match(unfetched.check().stderr, /zephyr has no manifest-rev/);
+});
+
+test('a change hidden from git status by the cached index fails, in nrf or in a project', () => {
+  for (const flag of ['--skip-worktree', '--assume-unchanged']) {
+    const inProject = workspace();
+    git(inProject.zephyr, 'update-index', flag, 'file');
+    writeFileSync(join(inProject.zephyr, 'file'), 'changed\n');
+    const result = inProject.check();
+    assert.equal(result.status, 1, flag);
+    assert.match(result.stderr, /zephyr has files that git was told not to look at/);
+
+    const inNrf = workspace();
+    git(inNrf.nrf, 'update-index', flag, 'file');
+    writeFileSync(join(inNrf.nrf, 'file'), 'changed\n');
+    assert.match(inNrf.check().stderr, /nrf has files that git was told not to look at/);
+  }
+});
+
+test('the check runs no program from the configuration in the cache', () => {
+  const { zephyr, nrf, check } = workspace();
+  const marker = join(dirname(zephyr), 'it-ran');
+  const program = join(dirname(zephyr), 'program');
+  writeFileSync(program, `#!/usr/bin/env bash\ntouch '${marker}'\n`);
+  chmodSync(program, 0o755);
+  const hooks = join(dirname(zephyr), 'hooks');
+  mkdirSync(hooks);
+  writeFileSync(join(hooks, 'post-index-change'), `#!/usr/bin/env bash\ntouch '${marker}'\n`);
+  chmodSync(join(hooks, 'post-index-change'), 0o755);
+  for (const dir of [nrf, zephyr]) {
+    git(dir, 'config', 'core.fsmonitor', program);
+    git(dir, 'config', 'core.hooksPath', hooks);
+  }
+  const result = check();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(marker), false, 'core.fsmonitor or a hook ran');
 });
 
 // The workflow. These are the decisions in docs/ci.md, held to as text: this file takes no YAML library.

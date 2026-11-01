@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
 # Fail if a tracked file holds a private key, or if a wifi_secrets.h is tracked. The repository is
-# public, and a commit that has been pushed cannot be taken back. Run by the workflow on every push:
+# public, and a commit that has been pushed cannot be taken back. Run by the workflow on each push to
+# main and feature/**, and on each pull request:
 #
 #   scripts/scan-tracked-files.sh
 #
 # .gitignore is the first guard, and this one catches what got past it with git add -f or under
-# another name. It looks at the files of the commit that is checked out, not at older commits. It
+# another name. It looks at the files of the commit that is checked out, not at older commits, so a key
+# removed before the tip passes, and a push to any other branch starts no run: see docs/ci.md. It
 # prints file names only, because the logs of a public repository are public too.
 
 set -euo pipefail
@@ -34,7 +36,9 @@ if [ -n "$keys" ]; then
   status=1
 fi
 
-wifi=$(git ls-files | grep -E '(^|/)wifi_secrets\.h$' || true)
+# -z: otherwise git quotes an unusual name, and the closing quote would hide it from the $ below.
+names=$(git ls-files -z | tr '\0' '\n')
+wifi=$(grep -i -E '(^|/)wifi_secrets\.h$' <<< "$names" || true)
 if [ -n "$wifi" ]; then
   printf 'error: a file with Wi-Fi credentials is tracked:\n%s\n' "$wifi" >&2
   status=1

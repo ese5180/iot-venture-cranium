@@ -8,8 +8,11 @@
 # Fails unless the folder holds the signed image, latest.json and SHA256SUMS and nothing else,
 # SHA256SUMS is right, the signature verifies against firmware/keys/fw_signing_pub.pem with the
 # console's own check, and the version in the image's header, latest.json and firmware/app/VERSION
-# is the one in the tag. It also repeats what scripts/github-release.sh looks for: an image of another
-# commit, a test image, a Bluetooth image, the golden image.
+# is the one in the tag. It also repeats what scripts/github-release.sh looks for: a latest.json that
+# names another commit, a test image, a Bluetooth image, the golden image.
+#
+# An image carries no commit, and latest.json is not signed. So this shows what latest.json says about
+# the commit and the settings, and it cannot show that they are true.
 #
 # It only reads. On a failure it writes a GitHub Actions error annotation as well.
 
@@ -18,11 +21,13 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 die() {
-  # The file names of a release can reach a message, so nothing in it may read as a workflow command.
+  # The file names of a release and what its latest.json says can reach a message, so nothing in it may
+  # read as a workflow command, in either of the two forms the runner reads.
   # To stderr: a check can run in a command substitution, and the runner reads both streams.
   local message
   message=$(printf '%s ' "$@" | tr '\r\n' '  ')
   message=${message//::/: :}
+  message=${message//\#\#\[/# #[}
   printf 'error: %s\n' "$message" >&2
   printf '::error title=Release check failed::%s\n' "$message" >&2
   exit 1
@@ -68,7 +73,8 @@ main() {
   check_is_a_release_build "$image" "$latest"
   check_latest "$latest" "$image" "$full" "$head"
   check_is_not_golden "$image" "$(text_field "$info" imageHash)"
-  echo "ok: this is firmware $full of commit $head, and a release build"
+  echo "ok: this is not the golden image, and latest.json names commit $head and no settings from the command line"
+  echo "Only latest.json says that about the commit and the settings. It is not signed, and the image carries no commit."
 }
 
 main "$@"

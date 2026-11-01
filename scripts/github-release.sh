@@ -12,7 +12,8 @@
 # in firmware/app/VERSION and in the image's header, the signature verifies against
 # firmware/keys/fw_signing_pub.pem with the console's own check, and binaries/latest.json names this
 # commit. It refuses a test image, a Bluetooth image, the golden image, and a version that already has
-# a tag or a release. It uploads the signed image, latest.json and SHA256SUMS, and nothing else.
+# a tag or a release. It uploads the signed image, latest.json and SHA256SUMS, and nothing else. All of
+# that happens on origin's repository on GitHub, whatever gh would have chosen by itself.
 #
 # It needs git, node and a signed-in gh. GitHub Actions then checks what was published: see docs/ci.md.
 
@@ -41,10 +42,15 @@ git_here() {
   git --no-optional-locks -C "$REPO_DIR" "$@"
 }
 
+# git status says nothing about a file marked --skip-worktree or --assume-unchanged, so those are
+# asked about as well: ls-files -v shows them as S and in lower case.
 check_tree_is_clean() {
-  local changed
+  local changed listing flagged
   changed=$(git_here status --porcelain --untracked-files=no)
   [ -z "$changed" ] || die "tracked files have changed, so the commit says nothing about this image:" "$changed"
+  listing=$(git_here ls-files -v)
+  flagged=$(grep '^[a-zS]' <<< "$listing" || true)
+  [ -z "$flagged" ] || die "git was told not to look at these tracked files, so the commit says nothing about this image:" "$flagged"
 }
 
 # Against what origin holds now. The branches this checkout remembers can be out of date.
@@ -61,11 +67,11 @@ check_head_is_pushed() {
 }
 
 check_tag_is_free() {
-  local tag=$1 head=$2 local_tag
+  local tag=$1 head=$2 repository=$3 local_tag
   [ -z "$(git_here ls-remote --tags origin "refs/tags/$tag")" ] || die "origin already has the tag $tag"
   local_tag=$(git_here rev-parse -q --verify "refs/tags/$tag^{commit}" || true)
   [ -z "$local_tag" ] || [ "$local_tag" = "$head" ] || die "this checkout has a tag $tag on another commit, $local_tag"
-  if (cd "$REPO_DIR" && gh release view "$tag" > /dev/null 2>&1); then
+  if (cd "$REPO_DIR" && gh release view "$tag" --repo "$repository" > /dev/null 2>&1); then
     die "GitHub already has a release for $tag"
   fi
 }
@@ -85,22 +91,27 @@ main() {
   done
   if [ -z "$version" ]; then usage >&2; exit 2; fi
 
+  # The checks below are against origin, so gh must not go by anything but origin either.
+  unset GH_REPO GH_HOST
+
   local tool
   for tool in git node gh; do
     command -v "$tool" > /dev/null || die "$tool is not installed"
   done
   (cd "$REPO_DIR" && gh auth status > /dev/null 2>&1) || die "gh is not signed in: run gh auth login"
 
-  local full tag head in_repo
+  local full tag head in_repo address repository
   full=$(full_version "$version") || exit 1
   tag=v$version
   head=$(git_here rev-parse HEAD)
+  address=$(git_here remote get-url origin) || die "this checkout has no remote called origin"
+  repository=$(github_repository_of "$address") || exit 1
 
   in_repo=$(version_in_repo) || exit 1
   [ "$in_repo" = "$full" ] || die "firmware/app/VERSION says $in_repo, and this release is $full"
   check_tree_is_clean
   check_head_is_pushed "$head"
-  check_tag_is_free "$tag" "$head"
+  check_tag_is_free "$tag" "$head" "$repository"
 
   local binaries=$REPO_DIR/binaries file image latest
   latest=$binaries/latest.json
@@ -120,7 +131,7 @@ main() {
   info=$(check_image "$image" "$full") || exit 1
   check_is_not_golden "$image" "$(text_field "$info" imageHash)"
 
-  echo "ok: $file is firmware $full, of commit $head, signed with the project's key"
+  echo "ok: $file is firmware $full, signed with the project's key, and latest.json says it is of commit $head"
   if [ "$dry_run" = 1 ]; then
     echo "dry run: nothing was written. Without --dry-run this makes the tag $tag and uploads:"
     sums_of "$binaries" "$file" latest.json
@@ -136,7 +147,7 @@ main() {
 
   # gh makes the tag on this commit when it publishes, and it publishes after the last upload, so
   # the check on GitHub Actions finds every file and a failed upload leaves no tag behind.
-  url=$(cd "$REPO_DIR" && gh release create "$tag" --target "$head" --title "Firmware $full" \
+  url=$(cd "$REPO_DIR" && gh release create "$tag" --repo "$repository" --target "$head" --title "Firmware $full" \
     --notes "Firmware $full, built from commit $head and signed with the project's key. To install it, see binaries/README.md." \
     "$stage/$file" "$stage/latest.json" "$stage/SHA256SUMS")
   echo "$url"

@@ -96,7 +96,8 @@ provisioning feature: a release build turns it off with `-Dapp_CONFIG_APP_CONSOL
 then no serial command exists at all, `BUTTON` included. Log messages then go nowhere. Such
 an image keeps a log backend that throws them away (`src/log_discard.c`), because Zephyr's log
 thread halts the board if there is none, with no output and before the watchdog is armed. The
-link fails if an image ever has none.
+link fails if an image ever has none. A GitHub Release is not such a build yet: it has the console
+in it, as [`docs/ci.md`](../docs/ci.md#how-a-real-release-is-made) says.
 
 Commands look like `COMMAND|arg1|arg2`. Command names can be in any case, and arguments
 keep theirs. CR, LF and CRLF each end a line. Blank lines and leading whitespace are

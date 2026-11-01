@@ -26,6 +26,8 @@ from pathlib import Path
 
 MCUBOOT_MAGIC = 0x96f3b83d
 KEEP = 10
+# What CMake writes above a cache entry that came from -D.
+FROM_THE_COMMAND_LINE = "//No help, variable specified on the command line."
 
 
 def image_version(data: bytes) -> tuple[str, str]:
@@ -51,10 +53,21 @@ def has_bluetooth_update(config: Path) -> bool:
 def command_line_settings(build: Path) -> list[str]:
     """What -D gave this build. CMake keeps it in the build directory's cache, so it goes on
     changing images after the command that set it is forgotten, on a tree that git calls clean.
-    An entry of the form -DNAME:TYPE=value is not seen: this is a record, not a lock."""
+
+    A type or a name cannot tell these from the build's own entries: every sysbuild has
+    SB_CONF_FILE:STRING and mcuboot_EXTRA_CONF_FILE:STRING. CMake marks them instead: an entry of
+    -DNAME=value has the type UNINITIALIZED, and an entry of -DNAME:TYPE=value has the comment
+    above. This is a record, not a lock: a setting that reached the build in any other way, or
+    that the build's own CMake code then sets again, is not in it."""
     cache = build / "CMakeCache.txt"
     text = cache.read_text() if cache.exists() else ""
-    found = re.findall(r"^(\w+):UNINITIALIZED=(.*)$", text, re.MULTILINE)
+    found = []
+    comment = ""
+    for line in text.splitlines():
+        entry = re.fullmatch(r"([^/#:][^:]*):(\w+)=(.*)", line)
+        if entry and (entry[2] == "UNINITIALIZED" or comment == FROM_THE_COMMAND_LINE):
+            found.append((entry[1], entry[3]))
+        comment = line
     # West's own, which every build has.
     return [f"{name}={value}" for name, value in found if name != "WEST_PYTHON"]
 
@@ -65,9 +78,14 @@ def git_commit(repo: Path) -> str:
                                 capture_output=True, text=True, check=True).stdout.strip()
         dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "firmware"],
                                capture_output=True, text=True, check=True).stdout.strip()
+        listing = subprocess.run(["git", "-C", str(repo), "ls-files", "-v", "firmware"],
+                                 capture_output=True, text=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
-    return f"{commit}+uncommitted" if dirty else commit
+    # status says nothing about a file marked --skip-worktree or --assume-unchanged.
+    # ls-files -v shows those as S and in lower case.
+    hidden = re.search(r"^[a-zS] ", listing, re.MULTILINE)
+    return f"{commit}+uncommitted" if dirty or hidden else commit
 
 
 def prune(folder: Path) -> None:

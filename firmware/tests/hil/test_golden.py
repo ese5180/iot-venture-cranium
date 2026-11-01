@@ -654,6 +654,22 @@ class StoreBinaryTest(unittest.TestCase):
         self.assertEqual(store_binary.command_line_settings(self.folder),
                          ["app_CONFIG_APP_WATCHDOG_TIMEOUT_SECONDS=30", "EXTRA_CONF_FILE=more.conf"])
 
+    def test_a_setting_with_a_type_is_found_by_the_comment_cmake_writes_above_it(self):
+        # As CMake writes them: an entry from -D has this comment, and the build's own have theirs.
+        (self.folder / "CMakeCache.txt").write_text(
+            "//No help, variable specified on the command line.\nWEST_PYTHON:UNINITIALIZED=/some/python\n\n"
+            "//No help, variable specified on the command line.\napp_CONFIG_APP_CONSOLE:BOOL=n\n\n"
+            "//No help, variable specified on the command line.\napp_EXTRA_CONF_FILE:FILEPATH=/tmp/any.conf\n\n"
+            "//No help, variable specified on the command line.\napp_CONFIG_X:UNINITIALIZED=1\n\n"
+            "//No help, variable specified on the command line.\nmy-image_CONFIG_Y:STRING=2\n\n"
+            "//If desired, you can build the application with SYSbuild configuration\nSB_CONF_FILE:STRING=/a/sysbuild.conf\n\n"
+            "//No help, variable specified on the command line.\n\n"
+            "//Sysbuild's own.\nmcuboot_EXTRA_CONF_FILE:STRING=;/a/tfm.conf\n\n"
+            "########################\n# INTERNAL cache entries\n########################\n\n"
+            "//Sysbuild's own.\nhci_ipc_EXTRA_CONF_FILE:INTERNAL=/a/b.conf\n")
+        self.assertEqual(store_binary.command_line_settings(self.folder),
+                         ["app_CONFIG_APP_CONSOLE=n", "app_EXTRA_CONF_FILE=/tmp/any.conf", "app_CONFIG_X=1", "my-image_CONFIG_Y=2"])
+
     def test_a_build_with_none_has_an_empty_list(self):
         (self.folder / "CMakeCache.txt").write_text("WEST_PYTHON:UNINITIALIZED=/some/python\n")
         self.assertEqual(store_binary.command_line_settings(self.folder), [])
@@ -682,6 +698,30 @@ class StoreBinaryTest(unittest.TestCase):
         # Only firmware/ goes into an image. freeze looks at the whole tree for itself.
         (self.folder / "notes.txt").write_text("notes\n")
         self.assertEqual(store_binary.git_commit(self.folder), commit)
+
+    def test_a_file_that_git_was_told_not_to_look_at_counts_as_a_change(self):
+        (self.folder / "firmware").mkdir()
+        tracked = self.folder / "firmware" / "a.c"
+        tracked.write_text("int a;\n")
+        (self.folder / "notes.txt").write_text("notes\n")
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "first")
+        commit = store_binary.git_commit(self.folder)
+
+        for flag in ("skip-worktree", "assume-unchanged"):
+            with self.subTest(flag):
+                self.git("update-index", f"--{flag}", "firmware/a.c")
+                tracked.write_text("int b;\n")
+                self.assertEqual(store_binary.git_commit(self.folder), f"{commit}+uncommitted")
+                self.git("update-index", f"--no-{flag}", "firmware/a.c")
+                tracked.write_text("int a;\n")
+                self.assertEqual(store_binary.git_commit(self.folder), commit)
+
+                # Only firmware/ goes into an image, as in the test above.
+                self.git("update-index", f"--{flag}", "notes.txt")
+                self.assertEqual(store_binary.git_commit(self.folder), commit)
+                self.git("update-index", f"--no-{flag}", "notes.txt")
 
     def test_a_folder_that_is_not_a_repository_says_unknown(self):
         self.assertEqual(store_binary.git_commit(self.folder), "unknown")

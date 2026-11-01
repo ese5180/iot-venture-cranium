@@ -8,9 +8,10 @@
 # `west update` puts every project on the revision the manifest names, but it does not touch the
 # manifest repository, and it leaves changes to a project's files in place. So a cached workspace
 # could build something other than the SDK and still pass. This fails if sdk-nrf is on another commit,
-# if a project is not on what `west update` just fetched for it, or if a tracked file has changed.
+# if a project is not on what `west update` just fetched for it, if a tracked file has changed, or if
+# git has been told not to look at one.
 #
-# It only reads.
+# It only reads. This is for a stale or damaged cache: docs/ci.md says why it cannot stop a hostile one.
 
 set -euo pipefail
 
@@ -26,18 +27,36 @@ fail() {
   exit 1
 }
 
+# The configuration of these repositories comes from the cache, and these two settings of it would run
+# a program during the check.
+git_read() {
+  git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"
+}
+
+# status says nothing about a file marked --skip-worktree or --assume-unchanged, and that mark is in
+# the cached index. ls-files -v shows those as S and in lower case.
+check_files_of() {
+  local name=$1 path=$2 changed listing
+  changed=$(git_read -C "$path" status --porcelain --untracked-files=no) || fail "git cannot read $name"
+  [ -z "$changed" ] || fail "$name has changed files"
+  listing=$(git_read -C "$path" ls-files -v) || fail "git cannot read $name"
+  if grep -q '^[a-zS]' <<< "$listing"; then
+    fail "$name has files that git was told not to look at"
+  fi
+}
+
 cd "$workspace"
-have=$(git --no-optional-locks -C nrf rev-parse HEAD)
+have=$(git_read -C nrf rev-parse HEAD)
 [ "$have" = "$want" ] || fail "nrf is on $have and should be on $want. If the SDK moved on purpose, change NCS_COMMIT in the workflow"
-[ -z "$(git --no-optional-locks -C nrf status --porcelain --untracked-files=no)" ] || fail "nrf has changed files"
+check_files_of nrf nrf
 
 checked=0
 while IFS='|' read -r name path; do
   [ "$name" = manifest ] && continue # The manifest repository: nrf, checked above.
-  head=$(git --no-optional-locks -C "$path" rev-parse HEAD) || fail "$name is not a git repository"
-  fetched=$(git --no-optional-locks -C "$path" rev-parse --verify refs/heads/manifest-rev) || fail "$name has no manifest-rev"
+  head=$(git_read -C "$path" rev-parse HEAD) || fail "$name is not a git repository"
+  fetched=$(git_read -C "$path" rev-parse --verify refs/heads/manifest-rev) || fail "$name has no manifest-rev"
   [ "$head" = "$fetched" ] || fail "$name is on $head and the manifest says $fetched"
-  [ -z "$(git --no-optional-locks -C "$path" status --porcelain --untracked-files=no)" ] || fail "$name has changed files"
+  check_files_of "$name" "$path"
   checked=$((checked + 1))
 done < <(west list --format '{name}|{abspath}')
 [ "$checked" -gt 0 ] || fail "west lists no projects"
