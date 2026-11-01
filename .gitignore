@@ -50,3 +50,6 @@ wifi_secrets.h
 
 # Written at deployment by cloud/web/build-history.mjs
 cloud/web/src/site/assets/history.json
+
+# The course manual
+/IoT Venture Manual*.pdf
