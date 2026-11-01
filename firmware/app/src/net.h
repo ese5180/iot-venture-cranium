@@ -54,6 +54,17 @@ void net_report_join_failed(int reason);
 bool net_is_up(void);
 bool net_has_credentials(void);
 
+#if defined(CONFIG_APP_BT_OTA)
+/* The Wi-Fi stack has reported the result of a join attempt, good or bad, since this image started. */
+bool net_wifi_answered(void);
+
+/*
+ * The station is associated with an access point, whether or not it has an address yet, as the
+ * Wi-Fi stack says now. Also true if it cannot say.
+ */
+bool net_wifi_associated(void);
+#endif
+
 /* Store the single network this device uses, replacing any other. */
 int net_credentials_set(const char *ssid, size_t ssid_len, enum net_security security,
 			const char *passphrase, size_t passphrase_len);

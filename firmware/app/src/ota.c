@@ -13,6 +13,9 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/reboot.h>
 
+#if defined(CONFIG_APP_BT_OTA)
+#include "bt_ota.h"
+#endif
 #include "identity.h"
 #include "health.h"
 #include "ota_job.h"
@@ -118,6 +121,9 @@ static const char *const state_names[] = {
 	[OTA_COMMITTING] = "verifying",
 	[OTA_REBOOTING] = "rebooting",
 	[OTA_TESTING] = "testing",
+#if defined(CONFIG_APP_BT_OTA)
+	[OTA_BLUETOOTH] = "bluetooth",
+#endif
 };
 
 static void enter(enum ota_state state)
@@ -799,6 +805,10 @@ int ota_init(void)
 		(void)boot_write_img_confirmed();
 	}
 
+#if defined(CONFIG_APP_BT_OTA)
+	bt_ota_on_boot(on_trial, primary_has_trailer(), ota.have_record);
+#endif
+
 	return 0;
 }
 
@@ -825,9 +835,15 @@ void ota_on_cloud_up(void)
 		if (ota.have_record) {
 			ota.report = REPORT_SUCCEEDED;
 		}
+#if defined(CONFIG_APP_BT_OTA)
+		bt_ota_on_cloud_proof();
+#endif
 	}
 
 	send_final_report();
+#if defined(CONFIG_APP_BT_OTA)
+	bt_ota_on_cloud_up();
+#endif
 
 	/* After a reconnect the cloud's list is the truth again: an answer that was lost
 	 * with the old connection gets given once more.
@@ -1054,6 +1070,13 @@ const char *ota_state_name(void)
 
 const char *ota_job_id(void)
 {
+#if defined(CONFIG_APP_BT_OTA)
+	/* What is left in ota.job is an older update's. */
+	if (ota.state == OTA_BLUETOOTH) {
+		return NULL;
+	}
+#endif
+
 	if (ota.state == OTA_TESTING && ota.have_record) {
 		return ota.record.job_id;
 	}
@@ -1084,3 +1107,46 @@ bool ota_take_changed(void)
 	ota.changed = false;
 	return changed;
 }
+
+#if defined(CONFIG_APP_BT_OTA)
+bool ota_bt_has_job(void)
+{
+	return ota.have_record;
+}
+
+void ota_bt_enter(void)
+{
+	enter(OTA_BLUETOOTH);
+}
+
+void ota_bt_leave(void)
+{
+	if (ota.state == OTA_BLUETOOTH) {
+		go_idle();
+		/* A job that came up meanwhile was left where it was: see on_job(). */
+		(void)cloud_jobs_request_next();
+	}
+}
+
+int ota_bt_confirm(void)
+{
+	int err;
+
+	if (ota.state != OTA_TESTING || ota.have_record ||
+	    IS_ENABLED(CONFIG_APP_TEST_FAULT_NO_CONFIRM)) {
+		return -EPERM;
+	}
+
+	err = boot_write_img_confirmed();
+	if (err) {
+		LOG_ERR("Image could not be confirmed: %d", err);
+		return err;
+	}
+
+	health_trial_passed();
+	LOG_INF("Firmware %s confirmed", fw_version_running_string());
+	set_last("succeeded", "");
+	go_idle();
+	return 0;
+}
+#endif /* CONFIG_APP_BT_OTA */

@@ -3,6 +3,7 @@
 #define HOST_STUB_UTIL_H_
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#define BIT(n) (1UL << (n))
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 /* True if the macro is defined as 1, as Kconfig does. */

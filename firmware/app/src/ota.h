@@ -47,6 +47,13 @@ enum ota_state {
 	OTA_REBOOTING,
 	/* A new image is running and has not been confirmed yet. */
 	OTA_TESTING,
+#if defined(CONFIG_APP_BT_OTA)
+	/*
+	 * A person opened Bluetooth for an update. The secondary slot is taken, so no cloud
+	 * update starts, and everything that an update refuses is refused. See bt_ota.h.
+	 */
+	OTA_BLUETOOTH,
+#endif
 };
 
 /* Work out, right after boot, what happened to an update that was in flight. */
@@ -70,5 +77,14 @@ const char *ota_last_error(void);
 
 /* True once after something the shadow reports has changed. */
 bool ota_take_changed(void);
+
+#if defined(CONFIG_APP_BT_OTA)
+/* For bt_ota.c. A record of a cloud job exists: it is on trial, or its report is waiting. */
+bool ota_bt_has_job(void);
+void ota_bt_enter(void);
+void ota_bt_leave(void);
+/* A person has proved the image on trial. Returns 0 if it has been confirmed. */
+int ota_bt_confirm(void);
+#endif
 
 #endif /* OTA_H_ */

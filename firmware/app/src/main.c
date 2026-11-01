@@ -15,6 +15,9 @@
 #include <zephyr/sys/reboot.h>
 
 #include "app_events.h"
+#if defined(CONFIG_APP_BT_OTA)
+#include "bt_ota.h"
+#endif
 #include "cloud.h"
 #include "console.h"
 #include "device.h"
@@ -76,6 +79,13 @@ static bool provisioned(void)
 
 static void update_ui(void)
 {
+#if defined(CONFIG_APP_BT_OTA)
+	if (bt_ota_is_open()) {
+		ui_set_state(bt_ota_ui_state());
+		return;
+	}
+#endif
+
 	switch (ota_state()) {
 	case OTA_AWAITING_USER:
 		ui_set_state(UI_UPDATE_OFFERED);
@@ -158,6 +168,11 @@ static void on_tick(void)
 
 	ota_on_tick();
 
+#if defined(CONFIG_APP_BT_OTA)
+	bt_ota_on_tick();
+	update_ui();
+#endif
+
 	if (ota_take_changed()) {
 		publish_report();
 		update_ui();
@@ -168,6 +183,12 @@ static void on_tick(void)
 
 static void on_button(const struct app_event *event)
 {
+#if defined(CONFIG_APP_BT_OTA)
+	if (bt_ota_on_button(event->button.id, event->button.long_press, event->button.physical)) {
+		return;
+	}
+#endif
+
 	/* Holding Button 2 erases everything that was provisioned onto the device. */
 	if (event->button.id == APP_BUTTON_2 && event->button.long_press) {
 		if (ota_state() != OTA_IDLE) {

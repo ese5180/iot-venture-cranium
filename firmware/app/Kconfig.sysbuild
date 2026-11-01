@@ -37,4 +37,12 @@ config NETCORE_IMAGE_NAME
 config NETCORE_IMAGE_PATH
 	default "$(APP_DIR)/../netcore" if NETCORE_BLINKY
 
+# Firmware update over Bluetooth LE. Off unless bt_ota_sysbuild.conf is given: see there.
+config APP_BT_OTA
+	bool "Firmware update over Bluetooth LE"
+	help
+	  Adds src/bt_ota.c and the Bluetooth host to the application, through bt_ota.conf. The
+	  network core has to run the Bluetooth controller, so bt_ota_sysbuild.conf selects that
+	  too, and it has to be flashed over the debug port.
+
 source "share/sysbuild/Kconfig"

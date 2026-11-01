@@ -6,8 +6,10 @@
     binaries/latest.json                   its version, size, digest, git commit and -D settings
 
 Only a build of the checkout itself is kept: the test bench builds from scratch copies,
-which have no .git, and an image built with a test fault is refused. A signed image is not
-a secret, but it is large and can be rebuilt, so git ignores these files.
+which have no .git, and an image built with a test fault is refused. So is one built for
+firmware update over Bluetooth, which needs a network core that a board only gets over the
+debug port, and which scripts/ota.sh should not find by accident. A signed image is not a
+secret, but it is large and can be rebuilt, so git ignores these files.
 
 Install what is stored here with scripts/ota.sh, or upload it on the console's Firmware page.
 """
@@ -39,6 +41,11 @@ def image_version(data: bytes) -> tuple[str, str]:
 def has_test_fault(config: Path) -> bool:
     text = config.read_text() if config.exists() else ""
     return re.search(r"^CONFIG_APP_TEST_FAULT_(?!NONE)\w+=y$", text, re.MULTILINE) is not None
+
+
+def has_bluetooth_update(config: Path) -> bool:
+    text = config.read_text() if config.exists() else ""
+    return re.search(r"^CONFIG_APP_BT_OTA=y$", text, re.MULTILINE) is not None
 
 
 def command_line_settings(build: Path) -> list[str]:
@@ -81,6 +88,10 @@ def main() -> None:
         return
     if has_test_fault(args.build / "app" / "zephyr" / ".config"):
         print("store_binary: this image has a test fault built in, so it is not kept")
+        return
+    if has_bluetooth_update(args.build / "app" / "zephyr" / ".config"):
+        print("store_binary: this image has Bluetooth updates built in, so it is not kept: "
+              "take it from the build directory")
         return
 
     image = args.build / "app" / "zephyr" / "zephyr.signed.bin"

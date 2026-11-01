@@ -53,6 +53,10 @@ struct app_event {
 		struct {
 			uint8_t id;
 			bool long_press;
+#if defined(CONFIG_APP_BT_OTA)
+			/* A real press of a real button, not a command on the console. */
+			bool physical;
+#endif
 		} button;
 		struct {
 			uint8_t what;

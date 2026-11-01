@@ -701,6 +701,39 @@ class StoreBinaryTest(unittest.TestCase):
         latest = json.loads((repo / "binaries" / "latest.json").read_text())
         self.assertEqual(latest["command_line"], ["app_CONFIG_X=1"])
 
+    def store(self, config: str) -> Path:
+        """A build of the checkout with this application .config, through the tool's main()."""
+        build = self.folder / "build"
+        image = build / "app" / "zephyr" / "zephyr.signed.bin"
+        image.parent.mkdir(parents=True)
+        image.write_bytes(make_image())
+        (image.parent / ".config").write_text(config)
+        repo = self.folder / "repo"
+        (repo / ".git").mkdir(parents=True)
+        with mock.patch.object(sys, "argv", ["store_binary", "--build", str(build), "--repo", str(repo)]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            store_binary.main()
+        return repo / "binaries"
+
+    def test_a_bluetooth_build_does_not_become_latest_or_a_release_name(self):
+        binaries = self.store("CONFIG_LOG=y\nCONFIG_APP_BT_OTA=y\nCONFIG_APP_BT_OTA_WINDOW_SECONDS=120\n")
+        self.assertFalse((binaries / "latest.signed.bin").exists())
+        self.assertFalse((binaries / "latest.json").exists())
+        self.assertEqual(list(binaries.glob("cranium-*")) if binaries.exists() else [], [])
+
+    def test_a_bluetooth_build_leaves_what_is_there_alone(self):
+        binaries = self.folder / "repo" / "binaries"
+        binaries.mkdir(parents=True)
+        (binaries / "latest.signed.bin").write_bytes(b"the last normal build")
+        self.store("CONFIG_APP_BT_OTA=y\n")
+        self.assertEqual((binaries / "latest.signed.bin").read_bytes(), b"the last normal build")
+
+    def test_every_other_build_is_kept_as_before(self):
+        binaries = self.store("# CONFIG_APP_BT_OTA is not set\nCONFIG_LOG=y\n")
+        self.assertEqual((binaries / "latest.signed.bin").read_bytes(), make_image())
+        self.assertTrue((binaries / "latest.json").exists())
+        self.assertEqual(len(list(binaries.glob("cranium-*.signed.bin"))), 1)
+
 
 class SettingsTest(unittest.TestCase):
     """What is committed, as it is now."""

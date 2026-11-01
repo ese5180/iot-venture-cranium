@@ -153,6 +153,27 @@ static void test_the_buttons_do_not_share_a_press(void)
 	CHECK(posted[0].button.long_press);
 }
 
+#if defined(CONFIG_APP_BT_OTA)
+static void test_a_real_press_says_it_is_one(void)
+{
+	fresh_boot();
+	uptime_ms = 10000;
+	key(INPUT_KEY_0, true);
+	uptime_ms = 15000;
+	key(INPUT_KEY_0, false);
+	CHECK(posted_count == 1);
+	CHECK(posted[0].button.physical);
+	CHECK(posted[0].button.long_press);
+}
+
+static void test_the_window_has_a_pattern_of_its_own(void)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(patterns); i++) {
+		CHECK(i == UI_BT_WINDOW || patterns[i] != patterns[UI_BT_WINDOW]);
+	}
+}
+#endif
+
 static void test_other_input_is_ignored(void)
 {
 	struct input_event not_a_key = { .type = INPUT_EV_REL, .code = INPUT_KEY_1, .value = 1 };
@@ -176,6 +197,10 @@ int main(void)
 	test_a_press_counts_once();
 	test_the_buttons_do_not_share_a_press();
 	test_other_input_is_ignored();
+#if defined(CONFIG_APP_BT_OTA)
+	test_a_real_press_says_it_is_one();
+	test_the_window_has_a_pattern_of_its_own();
+#endif
 
 	printf("%d button checks, %d failed\n", checks, failures);
 	return failures ? 1 : 0;

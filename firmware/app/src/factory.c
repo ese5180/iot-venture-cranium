@@ -62,6 +62,9 @@ int factory_reset(void)
 	note_error(&first, net_credentials_clear());
 	note_error(&first, identity_settings_clear());
 	note_error(&first, store_erase(STORE_OTA_RECORD));
+#if defined(CONFIG_APP_BT_OTA)
+	note_error(&first, store_erase(STORE_BT_OTA_RECORD));
+#endif
 
 	delete_credential(&first, FACTORY_CLOUD_SEC_TAG, TLS_CREDENTIAL_PRIVATE_KEY);
 	delete_credential(&first, FACTORY_CLOUD_SEC_TAG, TLS_CREDENTIAL_PUBLIC_CERTIFICATE);

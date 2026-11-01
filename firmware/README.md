@@ -7,7 +7,7 @@ Zephyr / nRF Connect SDK **v3.4.0** project for the nRF7002 DK
 | --- | --- | --- |
 | `mcuboot` | application core, secure | Bootloader. Verifies the ECDSA P-256 signature of the application image on every boot, installs updates from the secondary slot in external flash, and puts the previous image back if a new one is not confirmed. |
 | `app` | application core | Trusted Firmware-M in the secure domain plus the non-secure application. This is the security domain of the product. |
-| `netcore_blinky` | network core | Base-function domain: blinks LED2 once a second. No radio stack, no console, no keys. |
+| `netcore_blinky` | network core | Base-function domain: blinks LED2 once a second. No radio stack, no console, no keys. A build for [firmware update over Bluetooth](#firmware-update-over-bluetooth) has `hci_ipc` here instead. |
 
 `app/` started as a copy of Nordic's `samples/net/aws_iot` from nRF Connect SDK v3.4.0;
 files derived from it keep Nordic's copyright notice and licence identifier.
@@ -45,6 +45,9 @@ a path, build through a symbolic link that has none.
 app/                     application-core image and the sysbuild configuration
   boards/                Kconfig and devicetree for the nRF7002 DK
   src/                   the application: Wi-Fi, AWS IoT, updates, the serial console
+  bt_ota_sysbuild.conf   the one switch for firmware update over Bluetooth, off unless given
+  bt_ota.conf            what that switch adds to the application
+  sysbuild/hci_ipc.conf  what it sets for the Bluetooth controller on the network core
   sysbuild/mcuboot/      bootloader configuration
     golden/              the golden image's code, a module of the bootloader
   VERSION                firmware version; also the version written into the signed image
@@ -52,7 +55,7 @@ netcore/                 network-core image
 certs/AmazonRootCA1.pem  root CA that tools/provision_device.py loads onto each board
 keys/fw_signing_pub.pem  public half of the signing key
 golden.json              the frozen golden image, written by tools/golden.py once there is one
-tests/host/              host tests of the job parser, the version code and the console
+tests/host/              host tests of the job parser, the version code, the console and Bluetooth updates
 tests/hil/               hardware test benches, and tests of the tools that talk to a board
 ```
 
@@ -213,6 +216,8 @@ nothing: one failed read must not take it off the network.
   * triple flash: a new image is running on trial
 * **LED2** is driven by the network core and keeps blinking whatever the application
   core is doing.
+* In a build for [firmware update over Bluetooth](#firmware-update-over-bluetooth), LED1 also shows
+  four short flashes while Bluetooth is open, and LED2 stays dark.
 
 ## Buttons
 
@@ -221,9 +226,344 @@ nothing: one failed read must not take it off the network.
   onto the board (device ID, Wi-Fi network, cloud settings, device key and certificates)
   and restarts it in factory mode, like `FACTORY_RESET`. It does nothing while an update
   is offered or under way.
+* In a build for [firmware update over Bluetooth](#firmware-update-over-bluetooth), holding
+  **Button 1** for five seconds and letting go opens Bluetooth for two minutes, unless an update is
+  on offer. Then it is what it always was. `BUTTON|1` on the console opens nothing.
 * A button that was already down when the application started does nothing when it is let
   go: only a press that was seen counts. So holding Button 2 through a boot, for the
   [golden image](#golden-image) for example, can never turn into that factory reset.
+
+## Firmware update over Bluetooth
+
+An image can be uploaded from a phone over Bluetooth LE, with nothing of the cloud involved, for a
+board that has no Wi-Fi in reach. It is off in a normal build, and the network core needs a
+debug-port flash to have it at all.
+
+**None of this has been on the air.** It has been built, its logic has been tested on a host against
+fakes, and nothing else: see [Testing it](#testing-it). Whether a phone pairs, how fast an upload goes
+and how it gets along with Wi-Fi are what a person still has to find out.
+
+```sh
+west build -b nrf7002dk/nrf5340/cpuapp/ns --sysbuild firmware/app -- -DSB_EXTRA_CONF_FILE=bt_ota_sysbuild.conf
+```
+
+That one file sets `SB_CONFIG_APP_BT_OTA`, which applies `bt_ota.conf` to the application, and
+`SB_CONFIG_NETCORE_HCI_IPC`, which puts Zephyr's `hci_ipc` with the SoftDevice Controller on the
+network core in place of the blinky. It needs the console, which is the only way to see a passkey, so
+the build stops if it is combined with `-Dapp_CONFIG_APP_CONSOLE=n`. The bootloader and TF-M come out
+the same either way.
+
+| Image | Off | On | What it has |
+| --- | --- | --- | --- |
+| Application, flash | 627,836 | 705,052 | of 794,474 bytes |
+| Application, RAM | 359,328 | 393,884 | of 409,600 bytes |
+| Network core, flash | 19,024 | 133,232 | of 256 KiB |
+| Network core, RAM | 4,240 | 35,168 | of 64 KiB |
+| MCUboot, flash | 50,324 | 50,324 | the same file |
+| TF-M, flash | 130,008 | 130,008 | the same, but for the build time in its banner |
+
+With it off, the application's `.config` and `zephyr.bin` are the same as before, byte for byte. Only
+the sysbuild `.config` has one more line, `# SB_CONFIG_APP_BT_OTA is not set`.
+
+The TLS buffers and everything else that Wi-Fi uses are the same with it on. The system heap is 4,096
+bytes larger, because Bluetooth takes from it at the first press and Wi-Fi should not notice. What it
+adds takes the RAM that nothing was using.
+
+Firmware with the switch is not kept in `binaries/`: `tools/store_binary.py` says so and leaves
+`latest.signed.bin` alone, so that `scripts/ota.sh` cannot pick it up by accident. Take it from the
+build directory. `src/bt_ota.c` stops the build if one of the options the security rests on changes:
+the characteristic's permission, LE Secure Connections only, no bonds, a passkey drawn by the host, the
+image group as the only group, and Bluetooth as the only transport.
+
+### What happens
+
+1. Hold **Button 1** for five seconds and let go. Only a real press counts. `BUTTON|1` on the console
+   does not, and neither does anything from the cloud. Bluetooth has not even been started until
+   this first press. LED1 shows four short flashes, and the console says `[BT] open for 120 s`.
+2. The board advertises as `Cranium-` and four hexadecimal digits, drawn anew for each window, and on
+   the console as `[BT] advertising as Cranium-1A2B`. Its address is a resolvable private one that
+   changes every 15 minutes (`CONFIG_BT_PRIVACY`), with a key drawn at each start that is never handed
+   to anyone. Two windows within those 15 minutes do show the same address. Nothing that identifies the
+   board in the cloud goes on the air.
+3. A phone connects, and has to pair: LE Secure Connections with MITM protection and a 16-byte key,
+   and nothing else. The board prints `[BT] passkey 123456`, and the person types that on the phone. A
+   new one is drawn for each attempt. Three failed attempts close the window. No bond is kept, so a
+   phone that pairs today has no way back in tomorrow.
+4. The phone uploads a signed image to the secondary slot. The first piece has to show an image
+   header with a version strictly newer than what runs, for image 0, no longer than what stops short
+   of the trailer. Anything else is refused there, before anything is written. While this goes on,
+   the board is in the update state `bluetooth`: no cloud update starts, a job waits, and whatever an
+   update refuses on the console and by Button 2 is refused.
+5. When it has all arrived, the board says what it got, `[BT] firmware 1.6.0+0 has arrived, hash ...:
+   press Button 1 to install it, Button 2 to erase it`, and LED1 blinks fast. If nobody presses
+   either within two minutes, it is erased, and so is a whole image in a window that closes for any
+   other reason. A reset during those two minutes leaves it where it is. That is no different from the
+   previous image, which stays in the slot after any update: without a swap request the bootloader
+   ignores it, and the only way to one is to upload the image again and press Button 1.
+6. Button 1 writes the record, asks the bootloader for a **trial** swap, and restarts: the same call
+   as a cloud update, in the same order. MCUboot checks the signature and the version, as it always
+   does. An image it does not like is not installed.
+7. The image runs on trial. See [The trial](#the-trial).
+
+Button 2 closes the window at any point, and advertising stops at the end of the window or when a
+phone connects. A phone that does not finish pairing is dropped after 45 s, and an authenticated link
+on which nothing happens after 30 s. A link that keeps busy can outlast the window, because an upload
+takes a while, up to 15 minutes in all, plus the two minutes of the offer if the image got there in
+time. The window does not open again by itself after that, and it will not open again while the last
+phone has not gone, so that a new window always takes a new pairing.
+
+### What a phone can do
+
+| Command | |
+| --- | --- |
+| `image list` | Allowed on an authenticated link. It is the last step of a proof |
+| `image upload` | Allowed on an authenticated link, in a window that takes uploads, until one has arrived |
+| `image test`, `image confirm` | **Refused** |
+| `image erase` | **Refused** |
+| Anything else | Not built in: there is only the image group. No reset, no shell, no files |
+
+All of this is a hook in front of every command, which goes by the policy in `src/bt_ota_policy.c`.
+The characteristic also has MCUmgr's own permission for an authenticated link, and
+`CONFIG_MCUMGR_GRP_IMG_ALLOW_CONFIRM_NON_ACTIVE_SLOT` is off, which is what would otherwise make an
+update permanent, with no revert, from a single command.
+
+MCUmgr's erase takes a slot number from the phone, and on trial the secondary slot holds the image to
+go back to. That is why it does not exist here. For the same reason nothing can be uploaded on trial.
+
+This means that Device Manager's **Firmware Upgrade** fails at its last step, when it asks for a
+test. The image has arrived by then, and the board offers it. Use **Image Upload** instead.
+
+### What a board with nobody there can be made to do
+
+Nothing that lasts:
+
+- It does not advertise, and its host does not even run, until someone has held the button. The
+  cloud, the console, a restart and a stuck button cannot change that: a press only counts when it is
+  let go, and one that was already down at boot does not count at all.
+- With the window open and nobody there, an attacker within range needs a passkey that only comes out
+  on the serial port. Three wrong tries close it, and it closes by itself anyway.
+- Nothing installs without a second press, and nothing a phone sends can ask for a swap.
+- An image on trial with nobody there reverts, unless it reaches the cloud by itself.
+- A window will not open while a cloud update is on offer or under way, or on a board in factory mode
+  or not provisioned yet.
+
+It will not open either while the record of a cloud update is waiting. `ota_init()` works out what
+became of a job from the running version, so a Bluetooth update in between would have it report
+`rolled_back` for an update that went fine. On a board that stays out of Wi-Fi's reach with such a
+record, that means no Bluetooth update until it has been online once.
+
+### The trial
+
+An image installed over Bluetooth is not confirmed on boot. Over Wi-Fi the rule is that it must join
+Wi-Fi and authenticate to AWS IoT within five minutes, because then it can receive a further update,
+and so is safe to keep. On a board with no Wi-Fi in reach that rule would revert every image, so
+there it has to be replaced by something that means the same.
+
+**The rule: an image is kept when it can be shown to be able to receive a further update, by whichever
+path there is, and no such proof means it reverts.** Either of these:
+
+1. **It reaches the cloud.** The same as any image, and nobody has to do anything. The record says
+   `proof: cloud`.
+2. **A person proves it over Bluetooth, and only with no Wi-Fi.** That is, the Wi-Fi stack says the
+   board is not associated with an access point. On the running image, a person holds Button 1, pairs
+   a phone with a new passkey, and reads the image list over that link. That takes the button, the
+   console, the controller, an authenticated link, MCUmgr and the external flash, which is the whole
+   way a further update would come in. It is also needed that:
+   - the image has run for at least 60 s (`CONFIG_APP_BT_OTA_TRIAL_MIN_SECONDS`), with its main loop
+     feeding the watchdog, so that it does not fall over soon after starting
+   - the board is still provisioned, so that the image can read what TF-M keeps for it
+   - the Wi-Fi stack has reported the result of a join attempt, `network not found` being a fine
+     result, so that the driver, its firmware and the supplicant all run
+   - the link is the one the list was read on
+
+   The record says `proof: person`.
+
+The deadline is the same five minutes, and with neither proof by then the board restarts and the
+bootloader goes back. A hang or a crash goes back sooner. The phone has no part in this beyond the
+above: it cannot confirm anything. An image that a cloud job installed can only be proved by the
+cloud, as before, and so can one on trial with no record of how it got there.
+
+**With Wi-Fi there, a person has no say.** Associated counts, with or without an address, and so does a
+Wi-Fi stack that cannot say. An image that has the network and cannot get to the cloud, or cannot even
+get an address on it, is exactly what the trial is there to catch, so it reverts.
+
+What this gives up, knowingly: a person can keep an image whose TLS, device key or cloud connection
+is broken, because none of that can be tried with no network. Such an image stays, and only another
+Bluetooth update can move it. `proof: person` in the record is the way to see which boards that could
+be. An image with a broken Bluetooth stack can still be kept by the cloud, and then only the cloud can
+move it. A person can also get a bad signed image kept on purpose, but a person at the board could do
+much the same with serial recovery.
+
+### The record
+
+There is no job to carry an update like this, so one record of the last one stays in TF-M storage
+(`STORE_BT_OTA_RECORD`, 36 bytes), through firmware updates, until a factory reset on an image with this
+option. It goes on the console at every boot, and into the device shadow whenever the board connects:
+
+```json
+{"bt":{"from":"1.5.0+0","to":"1.6.0+0","result":"succeeded","proof":"person","count":3}}
+```
+
+`result` is `pending`, `succeeded`, `rolled_back`, `not_installed`, `trial_lost`, `superseded` (a
+cloud job has installed something else since) or `flash_error`. It is a report of its own, sent
+again at every connection, so that it cannot make the regular report too long for its buffer and so
+that nothing depends on it arriving.
+
+`not_installed` only says that the image never got as far as `ota_init()`. The bootloader may have
+refused it, but it may also have started, and crashed or lost power before that point, and then been
+reverted, which is a `rolled_back` by any other name. Only code in the new image could tell, and a cloud
+update reports the same.
+
+The console in the cloud does not show the record yet. It does not know the state `bluetooth` either:
+its API leaves out what it does not know (`OTA_STATES` in `cloud/api/src/lib/shadow.mjs`), so a board
+with an open window reads `Nothing reported` under its updates there.
+
+An image built without this option leaves the record where it is and does not look at it, also when
+it is factory reset. An image on trial with no knowledge of Bluetooth can only be proved by the cloud.
+
+### Wi-Fi and Bluetooth on this board
+
+Both radios are on 2.4 GHz, and the DK has what it takes to arbitrate between them: the nRF7002's
+Packet Traffic Arbiter, wired to the nRF5340 (`nrf_radio_coex`, P0.24, P0.28, P0.29, P0.30), and a
+switch on P1.10 between a separate antenna for Bluetooth and a shared one.
+
+**The arbiter is not turned on.** Turning it on means `CONFIG_NRF70_SR_COEX` in the application and
+`CONFIG_MPSL_CX` on both cores, which changes how the Wi-Fi driver starts and adds calls after each
+join, and Nordic's own samples carry notes about Bluetooth link timeouts when Wi-Fi is granted the
+radio, and about a crash, with coexistence on. All of that would be new, and untested here, in the
+path the cloud updates depend on. What is lost is performance, not safety: without it the two radios
+can collide, and each retries. During a Bluetooth session there is no download to collide with, since
+no cloud update can run, only a keep-alive. And a board with no Wi-Fi in reach, which is what this is
+for, is not transmitting much. If a person finds that uploads fail or MQTT drops during a session, the
+arbiter is the first thing to try.
+
+P1.10 is driven low when Bluetooth starts, for the separate antenna. Nothing else in this project
+drives it, and Nordic's documentation describes that as the setting for separate antennas. Nobody has
+measured how far apart two antennas this close really are.
+
+### What this does not protect against
+
+- A person at the board with the passkey, who can install any newer image ever signed with this key.
+  It is the same person that serial recovery and the debug port already let in.
+- Someone who reads the serial port from afar, say on a logged bench, and has a phone in range during
+  a window that a person opened. The passkey is only good for one attempt.
+- A denial of service during a window: an attacker can fail pairings and close it. A person presses
+  again.
+- A leaked signing key: the bootloader's check is what decides what runs.
+- A compromised application, which can write the secondary slot anyway.
+- A controller that stops answering once Bluetooth has been started. The Bluetooth host treats that as
+  fatal, so the application halts and the watchdog restarts it, in up to two minutes. Before the first
+  press of a boot it cannot happen, because no command goes to the controller. After that it can, even
+  with the window closed, because a new private address is set every 15 minutes until the next restart:
+  one command, and nothing on the air. A cloud update that was running is then interrupted, as by any
+  restart.
+
+### Before relying on it
+
+Stack sizes and the heap have not been measured, because that takes a board with Bluetooth running.
+Callbacks of the Bluetooth threads hand everything to the main loop, so that printing does not run on
+those stacks, but pairing and the upload still do. On the first bring-up, build with
+
+```sh
+-Dapp_CONFIG_THREAD_ANALYZER=y -Dapp_CONFIG_THREAD_ANALYZER_USE_LOG=y -Dapp_CONFIG_THREAD_ANALYZER_AUTO=y \
+  -Dapp_CONFIG_THREAD_ANALYZER_AUTO_INTERVAL=10 -Dapp_CONFIG_THREAD_NAME=y
+```
+
+and go through a pairing, a whole upload and a proof. Look at:
+
+- The Bluetooth receive thread (2,048 bytes, `CONFIG_BT_RX_STACK_SIZE`), its long work queue (1,800,
+  where the keys are worked out through TF-M), its transmit thread (688), the MCUmgr work queue (4,608,
+  `CONFIG_MCUMGR_TRANSPORT_WORKQUEUE_STACK_SIZE`, which runs down to the flash driver), and the IPC work
+  queue (1,024). Under a quarter free on any of them means raising it.
+- `Free heap` in `STATS` before the first press, after it, after an upload, and during a cloud update
+  with a window having been open before. It should not be lower than on a build without the option,
+  which takes the same `STATS` line. The IPC takes its queues from this heap at the first press.
+- TF-M's crypto during a pairing with TLS sessions open: `pairing failed` or a TLS handshake failing
+  at that moment would point at its memory (`CONFIG_TFM_CRYPTO_ENGINE_BUF_SIZE`, the same as without
+  this option).
+
+The network core's stacks are `hci_ipc`'s own, and nobody here has seen them run on this board either.
+
+### Testing it
+
+Host tests, with no board: `make -C firmware/tests/host` runs `test_bt_ota_policy.c`, every decision;
+`test_bt_ota.c`, `src/bt_ota.c` against a fake of the Bluetooth host, MCUmgr and the bootloader that only
+reaches what has registered itself for that event; and `test_ota_bt.c`, what the option adds to `ota.c`.
+The rest of `ota.c` is compiled there but not exercised: a cloud update stays with `tests/hil/ota_bench.py`.
+It also runs the console's, the main loop's and the buttons' tests a second time with the option on.
+`test_golden.py` checks that `tools/store_binary.py` keeps such a build out of `binaries/`.
+
+Everything else takes a person, with [nRF Connect Device Manager](https://www.nordicsemi.com/Products/Development-tools/nRF-Connect-Device-Manager)
+on a phone, a serial monitor on the console, and the debug port. **None of this has been run.**
+
+**Set up.** Build image A, what runs to begin with, and for each install below an image newer than
+what runs by then, with the switch. `KIND` keeps their build directories apart:
+
+```sh
+KIND=bta firmware/tests/hil/build_image.sh 1.5.1 0 build-bench/images/bt-a.bin -DSB_EXTRA_CONF_FILE=bt_ota_sysbuild.conf
+KIND=btb firmware/tests/hil/build_image.sh 1.5.2 0 build-bench/images/bt-b.bin -DSB_EXTRA_CONF_FILE=bt_ota_sysbuild.conf
+KIND=hang firmware/tests/hil/build_image.sh 1.5.9 0 build-bench/images/bt-hang.bin -DSB_EXTRA_CONF_FILE=bt_ota_sysbuild.conf \
+  -Dapp_CONFIG_APP_TEST_FAULT_HANG=y
+```
+
+Then flash the network core and image A, both over the debug port. **Do not leave out `--options`:** the default
+erases everything, TF-M storage and provisioning included.
+
+```sh
+nrfutil device program --serial-number <probe> --core Network \
+  --firmware build-bench/build-bta/hci_ipc/zephyr/zephyr.hex \
+  --options chip_erase_mode=ERASE_RANGES_TOUCHED_BY_FIRMWARE,verify=VERIFY_READ
+nrfutil device program --serial-number <probe> \
+  --firmware build-bench/build-bta/app/zephyr/zephyr.signed.hex \
+  --options chip_erase_mode=ERASE_RANGES_TOUCHED_BY_FIRMWARE,verify=VERIFY_READ
+nrfutil device reset --serial-number <probe> --reset-kind RESET_PIN
+```
+
+The bootloader stays as it is. Copy the other images to the phone.
+
+**What counts as passing:**
+
+| | Do this | It passes if |
+| --- | --- | --- |
+| 1 | Scan with the phone before pressing anything | The board is not there |
+| 2 | Send `BUTTON\|1` on the console, and press Button 1 briefly | Still not there, and LED1 does not change |
+| 3 | Hold Button 1 for 5 s, and let go. Do nothing for 2 minutes | Four flashes, `[BT] open for 120 s`, seen on the phone. Then `[BT] closed`, and gone from the phone |
+| 4 | Open it, connect, and type a wrong passkey, three times | `[BT] closed: too many failed pairings` |
+| 5 | Open it, connect, and try to upload without pairing, by declining the prompt | Nothing is written |
+| 6 | Open it, pair with the passkey from the console, and look at the phone's bond list | Paired for this link, and no bond afterwards |
+| 7 | On that link, **Images > Test** and **Confirm**, and **Erase** | Each one refused, `[BT] refused a command` on the console |
+| 8 | **Image Upload** of image A, the one that runs | `[BT] refused an upload: it is not newer than what runs` |
+| 9 | **Image Upload** of `bt-b.bin` | `[BT] upload started`, then `has arrived`, and LED1 blinks fast. Write down how long it took |
+| 10 | Press Button 2 | Slot erased, and `image list` in a next window shows nothing in slot 1 |
+| 11 | Upload `bt-b.bin` again, and press Button 1, with Wi-Fi available | Restarts, runs 1.5.2 with a triple flash, reaches AWS IoT, and is confirmed by itself. Record on the console and in the shadow: `succeeded`, `cloud` |
+| 12 | Turn off the access point (`CLEAR_WIFI` is not it: the board must stay provisioned). Upload and install a newer image, then do nothing | After 5 minutes it reverts. `rolled_back` on the console |
+| 13 | The same, but within 5 minutes hold Button 1, pair, and **Images > Read** | Before 60 s: `[BT] trial: this image has not run for long enough yet`. After that, once `[WIFI] failed reason=network not found` has been seen: `succeeded`, `person`, and it stays after a reset |
+| 14 | The same on a board with Wi-Fi up and AWS IoT out of reach, and again on an access point that gives no DHCP lease | `[BT] trial: there is Wi-Fi, so it has to reach the cloud`, and it reverts |
+| 15 | Install `bt-hang.bin` | The watchdog fires, and the bootloader goes back. `rolled_back` |
+| 16 | Upload a newer image signed with another key, using `imgtool` | Offered, and then the bootloader refuses it: `not_installed` |
+| 17 | Open a window during a cloud update on offer, and the other way round: a job created during a window | Refused, and the job is offered after the window closes |
+| 18 | A full **cloud** update with the same image, with Bluetooth not touched | As `tests/hil/ota_bench.py` shows it, no slower |
+| 19 | An upload with MQTT up, with a download of something else going on nearby | MQTT stays up. If not, see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-on-this-board) |
+
+For 19 the phone's upload time should be compared with one with Wi-Fi off. Do the measurements under
+[Before relying on it](#before-relying-on-it) in the same session.
+
+**Going back.** The application is back on a normal image by any way that takes an older one: the
+golden image's gesture, or serial recovery, since a cloud update only takes a newer one. The network
+core only by the debug port, from a normal build:
+
+```sh
+nrfutil device program --serial-number <probe> --core Network \
+  --firmware build/netcore_blinky/zephyr/zephyr.hex \
+  --options chip_erase_mode=ERASE_RANGES_TOUCHED_BY_FIRMWARE,verify=VERIFY_READ
+nrfutil device reset --serial-number <probe> --reset-kind RESET_PIN
+```
+
+Mixed states should do no harm, and have not been tried. An image with this option on a blinky
+network core waits two seconds at the first press, says `the network core does not run the Bluetooth
+controller`, and goes on, and does everything else as usual. An image without it on the `hci_ipc`
+network core, the golden image for one, never starts the host, so the radio stays off and LED2 stays
+dark.
 
 ## Golden image
 

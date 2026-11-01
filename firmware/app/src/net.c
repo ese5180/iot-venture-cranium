@@ -39,6 +39,10 @@ static struct net_mgmt_event_callback conn_callback;
 static struct net_mgmt_event_callback wifi_callback;
 
 static atomic_t link_up;
+#if defined(CONFIG_APP_BT_OTA)
+/* The Wi-Fi stack has reported on a join attempt since this image started. */
+static atomic_t wifi_answered;
+#endif
 /* The reason last reported since the last attempt began: it is said only once. */
 static atomic_t last_failure;
 static int seconds_down;
@@ -149,6 +153,12 @@ static void on_wifi_event(struct net_mgmt_event_callback *callback, uint64_t eve
 	const struct wifi_status *status = callback->info;
 
 	ARG_UNUSED(iface);
+
+#if defined(CONFIG_APP_BT_OTA)
+	if (event == NET_EVENT_WIFI_CONNECT_RESULT) {
+		atomic_set(&wifi_answered, 1);
+	}
+#endif
 
 	if (event == NET_EVENT_WIFI_CONNECT_RESULT && status != NULL && status->status != 0) {
 		post_join_failed(status->status);
@@ -310,6 +320,21 @@ bool net_is_up(void)
 {
 	return atomic_get(&link_up) != 0;
 }
+
+#if defined(CONFIG_APP_BT_OTA)
+bool net_wifi_answered(void)
+{
+	return atomic_get(&wifi_answered) != 0;
+}
+
+bool net_wifi_associated(void)
+{
+	struct wifi_iface_status status;
+
+	/* A stack that does not say is no stack to vouch for: this counts as Wi-Fi being there. */
+	return link_status(&status) != 0 || status.state >= WIFI_STATE_ASSOCIATED;
+}
+#endif
 
 bool net_has_credentials(void)
 {

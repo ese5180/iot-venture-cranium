@@ -20,6 +20,8 @@ enum store_id {
 	STORE_DEVICE_ID = 3,
 	/* First-time setup has finished. Written last, so see device.h for the order. */
 	STORE_INIT_FLAG = 4,
+	/* struct bt_ota_record: the last update over Bluetooth, with CONFIG_APP_BT_OTA only. */
+	STORE_BT_OTA_RECORD = 5,
 };
 
 /* Read a record of exactly size bytes. -ENOENT if it does not exist. */

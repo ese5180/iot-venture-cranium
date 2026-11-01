@@ -1322,6 +1322,9 @@ static void test_factory_reset(void)
 	/* Check 7. */
 	operating_board();
 	fake.link_up = true;
+#if defined(CONFIG_APP_BT_OTA)
+	fake.records[STORE_BT_OTA_RECORD].present = true;
+#endif
 	command("FACTORY_RESET");
 	CHECK_TEXT(final_line(), "OK erased, rebooting into factory mode");
 	CHECK(fake.reboots == 1);
@@ -1331,6 +1334,9 @@ static void test_factory_reset(void)
 	CHECK(!fake.records[STORE_INIT_FLAG].present);
 	CHECK(!fake.records[STORE_DEVICE_CONFIG].present);
 	CHECK(!fake.records[STORE_OTA_RECORD].present);
+#if defined(CONFIG_APP_BT_OTA)
+	CHECK(!fake.records[STORE_BT_OTA_RECORD].present);
+#endif
 	CHECK(!fake.wifi_stored);
 	CHECK(!fake.private_key);
 	CHECK(!fake.certificate);
@@ -2064,6 +2070,10 @@ static void test_button_and_restart(void)
 	CHECK(fake.last_button.type == APP_EVENT_BUTTON);
 	CHECK(fake.last_button.button.id == APP_BUTTON_1);
 	CHECK(!fake.last_button.button.long_press);
+#if defined(CONFIG_APP_BT_OTA)
+	/* A press without a finger on it opens nothing: see bt_ota_on_button(). */
+	CHECK(!fake.last_button.button.physical);
+#endif
 
 	command("BUTTON|2");
 	CHECK(fake.last_button.button.id == APP_BUTTON_2);

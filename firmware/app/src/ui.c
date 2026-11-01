@@ -26,6 +26,9 @@ static const uint16_t patterns[] = {
 	[UI_UPDATE_OFFERED] = 0x5555,
 	[UI_UPDATE_IN_PROGRESS] = 0x0505,
 	[UI_UPDATE_TESTING] = 0x0015,
+#if defined(CONFIG_APP_BT_OTA)
+	[UI_BT_WINDOW] = 0x0055,
+#endif
 };
 
 static atomic_t current_pattern = ATOMIC_INIT(0x0001);
@@ -83,6 +86,9 @@ static void on_input(struct input_event *event, void *user_data)
 		.button = {
 			.id = button,
 			.long_press = (k_uptime_get() - pressed_at[button]) >= LONG_PRESS_MS,
+#if defined(CONFIG_APP_BT_OTA)
+			.physical = true,
+#endif
 		},
 	};
 

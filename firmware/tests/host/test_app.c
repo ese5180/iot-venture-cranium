@@ -71,6 +71,10 @@ static struct {
 	int disconnect_requests;
 	int connect_result;
 	const struct wifi_status *event_info;
+#if defined(CONFIG_APP_BT_OTA)
+	enum wifi_iface_state wifi_state;
+	int status_result;
+#endif
 } board;
 
 static jmp_buf out_of_the_event_loop;
@@ -178,6 +182,10 @@ int net_mgmt(enum net_request request, struct net_if *iface, void *data, size_t 
 		strcpy(status->ssid, "MyNetwork");
 		status->security = board.link_security;
 		status->rssi = -51;
+#if defined(CONFIG_APP_BT_OTA)
+		status->state = board.wifi_state;
+		return board.status_result;
+#endif
 	}
 
 	return 0;
@@ -447,6 +455,42 @@ void ota_on_download(enum app_download_event what, int value)
 void ota_on_tick(void)
 {
 }
+
+#if defined(CONFIG_APP_BT_OTA)
+static struct {
+	bool open;
+	bool takes_the_button;
+	int buttons;
+	bool last_physical;
+	bool last_long;
+	int ticks;
+	enum ui_state ui;
+} bt;
+
+bool bt_ota_on_button(uint8_t button, bool long_press, bool physical)
+{
+	ARG_UNUSED(button);
+	bt.buttons++;
+	bt.last_physical = physical;
+	bt.last_long = long_press;
+	return bt.takes_the_button;
+}
+
+void bt_ota_on_tick(void)
+{
+	bt.ticks++;
+}
+
+bool bt_ota_is_open(void)
+{
+	return bt.open;
+}
+
+enum ui_state bt_ota_ui_state(void)
+{
+	return bt.ui;
+}
+#endif
 
 enum ota_state ota_state(void)
 {
@@ -799,6 +843,94 @@ static void test_button_2(void)
 	CHECK(board.ota_buttons == 1);
 }
 
+#if defined(CONFIG_APP_BT_OTA)
+static void test_a_button_goes_to_bluetooth_first(void)
+{
+	const struct app_event press = {
+		.type = APP_EVENT_BUTTON,
+		.button = { .id = APP_BUTTON_2, .long_press = true, .physical = true },
+	};
+
+	memset(&bt, 0, sizeof(bt));
+
+	/* Taken: holding Button 2 with a window open must not be the factory reset. */
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	bt.takes_the_button = true;
+	CHECK(app_event_post(&press) == 0);
+	run_loop();
+	CHECK(bt.buttons == 1);
+	CHECK(bt.last_physical);
+	CHECK(bt.last_long);
+	CHECK(board.factory_resets == 0);
+	CHECK(board.ota_buttons == 0);
+
+	/* Not taken: everything is as it was. */
+	bt.takes_the_button = false;
+	CHECK(app_event_post(&press) == 0);
+	run_loop();
+	CHECK(bt.buttons == 2);
+	CHECK(board.factory_resets == 1);
+}
+
+static void test_what_the_tick_and_led1_do_for_bluetooth(void)
+{
+	memset(&bt, 0, sizeof(bt));
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+
+	ticks(1);
+	CHECK(bt.ticks == 1);
+	CHECK(board.ui != UI_BT_WINDOW);
+
+	bt.open = true;
+	bt.ui = UI_BT_WINDOW;
+	ticks(1);
+	CHECK(board.ui == UI_BT_WINDOW);
+
+	bt.open = false;
+	ticks(1);
+	CHECK(board.ui != UI_BT_WINDOW);
+	memset(&bt, 0, sizeof(bt));
+}
+
+static void test_the_wifi_stack_answers_or_it_does_not(void)
+{
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+	atomic_set(&wifi_answered, 0);
+	CHECK(!net_wifi_answered());
+
+	/* A failure is an answer: it took the driver, its firmware and the supplicant to say so. */
+	wifi_result(WIFI_STATUS_CONN_AP_NOT_FOUND);
+	CHECK(net_wifi_answered());
+}
+
+static void test_associated_is_what_the_wifi_stack_says_now(void)
+{
+	boot(DEVICE_BOOT_OPERATING, false, true, true);
+
+	board.status_result = 0;
+	board.wifi_state = WIFI_STATE_DISCONNECTED;
+	CHECK(!net_wifi_associated());
+	board.wifi_state = WIFI_STATE_SCANNING;
+	CHECK(!net_wifi_associated());
+	board.wifi_state = WIFI_STATE_ASSOCIATING;
+	CHECK(!net_wifi_associated());
+
+	/* Associated with no address, as on a network whose DHCP gives none: no L4 event comes. */
+	board.wifi_state = WIFI_STATE_ASSOCIATED;
+	CHECK(net_wifi_associated());
+	CHECK(!net_is_up());
+	board.wifi_state = WIFI_STATE_COMPLETED;
+	CHECK(net_wifi_associated());
+	CHECK(!net_is_up());
+
+	/* A stack that cannot say counts as Wi-Fi being there, so that no person can vouch for it. */
+	board.wifi_state = WIFI_STATE_DISCONNECTED;
+	board.status_result = -EIO;
+	CHECK(net_wifi_associated());
+	board.status_result = 0;
+}
+#endif
+
 int main(void)
 {
 	test_only_ipv4_counts_as_up();
@@ -808,6 +940,12 @@ int main(void)
 	test_factory_mode_stays_off_the_network();
 	test_the_board_joins_at_boot_whenever_a_network_is_stored();
 	test_button_2();
+#if defined(CONFIG_APP_BT_OTA)
+	test_a_button_goes_to_bluetooth_first();
+	test_what_the_tick_and_led1_do_for_bluetooth();
+	test_the_wifi_stack_answers_or_it_does_not();
+	test_associated_is_what_the_wifi_stack_says_now();
+#endif
 
 	printf("%d application checks, %d failed\n", checks, failures);
 	return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

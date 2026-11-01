@@ -22,6 +22,14 @@ if(SB_CONFIG_NETCORE_BLINKY)
   set_config_bool(${DEFAULT_IMAGE} CONFIG_SOC_NRF53_CPUNET_ENABLE y)
 endif()
 
+# Firmware update over Bluetooth LE, off unless bt_ota_sysbuild.conf is given.
+if(SB_CONFIG_APP_BT_OTA)
+  if(NOT SB_CONFIG_NETCORE_HCI_IPC)
+    message(FATAL_ERROR "SB_CONFIG_APP_BT_OTA needs SB_CONFIG_NETCORE_HCI_IPC: use bt_ota_sysbuild.conf")
+  endif()
+  add_overlay_config(${DEFAULT_IMAGE} "${CMAKE_CURRENT_LIST_DIR}/bt_ota.conf")
+endif()
+
 # The golden image is a module of MCUboot, not of this application: it has to live with the
 # bootloader's own code. With CONFIG_CRANIUM_GOLDEN off the golden image adds nothing to it, and
 # the module still holds the bootloader's check on serial recovery's image number.

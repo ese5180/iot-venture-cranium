@@ -33,6 +33,22 @@ target_sources_ifdef(CONFIG_APP_CONSOLE app PRIVATE
   src/console_stream.c
 )
 
+target_sources_ifdef(CONFIG_APP_BT_OTA app PRIVATE
+  src/bt_ota.c
+  src/bt_ota_policy.c
+)
+
+# MCUmgr's image header needs MCUboot's.
+if(CONFIG_APP_BT_OTA)
+  target_link_libraries(app PRIVATE MCUBOOT_BOOTUTIL)
+endif()
+
+# Only bt_ota.conf turns Bluetooth on. Without the console APP_BT_OTA stays off, which Kconfig only
+# warns about, and this would be an image with a Bluetooth host and nobody to read a passkey.
+if(CONFIG_BT AND NOT CONFIG_APP_BT_OTA)
+  message(FATAL_ERROR "Firmware update over Bluetooth needs the console: CONFIG_APP_CONSOLE is off")
+endif()
+
 target_sources_ifndef(CONFIG_APP_CONSOLE app PRIVATE src/log_discard.c)
 
 zephyr_linker_sources_ifdef(CONFIG_LOG SECTIONS src/log_backend_check.ld)

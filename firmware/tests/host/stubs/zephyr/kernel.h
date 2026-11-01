@@ -92,4 +92,20 @@ static inline atomic_val_t atomic_inc(atomic_t *target)
 	return (*target)++;
 }
 
+static inline atomic_val_t atomic_or(atomic_t *target, atomic_val_t value)
+{
+	atomic_val_t old = *target;
+
+	*target = old | value;
+	return old;
+}
+
+static inline atomic_val_t atomic_and(atomic_t *target, atomic_val_t value)
+{
+	atomic_val_t old = *target;
+
+	*target = old & value;
+	return old;
+}
+
 #endif

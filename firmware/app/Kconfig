@@ -116,6 +116,36 @@ config APP_CONSOLE_RX_BUFFER_SIZE
 
 endif # APP_CONSOLE
 
+config APP_BT_OTA
+	bool "Firmware update over Bluetooth LE"
+	depends on APP_CONSOLE && BT
+	help
+	  MCUmgr over Bluetooth LE, writing the secondary slot. Off by default. Build with
+	  -DSB_EXTRA_CONF_FILE=bt_ota_sysbuild.conf, which also puts the Bluetooth controller on
+	  the network core: see firmware/README.md. It needs the console, which is the only way
+	  a person can see the passkey.
+
+if APP_BT_OTA
+
+config APP_BT_OTA_WINDOW_SECONDS
+	int "Seconds that Button 1 opens Bluetooth for"
+	default 120
+	range 30 600
+	help
+	  Advertising stops after this, or as soon as a phone has connected. An authenticated
+	  link can run on past it, as long as something happens on it.
+
+config APP_BT_OTA_TRIAL_MIN_SECONDS
+	int "Seconds a new image must have run before a person can keep it"
+	default 60
+	range 30 APP_OTA_SELF_TEST_TIMEOUT_SECONDS
+	help
+	  An image installed over Bluetooth, on a board that cannot reach Wi-Fi, can be kept by
+	  a person at the board: see firmware/README.md. This long first, so that an image that
+	  falls over soon after it starts does not get kept, and Wi-Fi has its chance.
+
+endif # APP_BT_OTA
+
 config APP_VERSION_FROM_BUILD
 	bool
 	default y

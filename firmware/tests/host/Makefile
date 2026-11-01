@@ -27,13 +27,22 @@ CONSOLE_HEADERS := $(wildcard $(SRC)/*.h) console_fakes.h
 
 .PHONY: test clean
 test: $(BUILD)/host_tests $(BUILD)/console_tests $(BUILD)/console_output_tests $(BUILD)/app_tests $(BUILD)/console_sim \
-		$(BUILD)/ui_tests $(BUILD)/golden_policy_tests
+		$(BUILD)/ui_tests $(BUILD)/golden_policy_tests $(BUILD)/bt_ota_policy_tests \
+		$(BUILD)/bt_ota_tests $(BUILD)/ota_bt_tests $(BUILD)/ota_bt_no_confirm_tests \
+		$(BUILD)/console_bt_tests $(BUILD)/app_bt_tests $(BUILD)/ui_bt_tests
 	./$(BUILD)/host_tests
 	./$(BUILD)/console_tests
 	./$(BUILD)/console_output_tests
 	./$(BUILD)/app_tests
 	./$(BUILD)/ui_tests
 	./$(BUILD)/golden_policy_tests
+	./$(BUILD)/bt_ota_policy_tests
+	./$(BUILD)/bt_ota_tests
+	./$(BUILD)/ota_bt_tests
+	./$(BUILD)/ota_bt_no_confirm_tests
+	./$(BUILD)/console_bt_tests
+	./$(BUILD)/app_bt_tests
+	./$(BUILD)/ui_bt_tests
 
 $(BUILD)/cJSON.o: $(CJSON_DIR)/cJSON.c
 	@mkdir -p $(BUILD)
@@ -72,6 +81,44 @@ $(BUILD)/golden_policy_tests: test_golden_policy.c $(GOLDEN_SRC)/golden_policy.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(WARNINGS) -I$(GOLDEN_SRC) -o $@ test_golden_policy.c $(GOLDEN_SRC)/golden_policy.c \
 		$(GOLDEN_SRC)/image_number_guard.c
+
+# Firmware update over Bluetooth: what it is allowed to do, then src/bt_ota.c on a fake of the
+# Bluetooth host, MCUmgr and the bootloader's API. The last three are the same tests as above
+# with CONFIG_APP_BT_OTA on, which is off everywhere else, to show what it changes there.
+BT_DEFINES := -DCONFIG_APP_BT_OTA=1
+$(BUILD)/bt_ota_policy_tests: test_bt_ota_policy.c $(SRC)/bt_ota_policy.c $(SRC)/bt_ota_policy.h $(SRC)/version.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -o $@ test_bt_ota_policy.c $(SRC)/bt_ota_policy.c $(SRC)/version.c
+
+$(BUILD)/bt_ota_tests: test_bt_ota.c $(SRC)/bt_ota.c $(SRC)/bt_ota.h $(SRC)/bt_ota_policy.c $(SRC)/bt_ota_policy.h \
+		$(SRC)/ota_job.c $(SRC)/version.c stubs/host_bt.h stubs/zephyr/kernel.h $(BUILD)/cJSON.o
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -o $@ test_bt_ota.c $(SRC)/bt_ota_policy.c $(SRC)/ota_job.c $(SRC)/version.c \
+		$(BUILD)/cJSON.o -lm
+
+# What it adds to ota.c, which is compiled for this and for nothing else here. The second one is
+# a test image that never confirms itself.
+$(BUILD)/ota_bt_tests: test_ota_bt.c $(SRC)/ota.c $(SRC)/ota.h $(SRC)/ota_job.c $(SRC)/version.c stubs/host_ota.h \
+		stubs/host_bt.h $(BUILD)/cJSON.o
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -o $@ test_ota_bt.c $(SRC)/ota_job.c $(SRC)/version.c $(BUILD)/cJSON.o -lm
+
+$(BUILD)/ota_bt_no_confirm_tests: test_ota_bt.c $(SRC)/ota.c $(SRC)/ota.h $(SRC)/ota_job.c $(SRC)/version.c \
+		stubs/host_ota.h stubs/host_bt.h $(BUILD)/cJSON.o
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -DCONFIG_APP_TEST_FAULT_NO_CONFIRM=1 -o $@ test_ota_bt.c $(SRC)/ota_job.c \
+		$(SRC)/version.c $(BUILD)/cJSON.o -lm
+
+$(BUILD)/console_bt_tests: test_console.c $(CONSOLE_SOURCES) $(BUILD)/base64.o $(CONSOLE_HEADERS)
+	$(CC) $(CFLAGS) $(WARNINGS) $(CONSOLE_DEFINES) $(BT_DEFINES) -o $@ $(filter %.c %.o,$^)
+
+$(BUILD)/app_bt_tests: test_app.c $(SRC)/main.c $(SRC)/net.c $(CONSOLE_HEADERS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) $(CONSOLE_DEFINES) $(BT_DEFINES) -o $@ test_app.c
+
+$(BUILD)/ui_bt_tests: test_ui.c $(SRC)/ui.c $(SRC)/ui.h $(SRC)/app_events.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -DCONFIG_APP_LOG_LEVEL=0 $(BT_DEFINES) -o $@ test_ui.c
 
 # The console on a pseudo-terminal, for firmware/tests/hil/test_board.py. No sanitizers
 # are needed for that, and the tools' tests do not have to run with their runtime.

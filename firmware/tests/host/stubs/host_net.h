@@ -90,8 +90,17 @@ struct wifi_status {
 	int status;
 };
 
+enum wifi_iface_state {
+	WIFI_STATE_DISCONNECTED = 0,
+	WIFI_STATE_SCANNING = 3,
+	WIFI_STATE_ASSOCIATING = 5,
+	WIFI_STATE_ASSOCIATED = 6,
+	WIFI_STATE_COMPLETED = 9,
+};
+
 struct wifi_iface_status {
 	char ssid[WIFI_SSID_MAX_LEN + 1];
+	enum wifi_iface_state state;
 	enum wifi_security_type security;
 	int rssi;
 };

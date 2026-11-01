@@ -25,6 +25,10 @@ enum ui_state {
 	UI_UPDATE_IN_PROGRESS,
 	/* Triple flash: a new image is running on trial. */
 	UI_UPDATE_TESTING,
+#if defined(CONFIG_APP_BT_OTA)
+	/* Four flashes: Bluetooth is open, and no phone is linked yet. */
+	UI_BT_WINDOW,
+#endif
 };
 
 int ui_init(void);
