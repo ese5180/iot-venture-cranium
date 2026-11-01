@@ -103,12 +103,12 @@ On every reset MCUboot checks the SHA-256 and the ECDSA P-256 signature of the i
 
 An update is offered as an AWS IoT job. Nothing is downloaded until Button 1 on the board is pressed (SEC 04). The application downloads the image into the secondary slot, checks it, and resets. MCUboot verifies the signature, swaps the slots and starts the new image on trial. The new image has to reconnect to AWS IoT before it marks itself as good; if it does not, the next reset swaps the previous image back.
 
-<!-- SIZES: every size of the firmware images is in the first two rows of this table, and nowhere else in this file. They are from the 1.6.0 build, from the "Memory region" tables of its build log and the length of its signed file. Replace them, the label on them and the numbers in "pics/Boot Process.png" when a later version is built. -->
+<!-- SIZES: every size of the firmware images is in the first two rows of this table, and nowhere else in this file. They are from the 1.7.0 build, from the "Memory region" tables of its build log and the length of its signed file. Replace them, the label on them and the numbers in "pics/Boot Process.png" when a later version is built. -->
 
 | Question | Answer |
 | --- | --- |
-| How large is your bootloader? | In the 1.6.0 build, MCUboot is 50,324 bytes of flash in a 64 KB partition, and uses 22,408 bytes of RAM. |
-| How large is your existing application code? | In the 1.6.0 build, the application is 627,836 bytes of flash and uses 359,328 of 409,600 bytes of RAM. TF-M is 130,008 of 130,560 bytes of flash, and uses 36,620 of 49,152 bytes of RAM. With a header and the signature, the two are one signed image of 759,059 bytes in a slot of 933,888 bytes. The network core's blinky is a separate 19,024 bytes in that core's own flash. |
+| How large is your bootloader? | In the 1.7.0 build, MCUboot is 50,324 bytes of flash in a 64 KB partition, and uses 22,408 bytes of RAM. |
+| How large is your existing application code? | In the 1.7.0 build, the application is 629,364 bytes of flash and uses 359,392 of 409,600 bytes of RAM. TF-M is 130,008 of 130,560 bytes of flash, and uses 36,620 of 49,152 bytes of RAM. With a header and the signature, the two are one signed image of 760,587 bytes in a slot of 933,888 bytes. The network core's blinky is a separate 19,024 bytes in that core's own flash. |
 | Does the bootloader or application code handle the firmware image download? | The application. MCUboot has no network stack: it verifies and swaps images. |
 | What wireless communication is used to download the images? | Wi-Fi (nRF7002). The job arrives over MQTT with mutual TLS from AWS IoT, and the image is downloaded over HTTPS from a short-lived, signed S3 link. |
 | Why this method? | The DK has Wi-Fi and Bluetooth LE. A signed image is hundreds of kilobytes. Wi-Fi reaches the server directly and has the bandwidth for it: a download takes a little over a minute. Bluetooth would need a phone as a relay and stays free for audio and the controller link. |

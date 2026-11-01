@@ -14,7 +14,7 @@ everything in this folder except this file.
 Two ways to put an image on a board over the air:
 
 - **From the command line:** `scripts/ota.sh` installs the newest build, and
-  `scripts/ota.sh binaries/cranium-1.6.0-0.signed.bin` installs that one.
+  `scripts/ota.sh binaries/cranium-1.7.0-0.signed.bin` installs that one.
 - **From the website:** on the console's Firmware page, choose the file here. The server
   checks its signature against the project's public key before it stores anything, and
   then offers to deploy it.
@@ -50,7 +50,7 @@ and what size it is. [`docs/ci.md`](../docs/ci.md) has the rest.
 
 ```sh
 scripts/ota.sh                                      # install binaries/latest.signed.bin
-scripts/ota.sh binaries/cranium-1.6.0-0.signed.bin  # install that image
+scripts/ota.sh binaries/cranium-1.7.0-0.signed.bin  # install that image
 scripts/ota.sh --real-button                        # wait for a person to press Button 1
 ```
 
