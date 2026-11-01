@@ -6,7 +6,7 @@ came from are in the table below.
 **Which firmware.** The golden image, the one a person can always go back to, is firmware 1.5.0. It is
 frozen: [`firmware/golden.json`](../firmware/golden.json) names it, and the bootloader holds its digest.
 The first release with [what restarts a stuck board](../firmware/README.md#when-the-board-is-stuck) is
-1.7.0. The latest is 1.7.2, on the board since 2026-11-01, which starts an update with no button. Test images
+1.7.0. From 1.7.2 an update starts with no button. The latest is 1.7.4, on the board since 2026-11-01. Test images
 for the bench are numbered around them.
 
 Every run below was on one nRF7002 DK. The benches write one line per run to a local
@@ -39,6 +39,9 @@ All on 2026-11-01, on the bootloader that holds the pin:
 | 16:01 | 1.7.1 to 1.7.2 | The website, signed in | **No** | `FAILED`, `not_installed`; the board went back to 1.7.1 by itself |
 | 16:07 | 1.7.1 to 1.7.2, the same file | The website, signed in | **No** | `FAILED`, `not_installed`; the same again |
 | 16:15 | 1.7.1 to 1.7.2, the same file | The bench, with a job made directly | Yes | `SUCCEEDED`, 188 s after the button |
+| 16:28 | 1.7.2 to 1.7.3 | The website, signed in, with no button | Yes | `SUCCEEDED`, 210 s, with a Wi-Fi drop on the way, cause not known |
+| 16:41 | 1.7.3 to 1.7.3+1 | The bench, with no button | Yes | `SUCCEEDED`, 185 s |
+| 16:53 | 1.7.3+1 to 1.7.4 | The website, signed in, with no button | Yes | `SUCCEEDED`, 172 s |
 
 **The two failures are not explained.** There was no console on them, so what follows is from timing. Each took
 165 to 183 s from the restart to 1.7.1 running again, which fits a swap of 81 s, a reset within seconds, and a swap
