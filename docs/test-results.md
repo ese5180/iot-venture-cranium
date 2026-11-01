@@ -6,8 +6,8 @@ came from are in the table below.
 **Which firmware.** The golden image, the one a person can always go back to, is firmware 1.5.0. It is
 frozen: [`firmware/golden.json`](../firmware/golden.json) names it, and the bootloader holds its digest.
 The first release with [what restarts a stuck board](../firmware/README.md#when-the-board-is-stuck) is
-1.7.0, on the board since 2026-11-01. The next is 1.7.1, which is not finished. Test images for the bench are
-1.6.x, below both.
+1.7.0. The latest is 1.7.2, on the board since 2026-11-01, which starts an update with no button. Test images
+for the bench are numbered around them.
 
 Every run below was on one nRF7002 DK. The benches write one line per run to a local
 `results.jsonl`, which is not in git. A result is about the firmware and the bootloader it ran on:
@@ -29,11 +29,26 @@ Every run below was on one nRF7002 DK. The benches write one line per run to a l
 
 ## Over the air on the final firmware
 
-**One update has finished, and the regression has not run.** On 2026-11-01, from 12:15 to 12:18,
-`scripts/ota.sh` took the board from the frozen 1.5.0 to 1.7.0, built from commit 8eca4b0, on the bootloader that
-holds the pin. It uploaded the release through the console's API function, invoked directly, so it bypassed
-API Gateway and sign-in, and the signature was checked on upload. The bench pressed Button 1 through the console: 1.5.0
-waits for it, and firmware from 1.7.2 on does not.
+**Updates have finished on 1.7.0, 1.7.1 and 1.7.2, one failed the same way twice, and the regression has not run.**
+All on 2026-11-01, on the bootloader that holds the pin:
+
+| Time | Update | Deployed through | On a computer's USB? | Result |
+| --- | --- | --- | --- | --- |
+| 12:15 | 1.5.0 to 1.7.0 | `scripts/ota.sh`, invoking the console's API function directly | Yes | `SUCCEEDED`, 188 s after the button |
+| 14:32 | 1.7.0 to 1.7.1 | The website, signed in, with Button 1 pressed by a person | Yes | `SUCCEEDED`, 188 s from the job starting |
+| 16:01 | 1.7.1 to 1.7.2 | The website, signed in | **No** | `FAILED`, `not_installed`; the board went back to 1.7.1 by itself |
+| 16:07 | 1.7.1 to 1.7.2, the same file | The website, signed in | **No** | `FAILED`, `not_installed`; the same again |
+| 16:15 | 1.7.1 to 1.7.2, the same file | The bench, with a job made directly | Yes | `SUCCEEDED`, 188 s after the button |
+
+**The two failures are not explained.** There was no console on them, so what follows is from timing. Each took
+165 to 183 s from the restart to 1.7.1 running again, which fits a swap of 81 s, a reset within seconds, and a swap
+back, and not a refusal, which is much quicker. `not_installed` only says that the new image never recorded that it
+was on trial, so it died very early. The same file then installed with no error while on USB, so the code alone
+does not explain it. The difference between those runs is the USB connection, and so the board's power. That
+may be the cause, and no test has shown it yet. Either way the board recovered by itself each time, which is the first
+real rollback on this bootloader. It was seen from the cloud only.
+
+The update at 12:15 is the one timed here:
 
 | Step | After the button |
 | --- | --- |
