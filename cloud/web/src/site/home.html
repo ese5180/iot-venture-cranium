@@ -222,7 +222,7 @@
       </div>
       <div class="row">
         <dt>Older firmware</dt>
-        <dd>Over the air, the application refuses a job that is not newer than what it runs, and MCUboot refuses to swap in a lower version. Serial recovery has no such check: see <a href="#status">Known limits</a>.</dd>
+        <dd>Over the air, the application refuses a job that is not newer than what it runs, and MCUboot compares versions before it swaps in an update. A swap back after a failed trial skips that check, and serial recovery has none: see <a href="#status">Known limits</a>.</dd>
       </div>
       <div class="row">
         <dt>A corrupted or incomplete download</dt>
@@ -333,7 +333,7 @@
 
   <section class="sheet status" id="status" aria-labelledby="status-title">
     <div class="status-head">
-      <p class="eyebrow">Where it stands, as of October 2026</p>
+      <p class="eyebrow">Where it stands, as of November 2026</p>
       <h2 class="title" id="status-title">In development, and plain about it.</h2>
     </div>
     <div class="status-columns">
@@ -342,7 +342,7 @@
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5"/><polyline points="8 12.4 11 15.4 16.2 9.4"/></svg>
           Built and tested
         </h3>
-        <p>Over-the-air updates for the nRF7002 DK through AWS IoT, tested on one board. The developer console is built, and those tests did not go through its sign-in.</p>
+        <p>Over-the-air updates for the nRF7002 DK through AWS IoT, tested on one board. The developer console is built, and those tests did not go through its sign-in. A person at the board can also go back to one frozen image with a button, tested on that board with the debug port holding the button.</p>
       </div>
       <div class="state">
         <h3 class="state-title">
@@ -362,12 +362,14 @@
         </h3>
         <ul class="limits">
           <li>The development kit's debug port is open, so MCUboot and its key can be replaced through it. A product build would have to lock it, and there is no such build yet.</li>
-          <li>Serial recovery, which takes an image over the board's serial port, has no version check, no trial and no way back. Any image ever signed with this key can go on that way.</li>
+          <li>Serial recovery, which takes an image over the board's serial port, has no version check and no trial. Any image ever signed with this key can go on that way, and if it is a bad one, only another upload or the frozen image brings the board back.</li>
           <li>MCUboot does not check the network core's image. It is flashed over the debug port, and it has no radio stack and no keys.</li>
           <li>The board's device key is stored encrypted and never leaves the board, but code running in the application could read it and act as that board.</li>
           <li>The board speaks TLS 1.2. TLS 1.3 is not enabled.</li>
           <li>The update image is not encrypted. It contains no secrets.</li>
-          <li>Downgrade protection compares versions. There is no hardware counter.</li>
+          <li>Downgrade protection compares versions. There is no hardware counter, and code running in the application could ask for a swap back to an older signed image.</li>
+          <li>The button gesture for the frozen image has not been done by hand yet, and no power has been cut during a restore.</li>
+          <li>An update over Bluetooth is written as a build option, and it is off. It has not been tried with a phone.</li>
         </ul>
       </div>
     </div>

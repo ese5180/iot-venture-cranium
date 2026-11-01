@@ -307,7 +307,7 @@ test('the page invents nothing: no price, sale, customer, person or address', ()
     assert.doesNotMatch(words, pattern);
   }
   // A year stands only where it dates a status or a measurement, not as a copyright or a claim.
-  const undated = words.replace('as of October 2026', '').replace('On October 31, 2026,', '');
+  const undated = words.replace('as of November 2026', '').replace('On October 31, 2026,', '');
   assert.doesNotMatch(undated, /\b20\d\d\b/);
 });
 
@@ -315,7 +315,7 @@ test('the page does not depend on what is deployed or on the day it is read', ()
   const text = html.replace(/<svg[\s\S]*?<\/svg>/g, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
   // The status is dated, so that it stays true when things change. A date is added by hand
   // on purpose: one written at deployment would claim a check that nobody made.
-  assert.ok(text.includes('Where it stands, as of October 2026'));
+  assert.ok(text.includes('Where it stands, as of November 2026'));
   for (const pattern of [/\btoday\b/i, /\bdeployed\b/i, /\bright now\b/i, /\bcurrently\b/i, /\bat the moment\b/i,
     /\bthese days\b/i, /\bthis build\b/i, /\bwhat works\b/i, /\bearlier firmware\b/i, /\blatest\b/i]) {
     assert.doesNotMatch(text, pattern);
