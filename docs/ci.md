@@ -36,8 +36,8 @@ Tests that skip themselves:
 | `test_golden.py`: `test_the_frozen_key_verifies_the_kept_image_if_there_is_one` | It needs `binaries/cranium-1.3.0-0.signed.bin`, which is not in git | Skipped. The Python job fails if any other test skips |
 | `cloud/web`: `the file on disk, where this checkout has one, holds what it may` | It needs `history.json`, which only a deployment writes | Skipped |
 
-Without `firmware/tests/host/build/console_sim`, `test_board.py` skips 66 of its tests. The Python job
-builds that program first, so on Actions it does not.
+Without `firmware/tests/host/build/console_sim` and `console_sim_fault`, `test_board.py` skips most of
+its tests. The Python job builds both first, so on Actions it does not.
 
 ## What this does not show
 
