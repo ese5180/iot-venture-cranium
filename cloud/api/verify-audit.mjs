@@ -16,7 +16,8 @@
  *   node cloud/api/verify-audit.mjs audit.json digests.json
  *
  * Prints only request ids, never an entry. The exit status is 1 if an entry was changed,
- * is missing or should have a line and has none, and 2 if the files could not be read.
+ * is missing or should have a line and has none, and 2 if the files could not be read or
+ * either of them holds nothing, because then nothing was compared.
  *
  * A request logs one digest, so two different digests for one request id count as a
  * change: otherwise a rewrite with a second line next to it would pass. An entry with no
@@ -118,6 +119,10 @@ function main([auditFile, logFile]) {
   try {
     const items = JSON.parse(readFileSync(auditFile, 'utf8')).Items ?? [];
     const events = JSON.parse(readFileSync(logFile, 'utf8')).events ?? [];
+    if (items.length === 0 || events.length === 0) {
+      process.stderr.write(`error: nothing to compare: ${items.length} entries and ${events.length} log lines\n`);
+      return 2;
+    }
     result = compareAudit(items, events.map((event) => event.message), { logStart: firstLine(events) });
   } catch (error) {
     process.stderr.write(`error: ${error.message}\n`);

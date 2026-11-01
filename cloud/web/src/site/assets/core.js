@@ -1518,6 +1518,15 @@ const FAILURES = {
     text: 'The board restarted, but the bootloader did not start the new image. It turns away an image ' +
       'with a wrong signature or an older version.',
   },
+  trial_lost: {
+    at: 5,
+    title: 'Its trial was cut short',
+    text: 'The board runs this image with nothing left to bring the old one back, because a restore of the ' +
+      'golden image was interrupted right after it began. The image has proved nothing. Repeat the gesture ' +
+      'at the board to finish the restore.',
+    // This one did not keep the firmware it had.
+    replaced: true,
+  },
 };
 
 /**
@@ -1747,7 +1756,7 @@ export function describeExecution(execution, {
     case 'failed': {
       const failure = entryOf(FAILURES, reason);
       if (failure) {
-        return description('bad', 'x-circle', failure.title, `${failure.text}${kept}${since}`,
+        return description('bad', 'x-circle', failure.title, `${failure.text}${failure.replaced ? '' : kept}${since}`,
           steps(failure.at ?? DOWNLOADED,
             failure.at === null ? { stopped: DOWNLOADED, ended: true } : { failed: failure.at, ended: true }),
           again());

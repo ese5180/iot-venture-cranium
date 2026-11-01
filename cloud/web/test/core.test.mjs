@@ -2009,6 +2009,15 @@ test('the time of day is said for today, and with the day for another day', () =
   assert.equal(core.clockTime('not a time', now), '');
 });
 
+test('an image that lost its trial is not said to have kept the old firmware', () => {
+  const description = describe('failed', { reason: 'trial_lost', ranAtEnd: '1.5.1+0' });
+  assert.equal(description.tone, 'bad');
+  assert.equal(description.title, 'Its trial was cut short');
+  assert.doesNotMatch(description.text, /kept running/);
+  assert.match(description.text, /proved nothing/);
+  assert.equal(states(description).indexOf('failed'), 5);
+});
+
 test('a failure is pinned to the step the board names, and only then', () => {
   const failedAt = (reason) => states(describe('failed', { reason })).indexOf('failed');
   assert.equal(failedAt('download_failed'), 2);

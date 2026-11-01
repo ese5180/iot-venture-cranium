@@ -649,4 +649,10 @@ test('verify-audit.mjs says what it found, and its exit status says whether to l
   assert.equal(run([first], [lineOf(first, 1000), lineOf(first, 1001, 'f'.repeat(64))]).status, 1, 'two digests for one request');
   // Nothing in it says who: a request id is all that is printed.
   assert.doesNotMatch(flagged.stdout, /example\.invalid/);
+  // Files that hold nothing compared nothing, which is not a clean result.
+  for (const [items, events] of [[[], []], [[first], []], [[], [lineOf(first, 1000)]]]) {
+    const nothing = run(items, events);
+    assert.equal(nothing.status, 2);
+    assert.match(nothing.stderr, /nothing to compare/);
+  }
 });
