@@ -779,7 +779,10 @@ bool bt_ota_on_button(uint8_t button, bool long_press, bool physical)
 		return true;
 	}
 
-	/* Button 1 still does what it did for a cloud update on offer, however long it is held. */
+	/*
+	 * Button 1 still does what it did for a cloud update on offer, however long it is held. Only
+	 * a build with CONFIG_APP_OTA_REQUIRE_USER_CONSENT has offers.
+	 */
 	if (button != APP_BUTTON_1 || !long_press || ota_state() == OTA_AWAITING_USER) {
 		return false;
 	}

@@ -29,9 +29,10 @@ CONSOLE_HEADERS := $(wildcard $(SRC)/*.h) console_fakes.h
 .PHONY: test clean
 test: $(BUILD)/host_tests $(BUILD)/console_tests $(BUILD)/console_output_tests $(BUILD)/app_tests $(BUILD)/console_sim \
 		$(BUILD)/ui_tests $(BUILD)/golden_policy_tests $(BUILD)/bt_ota_policy_tests \
-		$(BUILD)/bt_ota_tests $(BUILD)/ota_bt_tests $(BUILD)/ota_bt_no_confirm_tests \
+		$(BUILD)/bt_ota_tests $(BUILD)/ota_bt_tests $(BUILD)/ota_bt_no_consent_tests $(BUILD)/ota_bt_no_confirm_tests \
 		$(BUILD)/console_bt_tests $(BUILD)/app_bt_tests $(BUILD)/ui_bt_tests \
 		$(BUILD)/stuck_policy_tests $(BUILD)/join_policy_tests $(BUILD)/console_fault_tests \
+		$(BUILD)/fault_wifi_tests $(BUILD)/fault_wifi_command_tests $(BUILD)/app_fault_tests \
 		$(BUILD)/console_sim_fault
 	./$(BUILD)/host_tests
 	./$(BUILD)/console_tests
@@ -42,6 +43,7 @@ test: $(BUILD)/host_tests $(BUILD)/console_tests $(BUILD)/console_output_tests $
 	./$(BUILD)/bt_ota_policy_tests
 	./$(BUILD)/bt_ota_tests
 	./$(BUILD)/ota_bt_tests
+	./$(BUILD)/ota_bt_no_consent_tests
 	./$(BUILD)/ota_bt_no_confirm_tests
 	./$(BUILD)/console_bt_tests
 	./$(BUILD)/app_bt_tests
@@ -49,6 +51,9 @@ test: $(BUILD)/host_tests $(BUILD)/console_tests $(BUILD)/console_output_tests $
 	./$(BUILD)/stuck_policy_tests
 	./$(BUILD)/join_policy_tests
 	./$(BUILD)/console_fault_tests
+	./$(BUILD)/fault_wifi_tests
+	./$(BUILD)/fault_wifi_command_tests
+	./$(BUILD)/app_fault_tests
 
 $(BUILD)/cJSON.o: $(CJSON_DIR)/cJSON.c
 	@mkdir -p $(BUILD)
@@ -103,12 +108,20 @@ $(BUILD)/bt_ota_tests: test_bt_ota.c $(SRC)/bt_ota.c $(SRC)/bt_ota.h $(SRC)/bt_o
 	$(CC) $(CFLAGS) $(WARNINGS) -o $@ test_bt_ota.c $(SRC)/bt_ota_policy.c $(SRC)/ota_job.c $(SRC)/version.c \
 		$(BUILD)/cJSON.o -lm
 
-# What it adds to ota.c, which is compiled for this and for nothing else here. The second one is
-# a test image that never confirms itself.
+# What it adds to ota.c, which is compiled for this and for nothing else here, and how a job goes
+# through it. The first has CONFIG_APP_OTA_REQUIRE_USER_CONSENT on, and the second has it off, as a
+# build gets it by default, so that a job starts with no button. The third is a test image that never
+# confirms itself.
 $(BUILD)/ota_bt_tests: test_ota_bt.c $(SRC)/ota.c $(SRC)/ota.h $(SRC)/ota_job.c $(SRC)/version.c stubs/host_ota.h \
 		stubs/host_bt.h $(BUILD)/cJSON.o
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(WARNINGS) -o $@ test_ota_bt.c $(SRC)/ota_job.c $(SRC)/version.c $(BUILD)/cJSON.o -lm
+
+$(BUILD)/ota_bt_no_consent_tests: test_ota_bt.c $(SRC)/ota.c $(SRC)/ota.h $(SRC)/ota_job.c $(SRC)/version.c \
+		stubs/host_ota.h stubs/host_bt.h $(BUILD)/cJSON.o
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -DTEST_NO_CONSENT=1 -o $@ test_ota_bt.c $(SRC)/ota_job.c \
+		$(SRC)/version.c $(BUILD)/cJSON.o -lm
 
 $(BUILD)/ota_bt_no_confirm_tests: test_ota_bt.c $(SRC)/ota.c $(SRC)/ota.h $(SRC)/ota_job.c $(SRC)/version.c \
 		stubs/host_ota.h stubs/host_bt.h $(BUILD)/cJSON.o
@@ -128,8 +141,9 @@ $(BUILD)/ui_bt_tests: test_ui.c $(SRC)/ui.c $(SRC)/ui.h $(SRC)/app_events.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(WARNINGS) -DCONFIG_APP_LOG_LEVEL=0 $(BT_DEFINES) -o $@ test_ui.c
 
-# When a board that is stuck gets restarted, and when a join may start. tests/host/mutate_stuck.py
-# and mutate_join.py show that these tests notice when a policy is wrong: `make mutants` runs them.
+# When a board that is stuck gets restarted, and when a join may start. tests/host/mutate_stuck.py,
+# mutate_join.py and mutate_net.py show that these tests notice when a policy, or what net.c tells
+# it, is wrong: `make mutants` runs them.
 # test_app.c has the wiring.
 $(BUILD)/stuck_policy_tests: test_stuck_policy.c $(SRC)/stuck_policy.c $(SRC)/stuck_policy.h
 	@mkdir -p $(BUILD)
@@ -143,12 +157,28 @@ $(BUILD)/join_policy_tests: test_join_policy.c $(SRC)/join_policy.c $(SRC)/join_
 mutants:
 	CC=$(CC) python3 mutate_stuck.py
 	CC=$(CC) python3 mutate_join.py
+	CC=$(CC) python3 mutate_net.py
 
 # The console of the test image that can stop the Wi-Fi chip. Every other build of it answers that
 # the command does not exist, which test_console.c checks.
 FAULT_DEFINES := -DCONFIG_APP_TEST_FAULT_WIFI_DEAD=1
 $(BUILD)/console_fault_tests: test_console.c $(CONSOLE_SOURCES) $(BUILD)/base64.o $(CONSOLE_HEADERS)
 	$(CC) $(CFLAGS) $(WARNINGS) $(CONSOLE_DEFINES) $(FAULT_DEFINES) -o $@ $(filter %.c %.o,$^)
+
+# That image's fault itself, with a time after which it fires by itself and with none, and the main
+# loop that calls it.
+$(BUILD)/fault_wifi_tests: test_fault_wifi.c $(SRC)/fault_wifi.c $(SRC)/fault_wifi.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -DCONFIG_APP_LOG_LEVEL=0 -DCONFIG_APP_TEST_WIFI_DEAD_AFTER_SECONDS=300 -o $@ test_fault_wifi.c
+
+$(BUILD)/fault_wifi_command_tests: test_fault_wifi.c $(SRC)/fault_wifi.c $(SRC)/fault_wifi.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -DCONFIG_APP_LOG_LEVEL=0 -DCONFIG_APP_TEST_WIFI_DEAD_AFTER_SECONDS=0 -o $@ test_fault_wifi.c
+
+$(BUILD)/app_fault_tests: test_app.c $(SRC)/main.c $(SRC)/net.c $(SRC)/stuck.c $(SRC)/stuck_policy.c $(SRC)/join_policy.c \
+		$(CONSOLE_HEADERS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) $(CONSOLE_DEFINES) $(FAULT_DEFINES) -o $@ test_app.c $(SRC)/stuck_policy.c $(SRC)/join_policy.c
 
 # The console on a pseudo-terminal, for firmware/tests/hil/test_board.py. No sanitizers
 # are needed for that, and the tools' tests do not have to run with their runtime.

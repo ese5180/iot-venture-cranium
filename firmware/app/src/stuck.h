@@ -29,4 +29,7 @@ void stuck_on_new_settings(void);
 /* How many restarts in a row it has come to: 0 on a board that is well. See STUCK_COUNT_MAX. */
 uint8_t stuck_count(void);
 
+/* Why it last restarted for being stuck, in the words of the console, or "none". */
+const char *stuck_reason_name(void);
+
 #endif /* STUCK_H_ */

@@ -4,11 +4,13 @@
     python3 firmware/tests/hil/ota_bench.py status
     python3 firmware/tests/hil/ota_bench.py update IMAGE [IMAGE ...]    install one after the other
     python3 firmware/tests/hil/ota_bench.py SCENARIO IMAGE
+    python3 firmware/tests/hil/ota_bench.py SCENARIO IMAGE --cloud-only   no serial port, no probe
 
 Scenarios, each with the outcome it insists on:
 
     decline        Button 2 on an offer: rejected, nothing downloaded
     cancel-offer   the offer is cancelled before any button: board back to idle
+                   These two need an image that makes an offer: see FIRST_WITH_NO_OFFER.
     cancel-stop    cancelled with force in mid-download: nothing installed
     older          a job for a version that is not newer: rejected as not_newer
     corrupt        one flipped byte in the download: failed as digest_mismatch
@@ -23,6 +25,12 @@ Scenarios, each with the outcome it insists on:
                    that says why within the limit, a software reset, back on the cloud, and no
                    revert. Build the image with
                    -Dapp_CONFIG_APP_TEST_FAULT_WIFI_DEAD=y -Dapp_CONFIG_NRF_WIFI_RPU_RECOVERY=n
+    chip-dead-cloud  the same with no cable, always cloud-only. IMAGE is a newer test image that stops
+                   the chip by itself, once per install, 300 s after it is confirmed. It is installed
+                   over the air, then the shadow has to show: heartbeats that stop, a restart by
+                   the timers within their limit, the same image confirmed, and no second time.
+                   Build the image with KIND=wifi-dead-auto, and those options, and
+                   -Dapp_CONFIG_APP_TEST_WIFI_DEAD_AFTER_SECONDS=300
 
 By default a release goes through the deployed console API (--via api): the API function
 is invoked directly as the release manager named by --as, so upload validation, the release
@@ -31,10 +39,25 @@ that need what the console rightly refuses create the job themselves. Their ids 
 "cranium-bench-": the download role only serves jobs named cranium-*, and the console
 lists only its own format, so they stay out of its deployment list.
 
-"Pressing" a button uses the console's BUTTON command, which takes the path of the real
-button. Everything both serial ports print goes to --out, with time stamps. A scenario
-ends with PASS or FAIL, or NOT_RUN if it did not touch the board, and appends one line to
-results.jsonl there. No network name goes into that file: a run's results get quoted.
+Firmware from 1.7.2 on starts an update by itself. Older images, and the frozen golden image above
+all, wait for Button 1. Every scenario handles both: if the board reports awaiting_user the bench
+presses the button and insists that the update then starts, and if it has already started the bench
+carries on. "Pressing" a button uses the console's BUTTON command, which takes the path of the real
+button. With no console, the bench says so and waits for a person to press it.
+
+With no console found, or with --cloud-only, the bench follows the board with AWS credentials through
+the job execution and the device shadow alone: firmware version, confirmed, update state, last
+result, heartbeat age and the stuck count. No serial port and no debug probe are touched. update, older,
+corrupt, bad-signature, faulty and cancel-stop then work, and each says in its result that it had no
+console and no bootloader log. reset-download, reset-swap, chip-dead and recovery cannot, and they
+end as NOT_APPLICABLE. --thing names the board, if the account has more than one.
+
+Everything both serial ports print goes to --out, with time stamps. A scenario ends with PASS or
+FAIL, with NOT_RUN if it did not touch the board, or with NOT_APPLICABLE if what it tests does not
+exist on the image that runs or cannot be done without a console, and appends one line to results.jsonl
+there, with the mode it ran in. No network name goes into that file: a run's results get quoted. The
+exit status is 0 if nothing failed and something passed, 1 if something failed, and 3 if nothing failed
+because nothing was applicable.
 
 A wait for the board gives up early if the driver keeps saying that the Wi-Fi chip has stopped
 answering and the board has not restarted by then: see WifiWatch.
@@ -75,6 +98,26 @@ URL_EXPIRES_SEC = 600
 JOB_TIMEOUT_MIN = 30
 BOOT_SECONDS = 30
 
+# The first firmware built with CONFIG_APP_OTA_REQUIRE_USER_CONSENT off, by default, so that an update
+# starts by itself and there is no offer. Older images have one, the frozen golden image among them.
+FIRST_WITH_NO_OFFER = (1, 7, 2)
+# What a board says once an update is on its way. Before the cloud has agreed it says downloading too.
+UNDER_WAY = ("downloading", "verifying", "rebooting", "testing")
+# How long a press has to get an update going. A person also has to get to the board.
+PRESS_SECONDS = 20
+PERSON_PRESS_SECONDS = 180
+EXIT_NOT_APPLICABLE = 3
+# With no console, what a board counts as is what the console's API makes of it: see
+# cloud/api/src/lib/shadow.mjs. test_board.py checks that these are the same.
+ONLINE_SECONDS = 90
+RESTART_WINDOW_SECONDS = 240
+CLOUD_ONLY_SAYS = "no console and no bootloader log: this rests on the job's status and reason and the shadow only"
+# chip-dead-cloud: when the image fires, in APP_TEST_WIFI_DEAD_AFTER_SECONDS, how much later than that
+# the heartbeats may be seen to stop, and how long a board takes from a restart to the cloud.
+SELF_FIRE_SECONDS = 300
+SELF_FIRE_SLACK_SECONDS = 180
+BACK_ON_CLOUD_SECONDS = 180
+
 # What the driver logs when the Wi-Fi chip stops answering: hal_api_common.c and fmac_api.c in the SDK.
 DRIVER_HANG = re.compile(r"hal_rpu_ready_wait|Timeout waiting to get free cmd buff|RPU is not ready")
 WIFI_ANSWERED = re.compile(r"^\[WIFI\] (connected |failed reason=(?!no answer$|request refused$))")
@@ -94,12 +137,20 @@ DEAD_COMMAND = "TEST_WIFI_DEAD"
 # The firmware's limits, from src/stuck_policy.h. test_board.py checks that these are the same.
 WIFI_SILENT_SECONDS = 120
 NO_CLOUD_SECONDS = 900
+# A request to disconnect, on a supplicant that has stalled: its answer to `disconnect`, the wait for the
+# state, and its answer to `remove_network all`. CONFIG_WIFI_NM_WPA_CTRL_RESP_TIMEOUT_S is 15, and
+# DISCONNECT_TIMEOUT_MS in supp_api.c is 5 s.
+DISCONNECT_REQUEST_SECONDS = 15 + 5 + 15
+# JOIN_QUIET_MS in src/join_policy.h: nothing goes to the stack this soon after the link changed.
+JOIN_QUIET_SECONDS = 5
 # How long a wait goes on while the driver says that the chip has stopped answering. A board with no
-# count and the link gone has restarted by then. Correct firmware can take longer: a count above 0
-# holds the restart back for 5 minutes to 6 hours, no_cloud takes 15 minutes for a chip that hung
-# while associated, and update_stall 10 minutes. So reaching this says that the bench has stopped
-# waiting, and not that the firmware did anything wrong. chip-dead has its own wait, for that reason.
-HANG_PATIENCE_SECONDS = WIFI_SILENT_SECONDS + 30
+# count and the link gone has restarted by then: a WIFI command can be held for its quiet time, then the
+# request to disconnect can take all it can take before the silence starts, and the first line from
+# the driver can come as soon as that request. Correct firmware can take longer: a count above 0 holds
+# the restart back for 5 minutes to 6 hours, no_cloud takes 15 minutes for a chip that hung while
+# associated, and update_stall 10 minutes. So reaching this says that the bench has stopped waiting,
+# and not that the firmware did anything wrong. chip-dead has its own wait, for that reason.
+HANG_PATIENCE_SECONDS = JOIN_QUIET_SECONDS + DISCONNECT_REQUEST_SECONDS + WIFI_SILENT_SECONDS + 30
 # Driver lines further apart than this are not the same hang.
 HANG_QUIET_SECONDS = 15
 # How far the time of a line can be from what it marks. The main loop can be busy with the chip.
@@ -111,7 +162,7 @@ CHIP_DEAD_WAIT_SECONDS = 60 + 60 + NO_CLOUD_SECONDS + BOUND_SLACK_SECONDS
 # The next shadow report follows a moment after the job's final status.
 SHADOW_CATCH_UP_SECONDS = 8
 # What is left of a status in a failure's text. The rest holds the network and the account's names.
-STATUS_SHOWN_IN_ERRORS = ("firmware", "wifi link", "cloud", "update")
+STATUS_SHOWN_IN_ERRORS = ("firmware", "wifi link", "cloud", "update", "heartbeat age")
 NETWORK_NAME_SHOWN = "<network>"
 ACCOUNT_SHOWN = "<account>"
 # What says whose account this is, wherever it comes from: an error from the AWS CLI, a URL.
@@ -135,6 +186,41 @@ class ChipStuck(TestFailed):
 
 class NotRun(Exception):
     """What the scenario needs is not there, and nothing has been done to the board."""
+
+
+class NotApplicable(Exception):
+    """What the scenario tests does not exist on this image, or it cannot be done without a console.
+    That is no pass and no failure, and nothing has been done to the board."""
+
+
+def asks_for_button(firmware: str) -> bool:
+    """Whether firmware of this version holds an update until Button 1 is pressed. What cannot be
+    read counts as asking: the scenario then finds out from the board."""
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", firmware or "")
+    return match is None or tuple(map(int, match.groups())) < FIRST_WITH_NO_OFFER
+
+
+def update_state(status: dict | None) -> str:
+    """The first word of what STATUS says about an update."""
+    return (status or {}).get("update", "").split(" ")[0]
+
+
+def status_from_shadow(thing: str, document: dict, now: float) -> dict:
+    """What a console would say about the board, as far as its shadow can. The keys that are there
+    mean what STATUS's do, and the rest only a shadow has."""
+    reported = document.get("state", {}).get("reported", {})
+    fw, ota, stuck = (reported.get(key) or {} for key in ("fw", "ota", "stuck"))
+    seen = document.get("metadata", {}).get("reported", {}).get("uptime", {}).get("timestamp")
+    state = ota.get("state", "unknown")
+    window = RESTART_WINDOW_SECONDS if state == "rebooting" else ONLINE_SECONDS
+    age = now - seen if isinstance(seen, (int, float)) else None
+    return {"thing name": thing, "firmware": fw.get("version"), "confirmed": fw.get("confirmed"),
+            "cloud": "connected" if age is not None and age < window else "quiet",
+            "update": f"{state} (last: {ota.get('last', 'none')})", "job": ota.get("job"),
+            "progress": ota.get("progress"), "last": ota.get("last"), "error": ota.get("error"),
+            "uptime": reported.get("uptime"), "heartbeat": seen,
+            "heartbeat age": None if age is None else round(age),
+            "stuck count": stuck.get("count"), "stuck reason": stuck.get("reason")}
 
 
 def note(text: str) -> None:
@@ -432,7 +518,21 @@ def image_version(data: bytes) -> str:
     return f"{major}.{minor}.{revision}+{build}"
 
 
+def find_console(forced_off: bool) -> str | None:
+    """The console's port, or None if this run has none."""
+    if forced_off:
+        return None
+    try:
+        return find_console_port()
+    except BoardError as error:
+        note(f"no console: {error} Following the board through the cloud alone")
+        return None
+
+
 class Bench:
+    # Stand-ins for this class get a console unless they ask for none.
+    cloud_only = False
+
     def __init__(self, args):
         self.args = args
         self.outputs = json.loads(OUTPUTS.read_text())
@@ -442,24 +542,43 @@ class Bench:
         self.out = Path(args.out)
         self.out.mkdir(parents=True, exist_ok=True)
         self.boot_lines = collections.deque(maxlen=4000)
-        ports = sorted(p.device for p in list_ports.comports()
-                       if p.vid == 0x1366 and "usbmodem" in p.device.lower())
-        console_device = find_console_port()
-        boot_device = next(p for p in ports if p != console_device)
-        self.boot = LoggedPort(boot_device, self.out / "vcom0-boot.log", self.boot_lines.append)
         self.console_log = []
         self.watch = WifiWatch()
         self.network_names = set()
         self.account_names = account_names_in(OUTPUTS)
         self.chip_stuck = False
-        self.console = BenchConsole(console_device, self.out / "vcom1-app.log", self.on_console_line)
-        self.thing = None
+        self.thing = args.thing
         self.release_manager = None
         self.presign_role = None
+        console_device = find_console(args.cloud_only)
+        self.cloud_only = console_device is None
+        if self.cloud_only:
+            self.boot = None
+            self.console = None
+            self.thing = self.thing or self.only_thing()
+            return
+        ports = sorted(p.device for p in list_ports.comports()
+                       if p.vid == 0x1366 and "usbmodem" in p.device.lower())
+        boot_device = next(p for p in ports if p != console_device)
+        self.boot = LoggedPort(boot_device, self.out / "vcom0-boot.log", self.boot_lines.append)
+        self.console = BenchConsole(console_device, self.out / "vcom1-app.log", self.on_console_line)
 
     def close(self) -> None:
-        self.boot.close()
-        self.console.serial.close()
+        if self.boot is not None:
+            self.boot.close()
+        if self.console is not None:
+            self.console.serial.close()
+
+    def only_thing(self) -> str:
+        """With no console to say which board this is, there has to be just one to choose from."""
+        reply = self.aws.call("iot", "list-things", check=False)
+        if "__error__" in reply:
+            raise TestFailed(f"list-things: {reply['__error__'].strip()[:300]}")
+        things = [thing["thingName"] for thing in reply.get("things", [])
+                  if thing.get("thingName", "").startswith("cranium-")]
+        if len(things) != 1:
+            raise TestFailed(f"{len(things)} boards in this account: name one with --thing")
+        return things[0]
 
     # ---- the board ----------------------------------------------------------------
 
@@ -468,6 +587,11 @@ class Bench:
         self.watch.feed(line)
 
     def status(self) -> dict | None:
+        if self.cloud_only:
+            try:
+                return status_from_shadow(self.thing, self.shadow_document(), time.time())
+            except (TestFailed, ValueError, KeyError):
+                return None
         try:
             status = self.console.status()
         except BoardError:
@@ -510,9 +634,13 @@ class Bench:
         self.thing = status["thing name"]
         return status
 
+    def by_a_person(self) -> bool:
+        return self.cloud_only or self.args.real_button
+
     def press(self, button: int) -> None:
-        if self.args.real_button:
-            note(f"PRESS BUTTON {button} ON THE BOARD NOW")
+        if self.by_a_person():
+            note(f"THE FIRMWARE ON THE BOARD WAITS FOR BUTTON {button}: PRESS IT ON THE BOARD NOW. "
+                 f"Waiting for up to {PERSON_PRESS_SECONDS} s")
             return
         self.console.press(button)
         note(f"pressed Button {button}")
@@ -533,14 +661,17 @@ class Bench:
 
     # ---- the cloud ----------------------------------------------------------------
 
-    def shadow(self) -> dict:
+    def shadow_document(self) -> dict:
         with tempfile.NamedTemporaryFile(suffix=".json") as file:
             result = subprocess.run(self.aws.base + ["iot-data", "get-thing-shadow", "--thing-name",
                                                      self.thing, file.name],
                                     capture_output=True, text=True)
             if result.returncode != 0:
                 raise TestFailed(f"get-thing-shadow: {result.stderr.strip()[:300]}")
-            return json.loads(Path(file.name).read_text())["state"]["reported"]
+            return json.loads(Path(file.name).read_text())
+
+    def shadow(self) -> dict:
+        return self.shadow_document()["state"]["reported"]
 
     def execution(self, job_id: str) -> dict:
         reply = self.aws.call("iot", "describe-job-execution", "--job-id", job_id, "--thing-name",
@@ -685,10 +816,60 @@ class Bench:
         self.put_object(data, sha256)
         return self.bench_job(version, len(data), sha256), version
 
+    def wait_taken_up(self, job_id: str) -> dict:
+        """The board has done something about the job: it offers it, or it has started it. A shadow
+        also says which job, and STATUS has no such line, so only what is there is compared."""
+        return self.wait_status("the board to offer the update or to start it",
+                                lambda s: (update_state(s) == "awaiting_user" or update_state(s) in UNDER_WAY)
+                                and s.get("job", job_id) == job_id, 90, 1)
+
+    def start_update(self, job_id: str) -> float | None:
+        """Get the update going on whichever image runs. Returns when Button 1 was pressed, or None if
+        the image started it by itself. A press that does nothing is a failure here: the console says OK
+        to a press whatever becomes of it."""
+        status = self.wait_taken_up(job_id)
+        if update_state(status) != "awaiting_user":
+            note(f"job {job_id}: the board started it with no button: {status['update']}")
+            return None
+        note(f"job {job_id}: the board offers it: {status['update']}")
+        self.press(1)
+        pressed = time.time()
+        limit = PERSON_PRESS_SECONDS if self.by_a_person() else PRESS_SECONDS
+        try:
+            status = self.wait_status("Button 1 to start the update the board offered",
+                                      lambda s: update_state(s) in UNDER_WAY, limit, 1)
+        except TestFailed as error:
+            if not self.by_a_person():
+                raise
+            # A press that comes later must not install what nobody is watching any more.
+            self.cancel(job_id, False)
+            raise TestFailed(f"nobody pressed Button 1 on the board within {limit} s, so job {job_id} "
+                             f"was cancelled: {error}") from error
+        note(f"the press started it: {status['update']}")
+        return pressed
+
     def wait_offered(self, job_id: str) -> None:
-        status = self.wait_status("the board to offer the update",
-                                  lambda s: s.get("update", "").startswith("awaiting_user"), 90)
+        """For a scenario about the offer itself, which the image should make: see needs_an_offer()."""
+        status = self.wait_taken_up(job_id)
+        if update_state(status) != "awaiting_user":
+            # It would install what it was only meant to offer.
+            self.cancel(job_id, True)
+            raise TestFailed(f"the board started the update with no offer: {status['update']}")
         note(f"board offers the update: {status['update']}")
+
+    def needs_an_offer(self, firmware: str) -> None:
+        """Before any job exists, because an image with no offer would install it."""
+        if asks_for_button(firmware) or self.args.has_offer:
+            return
+        raise NotApplicable(f"the board runs {firmware}, which starts an update by itself, so it makes no "
+                            "offer. This takes firmware older than "
+                            f"{'.'.join(map(str, FIRST_WITH_NO_OFFER))}, or --has-offer on a build with "
+                            "CONFIG_APP_OTA_REQUIRE_USER_CONSENT")
+
+    def needs_a_console(self, why: str) -> None:
+        """Before anything has been done, because the rest of it would show nothing."""
+        if self.cloud_only:
+            raise NotApplicable(f"{why}, and this run has no console")
 
     # ---- scenarios ----------------------------------------------------------------
 
@@ -699,30 +880,29 @@ class Bench:
         start = time.time()
         marks = {}
         job_id, _ = self.offer(data, path.name)
-        self.wait_offered(job_id)
-        marks["offered"] = time.time() - start
-        self.press(1)
-        pressed = time.time()
+        pressed = self.start_update(job_id)
+        began = pressed or start
 
         def follow():
             status = self.status()
-            state = status.get("update", "").split(" ")[0] if status else "restarting"
+            state = update_state(status) if status else "restarting"
             if state not in marks and state != "idle":
-                marks[state] = time.time() - pressed
+                marks[state] = time.time() - began
                 note(f"board: {state} after {marks[state]:.0f} s")
 
         execution = self.wait_job(job_id, 900, follow)
-        marks["total_after_press"] = time.time() - pressed
+        marks["total"] = time.time() - began
         if execution.get("status") != "SUCCEEDED":
             raise TestFailed(f"job ended {execution.get('status')}: {execution.get('statusDetails')}")
         status = self.wait_online()
         if status.get("firmware") != target:
             raise TestFailed(f"board runs {status.get('firmware')}, expected {target}")
         self.expect_confirmed(target)
-        note(f"updated {before.get('firmware')} -> {target} in {marks['total_after_press']:.0f} s "
-             f"after the button")
+        note(f"updated {before.get('firmware')} -> {target} in {marks['total']:.0f} s "
+             f"after {'the button' if pressed else 'the job was created'}")
         return {"from": before.get("firmware"), "to": target, "job": job_id,
                 "sha256": hashlib.sha256(data).hexdigest(),
+                "seconds_from": "the button" if pressed else "the job",
                 "seconds": {k: round(v) for k, v in marks.items()}}
 
     def expect_confirmed(self, target: str) -> None:
@@ -756,10 +936,12 @@ class Bench:
     def decline(self, path: Path) -> dict:
         data = path.read_bytes()
         running = self.wait_online()["firmware"]
+        self.needs_an_offer(running)
         job_id, _ = self.offer(data, path.name)
         self.wait_offered(job_id)
         self.press(2)
-        return self.expect_refusal(job_id, "REJECTED", "declined", running, 60)
+        return self.expect_refusal(job_id, "REJECTED", "declined", running,
+                                   PERSON_PRESS_SECONDS if self.by_a_person() else 60)
 
     def cancel(self, job_id: str, force: bool) -> None:
         if job_id.startswith("cranium-bench-"):
@@ -776,6 +958,7 @@ class Bench:
     def cancel_offer(self, path: Path) -> dict:
         data = path.read_bytes()
         running = self.wait_online()["firmware"]
+        self.needs_an_offer(running)
         job_id, _ = self.offer(data, path.name)
         self.wait_offered(job_id)
         self.cancel(job_id, False)
@@ -789,8 +972,7 @@ class Bench:
         data = path.read_bytes()
         running = self.wait_online()["firmware"]
         job_id, _ = self.offer(data, path.name)
-        self.wait_offered(job_id)
-        self.press(1)
+        self.start_update(job_id)
         self.wait_status("the download to start",
                          lambda s: s.get("update", "").startswith("downloading"), 90, 1)
         time.sleep(6)
@@ -800,9 +982,13 @@ class Bench:
                                   lambda s: s.get("update", "").startswith("idle"), 240, 3)
         if status.get("firmware") != running:
             raise TestFailed(f"firmware changed to {status.get('firmware')}")
+        uptime = status.get("uptime")
         time.sleep(30)
         status = self.wait_online()
-        if status.get("firmware") != running or self.boot_log_has("Starting bootloader", mark):
+        # With no bootloader log, an uptime that went back is what a restart looks like.
+        restarted = (self.boot_log_has("Starting bootloader", mark) if not self.cloud_only
+                     else uptime is not None and status.get("uptime", uptime) < uptime)
+        if status.get("firmware") != running or restarted:
             raise TestFailed("the board restarted or changed firmware after the cancellation")
         return {"job": job_id, "last": status.get("update"), "running": running}
 
@@ -824,8 +1010,7 @@ class Bench:
         damaged = hashlib.sha256(data).hexdigest()
         self.put_object(bytes(data), damaged)
         job_id = self.bench_job(version, len(data), sha256, damaged)
-        self.wait_offered(job_id)
-        self.press(1)
+        self.start_update(job_id)
         return self.expect_refusal(job_id, "FAILED", "digest_mismatch", running, 420)
 
     def bad_signature(self, path: Path) -> dict:
@@ -847,12 +1032,13 @@ class Bench:
             forged = signed.read_bytes()
         sha256 = hashlib.sha256(forged).hexdigest()
         self.put_object(forged, sha256)
-        job_id = self.bench_job(version, len(forged), sha256)
-        self.wait_offered(job_id)
         mark = len(self.boot_lines)
-        self.press(1)
+        job_id = self.bench_job(version, len(forged), sha256)
+        self.start_update(job_id)
         result = self.expect_refusal(job_id, "FAILED", "not_installed", running, 600)
         self.expect_last("failed")
+        if self.cloud_only:
+            return result
         if not self.boot_log_has(r"(?i)not valid|invalid|signature|Image in the secondary", mark):
             raise TestFailed("the boot log does not show the bootloader refusing the image")
         result["bootloader"] = [line for line in list(self.boot_lines)[mark:]
@@ -865,29 +1051,29 @@ class Bench:
         target = image_version(data)
         sha256 = hashlib.sha256(data).hexdigest()
         self.put_object(data, sha256)
-        job_id = self.bench_job(target, len(data), sha256)
-        self.wait_offered(job_id)
         mark = len(self.boot_lines)
         started = time.time()
-        self.press(1)
+        job_id = self.bench_job(target, len(data), sha256)
+        self.start_update(job_id)
         result = self.expect_refusal(job_id, "FAILED", "rolled_back", running, 900)
         self.expect_last("rolled_back")
-        if not self.boot_log_has(r"Swap type: test", mark):
-            raise TestFailed("the boot log shows no trial swap")
-        if not self.boot_log_has(r"Swap type: revert", mark):
-            raise TestFailed("the boot log shows no revert")
+        if not self.cloud_only:
+            if not self.boot_log_has(r"Swap type: test", mark):
+                raise TestFailed("the boot log shows no trial swap")
+            if not self.boot_log_has(r"Swap type: revert", mark):
+                raise TestFailed("the boot log shows no revert")
         result["seconds"] = round(time.time() - started)
         return result
 
     def reset_download(self, path: Path) -> dict:
+        self.needs_a_console("this resets the board through its reset pin, which takes the debug probe")
         data = path.read_bytes()
         running = self.wait_online()["firmware"]
         target = image_version(data)
         sha256 = hashlib.sha256(data).hexdigest()
         self.put_object(data, sha256)
         job_id = self.bench_job(target, len(data), sha256)
-        self.wait_offered(job_id)
-        self.press(1)
+        self.start_update(job_id)
         self.wait_status("the download to start",
                          lambda s: s.get("update", "").startswith("downloading"), 90, 1)
         time.sleep(5)
@@ -895,15 +1081,16 @@ class Bench:
         return self.expect_refusal(job_id, "FAILED", "interrupted", running, 240)
 
     def reset_swap(self, path: Path) -> dict:
+        self.needs_a_console("this watches the bootloader's log for the swap and resets the board through "
+                             "its reset pin, which take the second serial port and the debug probe")
         data = path.read_bytes()
         self.wait_online()
         target = image_version(data)
         sha256 = hashlib.sha256(data).hexdigest()
         self.put_object(data, sha256)
-        job_id = self.bench_job(target, len(data), sha256)
-        self.wait_offered(job_id)
         mark = len(self.boot_lines)
-        self.press(1)
+        job_id = self.bench_job(target, len(data), sha256)
+        self.start_update(job_id)
         deadline = time.time() + 480
         while not self.boot_log_has(r"Swap type: test", mark):
             if time.time() > deadline:
@@ -920,6 +1107,7 @@ class Bench:
         return {"job": job_id, "running": target}
 
     def recovery(self, path: Path) -> dict:
+        self.needs_a_console("this sends an image over the board's serial port")
         target = image_version(path.read_bytes())
         data = path.read_bytes()
         hdr_size = int.from_bytes(data[8:10], "little")
@@ -998,6 +1186,8 @@ class Bench:
         raise TestFailed(f"no line like {pattern.pattern} in {timeout:.0f} s")
 
     def chip_dead(self, path: Path) -> dict:
+        self.needs_a_console("this stops the chip with a console command and watches both serial ports. "
+                             "chip-dead-cloud does this with no cable")
         data = path.read_bytes()
         target = image_version(data)
         trial = self.trial_behind(target, hashlib.sha256(data).hexdigest())
@@ -1047,7 +1237,88 @@ class Bench:
                           "trial_job": trial["result"].get("job")}
 
 
+    # ---- the same with no cable --------------------------------------------------------
+
+    def wait_heartbeats_stop(self, since: float, timeout: float) -> dict:
+        """The last status before they stopped. Going quiet is what is expected, so it is no failure,
+        and a restart with no such gap is: nothing has stopped the chip then."""
+        last = None
+        deadline = since + timeout
+        while time.time() < deadline:
+            status = self.status()
+            if status and status.get("uptime") is not None:
+                if last and status["uptime"] < last["uptime"]:
+                    raise TestFailed(f"the board restarted without going quiet, after {last['uptime']} s "
+                                     "of uptime: that is a watchdog or a crash, and not these timers")
+                last = status
+                if (status.get("heartbeat age") or 0) >= ONLINE_SECONDS:
+                    return status
+            time.sleep(5)
+        raise TestFailed(f"heartbeats went on for {timeout:.0f} s after the confirmation: was this image "
+                         "built with CONFIG_APP_TEST_WIFI_DEAD_AFTER_SECONDS?")
+
+    def wait_back(self, quiet: dict, timeout: float) -> dict:
+        """The first report after the board went quiet, which has to be from a restart."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            status = self.status()
+            if status and status.get("heartbeat") and status["heartbeat"] > quiet["heartbeat"]:
+                if status["uptime"] >= quiet["uptime"]:
+                    raise TestFailed(f"heartbeats came back with no restart, at {status['uptime']} s of "
+                                     "uptime: the chip's power was never stopped, or the fault is not this")
+                return status
+            time.sleep(5)
+        raise TestFailed(f"the board did not come back in {timeout:.0f} s after its last heartbeat")
+
+    def chip_dead_cloud(self, path: Path) -> dict:
+        data = path.read_bytes()
+        target = image_version(data)
+        before = self.wait_online()
+        if before.get("firmware") == target:
+            raise NotRun(f"the board runs {target} already, and this fires once per install: it takes "
+                         "a version that the board does not run yet")
+        installed = self.update(path)
+        confirmed_at = time.time()
+        note(f"{target} was confirmed through a real trial, so a revert would show. It should stop the "
+             f"chip about {SELF_FIRE_SECONDS} s from now")
+
+        quiet = self.wait_heartbeats_stop(confirmed_at, SELF_FIRE_SECONDS + SELF_FIRE_SLACK_SECONDS)
+        note(f"heartbeats have stopped: the last was at {quiet['uptime']} s of uptime, "
+             f"{quiet['heartbeat'] - confirmed_at:.0f} s after the confirmation")
+        back = self.wait_back(quiet, CHIP_DEAD_WAIT_SECONDS + BACK_ON_CLOUD_SECONDS)
+        gap = back["heartbeat"] - quiet["heartbeat"]
+        note(f"it is back after {gap:.0f} s: uptime {back['uptime']} s, firmware {back.get('firmware')}, "
+             f"stuck count {back.get('stuck count')}, reason {back.get('stuck reason')}")
+
+        if back.get("firmware") != target or back.get("confirmed") is not True:
+            raise TestFailed(f"the board runs {back.get('firmware')}, confirmed {back.get('confirmed')}, and "
+                             f"it should run {target}, confirmed: reverted")
+        if back.get("stuck reason") not in ("no_cloud", "wifi_silent") or not back.get("stuck count"):
+            raise TestFailed(f"it restarted, and its report gives reason {back.get('stuck reason')}, count "
+                             f"{back.get('stuck count')}: these timers did not do that, so it was the "
+                             "watchdog or a crash")
+
+        # Once per install: this long again, and it stays up. Its uptime only goes one way.
+        uptime = back["uptime"]
+        deadline = time.time() + SELF_FIRE_SECONDS + SELF_FIRE_SLACK_SECONDS
+        while time.time() < deadline:
+            status = self.status()
+            if status and status.get("uptime") is not None:
+                if status["uptime"] < uptime or status.get("cloud") != "connected":
+                    raise TestFailed(f"it went quiet or restarted again, at {uptime} s of uptime: this is "
+                                     "to fire once per install")
+                uptime = status["uptime"]
+            time.sleep(15)
+
+        return {"from": before.get("firmware"), "to": target, "job": installed.get("job"),
+                "sha256": installed.get("sha256"), "reason": back["stuck reason"],
+                "count": back["stuck count"], "quiet_for_seconds": round(gap),
+                "last_uptime": quiet["uptime"], "uptime_at_return": back["uptime"], "fired_once": True,
+                "firmware": target, "no_revert_means": "an over-the-air trial confirmed this image in this run"}
+
+
 SCENARIOS = {
+    "chip-dead-cloud": Bench.chip_dead_cloud,
     "decline": Bench.decline, "cancel-offer": Bench.cancel_offer, "cancel-stop": Bench.cancel_stop,
     "older": Bench.older, "corrupt": Bench.corrupt, "bad-signature": Bench.bad_signature,
     "faulty": Bench.faulty, "reset-download": Bench.reset_download, "reset-swap": Bench.reset_swap,
@@ -1058,13 +1329,19 @@ SCENARIOS = {
 def run(bench: Bench, name: str, function, path: Path) -> bool:
     note(f"=== {name} {path.name}")
     started = time.time()
-    record = {"scenario": name, "image": path.name, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    record = {"scenario": name, "image": path.name, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+              "mode": "cloud-only" if bench.cloud_only else "console"}
     try:
         record["result"] = function(bench, path)
         record["outcome"] = "PASS"
+        if bench.cloud_only:
+            record["result"]["evidence"] = CLOUD_ONLY_SAYS
     except NotRun as reason:
         record["outcome"] = "NOT_RUN"
         record["error"] = str(reason)
+    except NotApplicable as reason:
+        record["outcome"] = "NOT_APPLICABLE"
+        record["reason"] = str(reason)
     except ChipStuck as error:
         record["outcome"] = "FAIL"
         record["error"] = str(error) + hang_context(bench.status())
@@ -1074,16 +1351,40 @@ def run(bench: Bench, name: str, function, path: Path) -> bool:
         record["outcome"] = "FAIL"
         record["error"] = str(error)
     # What the board or a command said. Not the record's own fields: a short name would ruin them.
-    for key in ("error", "result"):
+    for key in ("error", "reason", "result"):
         if key in record:
             record[key] = bench.safe_for_results(record[key])
     record["duration"] = round(time.time() - started)
     with open(bench.out / "results.jsonl", "a") as file:
         file.write(json.dumps(record) + "\n")
+    said = record.get("error") or record.get("reason")
     note(f"=== {record['outcome']} {name} {path.name} ({record['duration']} s)"
-         + (f": {record['error']}" if "error" in record else ""))
+         + (f": {said}" if said else ""))
     bench.chip_stuck = bool(record.get("chip_stuck"))
+    bench.last_outcome = record["outcome"]
     return record["outcome"] == "PASS"
+
+
+def run_all(bench: Bench, args, function) -> int:
+    """Every image in turn. Returns the exit status: see the top of this file."""
+    failures = 0
+    not_applicable = 0
+    for path in args.images:
+        if run(bench, args.command, function, path):
+            continue
+        if bench.last_outcome == "NOT_APPLICABLE":
+            not_applicable += 1
+            continue
+        failures += 1
+        # The next image would only find the same chip: this is not its fault.
+        if args.stop_on_failure or bench.chip_stuck:
+            break
+    passed = len(args.images) - failures - not_applicable
+    note(f"{passed} of {len(args.images)} passed"
+         + (f", {not_applicable} not applicable" if not_applicable else ""))
+    if failures:
+        return 1
+    return EXIT_NOT_APPLICABLE if not_applicable and not passed else 0
 
 
 def main() -> int:
@@ -1095,8 +1396,15 @@ def main() -> int:
     parser.add_argument("--as", dest="as_user", help="the release manager to act as in the API")
     parser.add_argument("--out", default=str(REPO / "build-hil"), help="where logs and results go")
     parser.add_argument("--real-button", action="store_true",
-                        help="wait for a person to press the button instead of using the "
-                             "console's BUTTON command")
+                        help="if the image that runs asks for the button, wait for a person to press "
+                             "it instead of using the console's BUTTON command")
+    parser.add_argument("--has-offer", action="store_true",
+                        help="the image that runs is 1.7.2 or newer and was built with "
+                             "CONFIG_APP_OTA_REQUIRE_USER_CONSENT, so decline and cancel-offer apply")
+    parser.add_argument("--cloud-only", action="store_true",
+                        help="use no serial port and no probe, even if a console is found: follow the "
+                             "board through the job and the shadow, which is what happens with no console")
+    parser.add_argument("--thing", help="the board's thing name, for when there is no console to ask")
     parser.add_argument("--serial-number", default="001050797470")
     parser.add_argument("--stop-on-failure", action="store_true")
     args = parser.parse_args()
@@ -1105,28 +1413,29 @@ def main() -> int:
         parser.error("--via api acts as a release manager: name one with --as <email>")
     if args.command == "chip-dead" and len(args.images) != 1:
         parser.error("chip-dead takes the one image that runs on the board")
+    if args.command == "chip-dead-cloud":
+        if len(args.images) != 1:
+            parser.error("chip-dead-cloud takes the one image that it installs")
+        args.cloud_only = True
 
     bench = Bench(args)
     try:
         if args.command == "status":
-            bench.wait_online(30)
+            if not bench.cloud_only:
+                bench.wait_online(30)
             status = bench.status()
+            if status is None:
+                print("  the board's shadow could not be read")
+                return 1
             for key, value in status.items():
                 print(f"  {key:<14} {value}")
+            print("  mode          ", "cloud-only" if bench.cloud_only else "console")
             print("  shadow        ", json.dumps(bench.shadow()))
             return 0
         function = Bench.update if args.command == "update" else SCENARIOS[args.command]
         if not args.images:
             parser.error("this command needs an image")
-        failures = 0
-        for path in args.images:
-            if not run(bench, args.command, function, path):
-                failures += 1
-                # The next image would only find the same chip: this is not its fault.
-                if args.stop_on_failure or bench.chip_stuck:
-                    break
-        note(f"{len(args.images) - failures} of {len(args.images)} passed")
-        return 1 if failures else 0
+        return run_all(bench, args, function)
     finally:
         bench.close()
 

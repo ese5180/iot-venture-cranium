@@ -17,6 +17,8 @@ import { request as httpRequest } from 'node:http';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 
+import { deviceFromShadow } from '../api/src/lib/shadow.mjs';
+import { deriveTimeline } from '../api/src/lib/timeline.mjs';
 import { SCENARIOS, UsageError, createPreview, parseArguments } from './preview.mjs';
 
 // The console's script, loaded as the browser loads it (web/test/core.test.mjs says
@@ -938,4 +940,45 @@ test('a live board declines with Button 2, and refuses a version that is not new
     { status: 'REJECTED', phase: 'refused', reason: 'not_newer' });
   assert.deepEqual(pick((await device()).ota, 'state', 'last', 'error'),
     { state: 'idle', last: 'refused', error: 'not_newer' });
+});
+
+test('through a real restart the page keeps saying Restarting, and keeps asking every 3 s', () => {
+  // What a bench measured, from the report that says "rebooting": about 21 s to the reset, 81 s of
+  // swap, and the first report of the new image at about 113 s. The API and the page's own code.
+  const job = 'cranium-1-7-1-b0-20261101T191500Z-0000';
+  const reportedAt = 1_790_000_000;
+  const shadow = {
+    state: { reported: {
+      fw: { version: '1.7.0+0', confirmed: true },
+      ota: { state: 'rebooting', job, progress: 100, last: 'none', error: '' },
+      wifi: { rssi: -50 },
+      uptime: 500,
+    } },
+    metadata: { reported: { uptime: { timestamp: reportedAt } } },
+  };
+  const at = (seconds) => {
+    const now = (reportedAt + seconds) * 1000;
+    const device = deviceFromShadow('cranium-x', shadow, now);
+    const { phase, progress } = deriveTimeline({ status: 'IN_PROGRESS', step: 'rebooting', jobId: job, device });
+    const execution = {
+      thing: 'cranium-x', status: 'IN_PROGRESS', reason: null, phase, progress, online: device.online,
+      startedAt: new Date(now - 200_000).toISOString(), lastUpdatedAt: new Date(now - 100_000).toISOString(),
+      reported: '1.7.0+0', ranAtEnd: null,
+    };
+    return {
+      device,
+      words: core.describeExecution(execution, { board: device, deployment: job, version: '1.7.1+0' }).title,
+      poll: core.pollInterval([core.deviceActivity(device)]),
+    };
+  };
+  for (const seconds of [0, 21, 89, 90, 102, 113, 120, 239]) {
+    const { device, words, poll } = at(seconds);
+    assert.equal(words, 'Restarting', `${seconds} s`);
+    assert.equal(core.isRestarting(device), true, `${seconds} s`);
+    assert.equal(poll, core.POLL_INSTALLING_MS, `${seconds} s`);
+  }
+  // A board that died in this state says so from then on.
+  const { device, words } = at(240);
+  assert.equal(device.online, false);
+  assert.match(words, /^Was restarting into 1\.7\.1\+0 when last seen/);
 });

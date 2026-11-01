@@ -36,7 +36,8 @@ engine.REPLACEMENTS = [
     (r"(?<![\w.])\d+(?![\w.])", None),
     (r"JOIN_(WAIT|DISCONNECT|GAVE_UP|CONNECT)(?=[;\s,)])",
      ["JOIN_WAIT", "JOIN_DISCONNECT", "JOIN_GAVE_UP", "JOIN_CONNECT"]),
-    (r"JOIN_(LEAVE_LIMIT|QUIET)_MS(?=[\s)])", ["JOIN_LEAVE_LIMIT_MS", "JOIN_QUIET_MS"]),
+    (r"JOIN_(LEAVE_LIMIT|QUIET|FLIGHT|HOLD_LIMIT)_MS(?=[\s)])",
+     ["JOIN_LEAVE_LIMIT_MS", "JOIN_QUIET_MS", "JOIN_FLIGHT_MS", "JOIN_HOLD_LIMIT_MS"]),
 ]
 
 # A condition with one of its terms taken out: the term's value, as if it were never there.
@@ -50,8 +51,25 @@ engine.TERMS = [
     (r"view->changed\b", "false"),
     (r"view->now_ms - join->leaving_since_ms < JOIN_LEAVE_LIMIT_MS", "true"),
     (r"view->now_ms - join->leaving_since_ms < JOIN_LEAVE_LIMIT_MS", "false"),
-    (r"view->now_ms - view->changed_at_ms < JOIN_QUIET_MS", "true"),
-    (r"view->now_ms - view->changed_at_ms < JOIN_QUIET_MS", "false"),
+    (r"!view->changed\b", "true"),
+    (r"!view->changed\b", "false"),
+    (r"view->now_ms - view->changed_at_ms >= JOIN_QUIET_MS", "true"),
+    (r"view->now_ms - view->changed_at_ms >= JOIN_QUIET_MS", "false"),
+    (r"view->joining\b", "true"),
+    (r"view->joining\b", "false"),
+    (r"view->now_ms - view->joining_since_ms < JOIN_FLIGHT_MS", "true"),
+    (r"view->now_ms - view->joining_since_ms < JOIN_FLIGHT_MS", "false"),
+    (r"\bjoining\b(?! =)", "true"),
+    (r"\bjoining\b(?! =)", "false"),
+    (r"!join->retry", "true"),
+    (r"!join->retry", "false"),
+    (r"join->retry\b", "true"),
+    (r"join->retry\b", "false"),
+    (r"!join->pending", "true"),
+    (r"!join->held", "true"),
+    (r"!join->held", "false"),
+    (r"view->now_ms - join->held_since_ms < JOIN_HOLD_LIMIT_MS", "true"),
+    (r"view->now_ms - join->held_since_ms < JOIN_HOLD_LIMIT_MS", "false"),
 ]
 
 # A statement on a line of its own, which is left out.

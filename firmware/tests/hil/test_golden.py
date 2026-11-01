@@ -1433,6 +1433,70 @@ class BenchFlowTest(unittest.TestCase):
             bench.g5c()
 
 
+class UpdateFromTheGoldenImageTest(unittest.TestCase):
+    """update_in_progress(), with the cloud and the ports replaced: the start of G15 and G16."""
+
+    def run_it(self, states, after_press=None):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        out = Path(folder.name)
+        outputs = out / "outputs.json"
+        outputs.write_text(json.dumps({"Region": "us-east-1", "FirmwareBucketName": "bucket"}))
+        image = out / "image.bin"
+        image.write_bytes(make_image())
+
+        bench = golden_bench.Bench.__new__(golden_bench.Bench)
+        bench.args = mock.Mock(serial_number="001050797470")
+        bench.out = out
+        bench.boot_lines = []
+        bench.console_lines = []
+        bench.get_golden_running_and_sealed = mock.Mock()
+        board = mock.Mock()
+        script = []
+
+        def status():
+            state = (script.pop(0) if len(script) > 1 else script[0]) if script else "idle"
+            return {"cloud": "connected", "update": state, "firmware": "1.5.0+0", "thing name": "cranium-0000"}
+
+        def press(button):
+            if after_press is not None:
+                script[:] = after_press
+                bench.boot_lines.append("I: Swap type: test")
+
+        board.status.side_effect = status
+        board.press.side_effect = press
+        bench.console = board
+
+        def job(cloud, version, size, sha256, object_name=None):
+            script[:] = states
+            if after_press is None:
+                bench.boot_lines.append("I: Swap type: test")
+            return "cranium-bench-1"
+
+        with mock.patch.object(golden_bench.ota_bench, "OUTPUTS", outputs), \
+                mock.patch.object(golden_bench.CloudJobs, "put_object"), \
+                mock.patch.object(golden_bench.CloudJobs, "bench_job", job), \
+                mock.patch("time.sleep"):
+            result = bench.update_in_progress(image)
+        return board, result
+
+    def test_the_frozen_image_waits_for_the_button(self):
+        board, (cloud, job_id, _, mark) = self.run_it(["awaiting_user"], after_press=["downloading"])
+        board.press.assert_called_once_with(1)
+        self.assertEqual(job_id, "cranium-bench-1")
+        self.assertEqual(mark, 0)
+        self.assertIsInstance(cloud, golden_bench.CloudJobs)
+
+    def test_an_image_that_does_not_ask_gets_no_press(self):
+        board, _ = self.run_it(["downloading"])
+        board.press.assert_not_called()
+
+    def test_a_press_that_does_nothing_fails(self):
+        with mock.patch.object(golden_bench.ota_bench, "PRESS_SECONDS", 0.05), \
+                self.assertRaisesRegex(BenchFailed, "Button 1 to start the update"):
+            self.run_it(["awaiting_user"])
+
+
 class CheckLedTest(unittest.TestCase):
     """Changes as they were read from a board, without a test mode in the bootloader."""
 

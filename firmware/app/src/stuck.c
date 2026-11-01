@@ -54,7 +54,7 @@ static bool has_device_keys(uint32_t now)
  * with a window open, and that holds every timer. So a restart in any of these states installs
  * nothing and leaves the image that runs in charge. If the job is in progress in the cloud by then,
  * settle_interrupted_job() closes it as `interrupted` after the restart, and one that is still
- * queued is offered again.
+ * queued starts again, or is offered again in a build with CONFIG_APP_OTA_REQUIRE_USER_CONSENT.
  */
 static enum stuck_update update_kind(void)
 {
@@ -150,4 +150,9 @@ void stuck_on_new_settings(void)
 uint8_t stuck_count(void)
 {
 	return state.count;
+}
+
+const char *stuck_reason_name(void)
+{
+	return stuck_reason_text(state.reason);
 }

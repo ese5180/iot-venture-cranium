@@ -16,6 +16,10 @@ import sys
 from pathlib import Path
 
 MARKERS = (b"test image: chip power cut", b"TEST_WIFI_DEAD")
+# In an image that fires by itself only. A clean image must not have it either.
+SELF_FIRING_MARKER = b"test image: the chip stops by itself now"
+SELF_FIRING_OPTION = re.compile(r"^CONFIG_APP_TEST_WIFI_DEAD_AFTER_SECONDS=[1-9]\d*$", re.MULTILINE)
+ANY_SELF_FIRING_OPTION = re.compile(r"^CONFIG_APP_TEST_WIFI_DEAD_AFTER_SECONDS=", re.MULTILINE)
 FAULT_OPTION = re.compile(r"^CONFIG_APP_TEST_FAULT_WIFI_DEAD=y$", re.MULTILINE)
 RECOVERY_OPTION = re.compile(r"^CONFIG_NRF_WIFI_RPU_RECOVERY=y$", re.MULTILINE)
 # Without the recovery the driver's Kconfig would leave this at 5, so an event lost in the fault
@@ -32,7 +36,10 @@ def problems_of_clean(config: str, image: bytes) -> list[str]:
     problems = []
     if FAULT_OPTION.search(config):
         problems.append("its configuration has the fault")
-    problems += [f"its image holds {marker.decode()}" for marker in MARKERS if marker in image]
+    if ANY_SELF_FIRING_OPTION.search(config):
+        problems.append("its configuration has the time after which the fault fires by itself")
+    problems += [f"its image holds {marker.decode()}" for marker in (*MARKERS, SELF_FIRING_MARKER)
+                 if marker in image]
     if not RECOVERY_OPTION.search(config):
         problems.append("the driver's recovery is off, which only the fault image should have")
     if not EVENT_QUEUE_OPTION.search(config):
@@ -46,6 +53,10 @@ def problems_of_fault(config: str, image: bytes) -> list[str]:
         problems.append("its configuration does not have the fault")
     problems += [f"its image does not hold {marker.decode()}" for marker in MARKERS
                  if marker not in image]
+    if SELF_FIRING_OPTION.search(config) and SELF_FIRING_MARKER not in image:
+        problems.append("it should fire by itself, and its image does not hold the code for that")
+    if not SELF_FIRING_OPTION.search(config) and SELF_FIRING_MARKER in image:
+        problems.append("it should wait for the command, and its image holds the code that fires by itself")
     if RECOVERY_OPTION.search(config):
         problems.append("the driver's recovery is on, which would power the chip up again")
     if not EVENT_QUEUE_OPTION.search(config):

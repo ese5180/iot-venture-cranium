@@ -16,7 +16,7 @@
  */
 
 import {
-  SESSION_WARNING_S, STEPS, alreadyRuns, busyBoards, canRetryUpload, clockTime, compareVersions, dateAndTime, dayLabel,
+  FIRST_WITH_NO_BUTTON, SESSION_WARNING_S, STEPS, alreadyRuns, asksForButton, busyBoards, canRetryUpload, clockTime, compareVersions, dateAndTime, dayLabel,
   deploymentHref, describeAudit, describeCounts, describeDeployment, describeExecution, describeHistory,
   describeUpdate, deviceActivity, deviceHref, duration, exactBytes, exactTime, failedCheck, fileSize, IMAGE_CHECKS,
   installStanding, isRefusal, isRestarting, isUnderWay, isUnfinished, isUnregistered, nameOf, parseVersion, plainMessage,
@@ -488,7 +488,7 @@ function stats(rows) {
  */
 function boardTiles(devices) {
   const rank = (device) => {
-    if (device.online) return 0;
+    if (isUp(device)) return 0;
     return device.lastSeen ? 1 : 2;
   };
   const looks = ['is-on', 'is-off', 'is-never'];
@@ -833,6 +833,7 @@ function slotsOfExecution(execution, known, target, description, deployment) {
 
   switch (phase) {
     case 'waiting_for_device':
+    case 'starting':
       return flashMap(flashNow, stays, { state: 'Nothing written yet' });
     case 'waiting_for_button':
       return flashMap(flashNow, stays, { state: 'Nothing is written until Button 1 is pressed' });
@@ -1335,9 +1336,11 @@ function gettingStarted(ctx, have) {
     canWrite
       ? step(2, 'Deploy it',
         'Start a deployment on the ', h('a', { href: '#/deployments' }, 'Deployments'),
-        ' page, then press Button 1 on the board to install.')
+        ` page. A board on firmware ${FIRST_WITH_NO_BUTTON} or newer installs it by itself; older firmware ` +
+        'waits for someone to press Button 1 on the board.')
       : step(2, 'Deploy it',
-        'A release manager offers the release to boards; pressing Button 1 on a board installs it.'));
+        `A release manager deploys the release to boards. A board on firmware ${FIRST_WITH_NO_BUTTON} or newer ` +
+        'installs it by itself; older firmware waits for someone to press Button 1 on the board.'));
   return card({ key: 'guide', title: 'Getting started', className: 'guide' }, list);
 }
 
@@ -1348,7 +1351,7 @@ function updateJourney() {
     h('div', { class: 'journey-head' },
       h('p', { class: 'journey-title' }, 'What every update goes through'),
       h('p', { class: 'journey-text' },
-        'Nothing installs itself: a person agrees on the board, the board checks what it received, and ',
+        'Nothing installs until a release manager deploys it. The board then checks what it received, and ',
         'the bootloader goes back to the previous firmware if the new one cannot reconnect.')),
     stepList(preview, { preview: true }));
 }
@@ -2903,8 +2906,9 @@ export function deploymentsView(ctx) {
   return h('div', { class: 'page' },
     pageHead({
       title: 'Deployments',
-      lede: 'A deployment offers one release to a set of boards. ' +
-        'Each board installs it when someone presses its Button 1. ' +
+      lede: 'A deployment sends one release to a set of boards. ' +
+        `A board on firmware ${FIRST_WITH_NO_BUTTON} or newer starts as soon as it sees it, and older firmware ` +
+        'waits for someone to press Button 1 on the board. ' +
         'A job made directly in AWS IoT is not listed here; its board’s page shows it.',
       tools: [freshness(state.deployments, ctx), start],
     }),
@@ -3390,6 +3394,7 @@ function wizardBoard(device, model, now) {
 function wizardReview(model, release, chosen, now) {
   const offline = chosen.filter((device) => !device.online && device.lastSeen).length;
   const never = chosen.filter((device) => !device.online && !device.lastSeen).length;
+  const asking = chosen.filter(asksForButton).length;
   return [
     facts([
       ['Release', mono(model.version, 'fact-strong'),
@@ -3411,14 +3416,18 @@ function wizardReview(model, release, chosen, now) {
     h('div', { class: 'callout', key: 'what' },
       h('p', { class: 'callout-title' }, 'What happens when you deploy'),
       consequences([
-        ['Each board is offered ', mono(model.version),
-          '. Nothing is installed until someone presses Button 1 on that board; Button 2 declines.'],
+        ['Each board gets ', mono(model.version),
+          `. Firmware ${FIRST_WITH_NO_BUTTON} or newer installs it as soon as the board sees it, with nobody at the board.`],
+        asking > 0
+          ? `${plural(asking, 'board runs', 'boards run')} older firmware, which installs nothing until ` +
+            'someone presses Button 1 on the board; Button 2 declines.'
+          : null,
         offline > 0
-          ? `${plural(offline, 'board is', 'boards are')} offline and will see the offer after ` +
-            'reconnecting. The offer stays open until it is cancelled.'
-          : 'The offer stays open until a board acts on it or the deployment is cancelled.',
+          ? `${plural(offline, 'board is', 'boards are')} offline and will see the update after ` +
+            'reconnecting. It stays open until it is cancelled.'
+          : 'It stays open until a board acts on it or the deployment is cancelled.',
         never > 0
-          ? `${plural(never, 'board has', 'boards have')} never connected and will see the offer ` +
+          ? `${plural(never, 'board has', 'boards have')} never connected and will see the update ` +
             `when first connected. ${NEVER_REPORTED_HELP}`
           : null,
         'A board checks the download and its bootloader checks the signature. If the new firmware ' +

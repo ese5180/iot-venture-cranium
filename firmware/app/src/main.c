@@ -22,6 +22,9 @@
 #include "cloud.h"
 #include "console.h"
 #include "device.h"
+#if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
+#include "fault_wifi.h"
+#endif
 #include "identity.h"
 #include "factory.h"
 #include "health.h"
@@ -152,10 +155,12 @@ static void publish_report(void)
 			   "{\"fw\":{\"version\":\"%s\",\"confirmed\":%s},"
 			   "\"ota\":{\"state\":\"%s\",\"job\":%s,\"progress\":%d,"
 			   "\"last\":\"%s\",\"error\":\"%s\"},"
-			   "\"wifi\":{\"rssi\":%d},\"uptime\":%lld}",
+			   "\"wifi\":{\"rssi\":%d},\"stuck\":{\"count\":%u,\"reason\":\"%s\"},"
+			   "\"uptime\":%lld}",
 			   fw_version_running_string(),
 			   ota_state() == OTA_TESTING ? "false" : "true", ota_state_name(), job,
 			   ota_progress(), ota_last_result(), ota_last_error(), net_rssi(),
+			   (unsigned int)stuck_count(), stuck_reason_name(),
 			   k_uptime_get() / MSEC_PER_SEC);
 
 	if (written > 0 && written < (int)sizeof(reported)) {
@@ -186,6 +191,10 @@ static void on_tick(void)
 	}
 
 	ota_on_tick();
+
+#if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
+	fault_wifi_on_tick();
+#endif
 
 #if defined(CONFIG_APP_BT_OTA)
 	bt_ota_on_tick();

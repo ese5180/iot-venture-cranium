@@ -297,13 +297,14 @@ nothing: one failed read must not take it off the network.
 | `tools/board.py` | Talking to the console, for the tools below. It can also read the status of, and press a button on, firmware from before the console, which has a Zephyr shell there, so that an update from it can be followed. |
 | `tools/provision_device.py` | Provision a board, unattended if the Wi-Fi secrets file is unlocked. A board in factory mode gets `INIT` first, with `--id` or else its SoC's identifier. |
 | `tools/recover.py` | Install an image through the bootloader's serial recovery. MCUboot listens for half a second after every reset, and it is not updated over the air, so there is no other way in: `--console` sends `ENTER_BOOTLOADER` and catches that half second, with no debugger. |
-| `tests/hil/ota_bench.py` | Hardware tests of firmware updates, and with `chip-dead` of [what restarts a stuck board](#when-the-board-is-stuck). Its waits, and those of `console_bench.py`, stop about 150 s after the driver starts saying that the Wi-Fi chip has stopped answering, if its lines keep coming and the board has not restarted. That says that the bench stopped waiting, and the result gives the stuck count and the update state: correct firmware can take longer than that. No network name and nothing that names the AWS account goes into their `results.jsonl`. |
+| `tests/hil/ota_bench.py` | Hardware tests of firmware updates, and with `chip-dead` and `chip-dead-cloud` of [what restarts a stuck board](#when-the-board-is-stuck). With no serial port and no probe it follows the board through the job and the shadow alone, as [Tests with no cable](#tests-with-no-cable) says. Its waits, and those of `console_bench.py`, stop about 190 s after the driver starts saying that the Wi-Fi chip has stopped answering, if its lines keep coming and the board has not restarted. That says that the bench stopped waiting, and the result gives the stuck count and the update state: correct firmware can take longer than that. No network name and nothing that names the AWS account goes into their `results.jsonl`. |
 | `tests/hil/console_bench.py` | Hardware tests of this console. `console_bench.py plan` shows what it would do, and which steps erase the board. It runs nothing until told to with `run --no-erase` or `run --erase`. It checks first that it could provision the board again, does so after erasing it, and keeps a note of whatever is not undone yet, so that `console_bench.py restore` can put it right after an interrupted run. |
 | `tools/golden.py` | Freeze the [golden image](#golden-image), record what qualified it, check that the manifest, the bootloader's configuration and the file agree, and send it through serial recovery. |
 | `tests/hil/golden_bench.py` | Hardware tests of the golden image, with no Wi-Fi but for G15 and G16. `golden_bench.py plan` lists them and touches nothing, and `golden_bench.py images` builds the fault images they upload. |
 | `tests/hil/build_image.sh` | Build a signed test image from a scratch copy, for example with `-Dapp_CONFIG_APP_TEST_FAULT_INIT_POWER_LOSS=y`, the image that loses power in the middle of `INIT`. |
 | `tests/hil/fault_check.py` | Check built images, reading files only: those a release could come from have none of `APP_TEST_FAULT_WIFI_DEAD` in their configuration or their bytes, the fault image has all of it, and all of them have the same network event queue. |
 | `tests/host/mutate_join.py` | The same for the order of a join in `src/join_policy.c`, with `tests/host/mutate_stuck.py` as its engine. |
+| `tests/host/mutate_net.py` | The same for the lines of `src/net.c` that tell that policy what the stack has said. |
 | `tests/host/mutate_stuck.py` | Change the policy in `src/stuck_policy.c` in small ways, one at a time, and check that its tests notice each one. It needs a C compiler and no board, and touches no file in the tree. |
 
 ## What the LEDs show
@@ -314,7 +315,8 @@ nothing: one failed read must not take it off the network.
   * slow blink: joining Wi-Fi
   * medium blink: connecting to AWS IoT
   * steady: connected, nothing to do
-  * fast blink: an update is waiting for a button press
+  * fast blink: an update is waiting for a button press, which only firmware before 1.7.2 and a build
+    with `CONFIG_APP_OTA_REQUIRE_USER_CONSENT` do
   * double flash: downloading or checking an update
   * triple flash: a new image is running on trial
 * **LED2** is driven by the network core and keeps blinking whatever the application
@@ -324,14 +326,17 @@ nothing: one failed read must not take it off the network.
 
 ## Buttons
 
-* **Button 1** installs an update that is on offer. **Button 2** declines it.
+* From firmware 1.7.2 on, no button has anything to do with an update over the air: one that a
+  release manager deploys starts as soon as the board sees it, and a press does nothing to it. Firmware
+  before that, the golden image 1.5.0 among it, and a build with `CONFIG_APP_OTA_REQUIRE_USER_CONSENT`
+  wait: there **Button 1** installs an update that is on offer, and **Button 2** declines it.
 * Holding **Button 2** for five seconds and releasing it erases everything provisioned
   onto the board (device ID, Wi-Fi network, cloud settings, device key and certificates)
   and restarts it in factory mode, like `FACTORY_RESET`. It does nothing while an update
   is offered or under way.
 * In a build for [firmware update over Bluetooth](#firmware-update-over-bluetooth), holding
-  **Button 1** for five seconds and letting go opens Bluetooth for two minutes, unless an update is
-  on offer. Then it is what it always was. `BUTTON|1` on the console opens nothing.
+  **Button 1** for five seconds and letting go opens Bluetooth for two minutes, unless the build has
+  offers and an update is on offer. Then it is what it always was. `BUTTON|1` on the console opens nothing.
 * A button that was already down when the application started does nothing when it is let
   go: only a press that was seen counts. So holding Button 2 through a boot, for the
   [golden image](#golden-image) for example, can never turn into that factory reset.
@@ -350,7 +355,7 @@ The measurements named in this table are from the older shell firmware, but for 
 | An update that stops moving | From firmware 1.7.0, 10 minutes with no progress restart the board, with nothing installed: see [When the board is stuck](#when-the-board-is-stuck). The cloud then gets `interrupted`, as above. This has only run on a host. |
 | Faulty code with a valid signature | The new image runs on trial. It must join Wi-Fi and reach AWS IoT within 5 minutes to confirm itself; a 120-second hardware watchdog covers a hang. Without the confirmation the next reset makes MCUboot swap the previous image back, and the board reports the rollback. |
 | Power loss during the swap | MCUboot's swap-using-move continues the swap on the next boot. Measured with a reset through the reset pin, not with a power cut. |
-| Update cancelled after it was offered | The board asks AWS IoT before the download and again before installing. A cancelled job is dropped. A cancel during the download leaves the partial image in the secondary slot, where no swap is requested and the next download overwrites it. A cancel after the download erases the image. |
+| Update cancelled | The board asks AWS IoT before the download and again before installing. A cancelled job is dropped. A cancel during the download leaves the partial image in the secondary slot, where no swap is requested and the next download overwrites it. A cancel after the download erases the image. |
 | No update can reach the board, or no valid image is left | Serial recovery, below. |
 | A bad image, and a person at the board with nothing else | The golden image. The person holds Button 2 through a reset ([the gesture](#the-gesture)). MCUboot checks the copy in external flash for a good signature and for the digest pinned in the bootloader, and copies it to the primary slot. It needs no laptop, Wi-Fi or cloud. Measured on firmware 1.5.0 with the debug port holding the button: restored in 62 to 64 s, gesture included. A person did it from power-off too, in G5e. A damaged copy, or any other signed image, is refused. Nothing starts it by itself, so a bad image on an unattended board stays bad. |
 
@@ -391,14 +396,14 @@ that is wedged. Nothing has been asked of the bootloader in those states. Of a c
 `install_download()` asks for a swap, and it restarts in the same call. The only other code that asks is
 `install_image()` in a Bluetooth build, which runs with a Bluetooth window open, and that holds every timer.
 So nothing gets installed. If the cloud has the job in progress, the board closes it as `interrupted` after
-the restart, and one that is still queued is offered again. `OTA_VERIFYING` is not in the list because it
+the restart, and one that is still queued starts again, or is offered again where a build has offers. `OTA_VERIFYING` is not in the list because it
 starts and ends within one event of the main loop, so no timer ever sees it.
 
 **What stands in the way.** No timer restarts a board in factory mode, with no network stored, or that
 is not provisioned, which here means cloud settings, a device key and a certificate. None does while
 an image is on trial, because the trial's own deadline ends that, or while a Bluetooth window is open,
 which keeps Bluetooth usable on a board whose Wi-Fi is dead. `wifi_silent` and `no_cloud` also stand
-aside unless the update state is idle or an offer is waiting, since every other update state has a
+aside unless the update state is idle or, in a build that has offers, an offer is waiting, since every other update state has a
 limit of its own. A timer that stood aside starts from nothing, so no restart comes the moment something
 ends. The one exception is `no_cloud` past its limit under the back-off, with a link that drops for less
 than 5 minutes: that link has had its time, and the restart comes when it returns. Using the console holds
@@ -430,8 +435,10 @@ never backs off. It restarts about every 30 to 40 minutes, with one write and on
 time, which is 70 to 90 operations a day on TF-M's 8 KB storage for as long as that fault lasts. That is
 counted from the policy and not measured.
 
-A record that is missing, unreadable or makes no sense counts as 0, so it can never hold a restart off. `update_stall` does not use the count, because it needs a job in progress
-and so cannot go round in a loop by itself: it only records its reason. Resets by the watchdog are not
+A record that is missing, unreadable or makes no sense counts as 0, so it can never hold a restart off. `update_stall` does not use the count: it only records its reason. It needs a job under way. A job
+that the cloud agreed to start ends at the next restart, as `interrupted`. One that it never agreed to is still queued and starts
+again by itself, so this comes round every 10 minutes for as long as the cloud goes on listing that job and not
+agreeing. That is the cloud's fault and not the board's, and it has not been seen. Resets by the watchdog are not
 counted. Firmware older than 1.7.0 leaves the record alone, also in a factory reset, and does not read it.
 
 **How it restarts.** On the main loop and nowhere else, never inside a network management callback or a
@@ -456,22 +463,33 @@ the board at its limit, after which the chip answered. From firmware 1.7.1 a joi
 The decisions are in `src/join_policy.c`, and `net_tick()` holds a join from the main loop's tick, so nothing
 waits for it:
 
-1. If the board is associated, as far as the stack has said, or its link is up, it is asked to disconnect, once.
-   Then the join waits for the stack to report that, for up to 10 s. The request itself can take up to 5 s of the
-   main loop, as it always has in `CLEAR_WIFI`: that wait is inside hostap.
-2. A disconnect that has not been reported by then counts as done: the board says `[WIFI] disconnected`, and
+1. Nothing goes to the stack within 5 s of the last change of the link, of the last request to disconnect or to
+   connect, or of the result of a join, good or bad. So the right password waits 5 s after the wrong one has failed.
+2. If the board is associated, as far as the stack has said, or its link is up, it is then asked to disconnect, once.
+   So it is if a join is under way, one that was asked for less than 31 s ago with no result yet, because the
+   supplicant's connect request starts with `remove_network all`. Then the join waits for the stack to report that,
+   for up to 10 s. The request itself normally takes up to 5 s of the main loop, as it always has in `CLEAR_WIFI`: that
+   wait is inside hostap. On a supplicant that has stalled it can take up to 35 s: 15 s for its answer to `disconnect`,
+   the 5 s, and 15 s for its answer to `remove_network all`.
+3. A disconnect that has not been reported by then counts as done: the board says `[WIFI] disconnected`, and
    `wifi_silent` starts from there. If the stack reports it later, that changes nothing.
-3. No connect request goes out within 5 s of the last change of the link, or of the last request to disconnect or
-   to connect. A failed result on a link that was not associated, such as a wrong password, is no change of the link,
-   so the right password goes at once.
-4. A later request replaces one that is held, and does not start the wait over. A join reads what is stored when it
+4. Then the 5 s of the first step again, before the connect request.
+5. A later request replaces one that is held, and does not start the wait over. A join reads what is stored when it
    starts, so it uses the network stored last. If the network is erased in the meantime no join comes, and nothing
-   is said.
+   is said. Each new change does start the wait over, up to 30 s from when the request was first held
+   (`JOIN_HOLD_LIMIT_MS`), because a stack that reports a failed join every few seconds must not keep the right
+   password from ever being tried.
 
-A board that has been quiet joins at once, as the join at boot does. The `[WIFI]` line still comes after the `OK`.
-A join that is held is no answer: `wifi_silent` goes on counting while it is held, and a disconnect that the stack
-reports is no answer either. So the most a hold adds to `wifi_silent` is the 10 s in which the link still counts as
-up. Only a `WIFI` command takes a link that is up down: `net_tick()` does not, and `WIFI` is refused during an update.
+A board that has been quiet joins at once, as the join at boot does, if no join is under way. The `[WIFI]` line still
+comes after the `OK`. A join that is held is no answer: `wifi_silent` goes on counting while it is held, and a
+disconnect that the stack reports is no answer either. So the most a hold adds to `wifi_silent` is the time in which
+the link still counts as up: 5 s of quiet time and the 10 s limit, which is 15 s. If the request itself takes its 35 s,
+the restart comes about 160 s after the `WIFI` command: 5 s, the 35 s, and the 120 s of `wifi_silent`.
+
+Only a `WIFI` command takes a link that is up down, and `WIFI` is refused during an update. `net_tick()` does not. Its
+retry every 30 s starts over a join that has reported nothing without asking it to leave, as it always has, and it
+takes an association that has found no address in 30 s down first. A retry that is held when the link comes up, or gets
+an association, by the supplicant's own reconnect, goes away.
 
 **This has not been shown to fix the hang.** Its cause is not known. This takes away the timing that both hangs had,
 and a run on a board has to show the rest: it has run only on a host, against a fake network stack.
@@ -515,6 +533,39 @@ stops if it is not. Leaving the recovery out would also take the network event q
 the driver's Kconfig sets 16 only along with it, so `prj.conf` names the size for every image. A restart clears
 the fault, because the driver powers the chip up at init.
 `tests/hil/fault_check.py` checks a built image for all of this, with the fault image as its positive control.
+
+### Tests with no cable
+
+The board can stay off USB. With no console found, or with `--cloud-only`, `scripts/ota.sh` and
+`tests/hil/ota_bench.py` use no serial port and no probe, only AWS credentials. They follow the board through the job
+execution and the device shadow: firmware version, confirmed, update state, last result, heartbeat age, and from
+1.7.2 on the stuck count and reason. Where firmware before 1.7.2 asks for Button 1, the bench says so, waits three
+minutes for a person, and then fails, and cancels the job so that a later press installs nothing.
+
+| Command with no cable | What it rests on |
+| --- | --- |
+| `update`, `older`, `corrupt`, `bad-signature`, `faulty`, `cancel-stop` | The job's status and reason, and the shadow. Each says in its result that it had no console and no bootloader log, and each line of `results.jsonl` has the `mode` it ran in. So `faulty` shows that the board reports a rollback and runs the old image, and not that a log said `Swap type: revert`, and `cancel-stop` takes an uptime that went back for a restart. |
+| `chip-dead-cloud` | The same, as below. It needs no flag. |
+| `reset-download`, `reset-swap`, `chip-dead`, `recovery` | Nothing: they end as `NOT_APPLICABLE`, with the reason. They take the reset pin through the probe, the bootloader's log on the second serial port, a console command, or UART. So do the steps of `console_bench.py`, and all of `golden_bench.py`, whose gesture is held from the probe or by a person, and whose checks read the bootloader's log. |
+
+An image for `chip-dead-cloud` stops the chip by itself, so that nothing has to be sent to it:
+
+```sh
+KIND=wifi-dead-auto firmware/tests/hil/build_image.sh 1.7.90 0 build-bench/images/wifi-dead-auto.bin \
+  -Dapp_CONFIG_APP_TEST_FAULT_WIFI_DEAD=y -Dapp_CONFIG_APP_TEST_WIFI_DEAD_AFTER_SECONDS=300 \
+  -Dapp_CONFIG_NRF_WIFI_RPU_RECOVERY=n
+python3 firmware/tests/hil/ota_bench.py chip-dead-cloud build-bench/images/wifi-dead-auto.bin --via direct
+```
+
+It fires 300 s after the image was confirmed, counted while the cloud is connected and no update is under way, and once
+per install: the version it fired on goes into storage first, and a board that cannot write that does not fire at all,
+so that it cannot go round in a loop of these. It does not fire on an image with no trailer, on which no revert could
+show. The next install of the image has another version, and fires again. The bench installs the image through a real
+trial, and the shadow then has to show heartbeats that stop, a restart within `no_cloud`'s or `wifi_silent`'s limit (the
+uptime starts again), the board back with the same image confirmed, a reason of `no_cloud` or `wifi_silent` with a count of
+at least 1, and no second time for as long again. A reason of `none` means that the watchdog or a crash did it, and that
+fails. What this cannot show from the cloud is the driver's line and the bootloader's log, so a hotspot that lost its internet
+at that moment would look much the same, which `chip-dead` tells apart. It has run only against a stand-in for AWS.
 
 ## Signature
 
@@ -671,7 +722,7 @@ Nothing that lasts:
   on the serial port. Three wrong tries close it, and it closes by itself anyway.
 - Nothing installs without a second press, and nothing a phone sends can ask for a swap.
 - An image on trial with nobody there reverts, unless it reaches the cloud by itself.
-- A window will not open while a cloud update is on offer or under way, or on a board in factory mode
+- A window will not open while a cloud update is under way, or on offer in a build that has offers, or on a board in factory mode
   or not provisioned yet.
 
 It will not open either while the record of a cloud update is waiting. `ota_init()` works out what
@@ -867,8 +918,8 @@ The bootloader stays as it is. Copy the other images to the phone.
 | 13 | The same, but within 5 minutes hold Button 1, pair, and **Images > Read** | Before 60 s: `[BT] trial: this image has not run for long enough yet`. After that, once `[WIFI] failed reason=network not found` has been seen: `succeeded`, `person`, and it stays after a reset |
 | 14 | The same on a board with Wi-Fi up and AWS IoT out of reach, and again on an access point that gives no DHCP lease | `[BT] trial: there is Wi-Fi, so it has to reach the cloud`, and it reverts |
 | 15 | Install `bt-hang.bin` | The watchdog fires, and the bootloader goes back. `rolled_back` |
-| 16 | Upload a newer image signed with another key, using `imgtool` | Offered, and then the bootloader refuses it: `not_installed` |
-| 17 | Open a window during a cloud update on offer, and the other way round: a job created during a window | Refused, and the job is offered after the window closes |
+| 16 | Upload a newer image signed with another key, using `imgtool` | It has arrived, and then the bootloader refuses it: `not_installed` |
+| 17 | Open a window during a cloud update, and the other way round: a job created during a window | Refused, and the job starts after the window closes |
 | 18 | A full **cloud** update with the same image, with Bluetooth not touched | As `tests/hil/ota_bench.py` shows it, no slower |
 | 19 | An upload with MQTT up, with a download of something else going on nearby | MQTT stays up. If not, see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-on-this-board) |
 
@@ -1099,7 +1150,8 @@ to it again. Going back also brings back the hole in serial recovery's image num
 restore's erase, the image number check and the button fix. `python3 firmware/tests/hil/test_golden.py`
 tests what the tool refuses and how the bench drives the debug port, and runs the whole bench on a
 stand-in for the board. `python3 firmware/tests/hil/golden_bench.py` runs the rest on a board, with no
-Wi-Fi but for G15 and G16: see `golden_bench.py plan`. By default it needs nobody. It holds the button
+Wi-Fi but for G15 and G16: see `golden_bench.py plan`. It takes the serial ports and the debug probe, so
+it cannot run on a board that stays off USB. By default it needs nobody. It holds the button
 from the debug port, by driving P1.09 low once the bootloader has configured the pin, and the bootloader
 has no test code for this.
 

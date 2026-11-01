@@ -56,32 +56,44 @@ test('a queued board waits for the device or for the button', () => {
   assert.equal(queued(board({ state: 'idle', job: JOB })).phase, 'waiting_for_device');
 });
 
-test('a board that says it has started stays at the button until AWS says so too', () => {
+test('a board that says it has started is starting until AWS says so too, and is not at a button', () => {
   const queued = (device) => phase({ status: 'QUEUED', device });
-  // The firmware reports "downloading" as soon as Button 1 is pressed, a moment before
-  // AWS has accepted the start. The execution, not the shadow, says whether the update
-  // has started: the phase stays where it was and does not fall back.
+  // The firmware reports "downloading" a moment before AWS has accepted the start: as soon as
+  // it sees the job from 1.7.2 on, and after Button 1 before that. The execution, not the
+  // shadow, says whether the update has started, so that is no download yet, and the phase
+  // does not fall back to the board not having picked it up.
   assert.deepEqual(queued(board({ state: 'downloading', job: JOB, progress: 0 })),
-    { phase: 'waiting_for_button', progress: null });
+    { phase: 'starting', progress: null });
   assert.deepEqual(queued(board({ state: 'downloading', job: JOB, progress: 50 })),
-    { phase: 'waiting_for_button', progress: null });
+    { phase: 'starting', progress: null });
   // The same for anything else a board may claim about a deployment it holds.
   for (const state of ['verifying', 'rebooting', 'testing']) {
-    assert.deepEqual(queued(board({ state, job: JOB, progress: 100 })), { phase: 'waiting_for_button', progress: null }, state);
+    assert.deepEqual(queued(board({ state, job: JOB, progress: 100 })), { phase: 'starting', progress: null }, state);
   }
+  // Only awaiting_user is a board at its button. A state nobody knows claims neither.
+  assert.equal(queued({ ...board(), ota: { state: 'something_new', job: JOB } }).phase, 'waiting_for_device');
   // Not for another deployment, and not while the board is offline.
   assert.equal(queued(board({ state: 'downloading', job: OTHER, progress: 50 })).phase, 'waiting_for_device');
   assert.equal(queued(board({ online: false, state: 'downloading', job: JOB })).phase, 'waiting_for_device');
 
-  // Seen as a board goes through it, the phase only moves forward.
-  const walk = [
+  // Seen as a board that asks goes through it, the phase only moves forward.
+  const asking = [
     ['QUEUED', board({ state: 'idle' })],
     ['QUEUED', board({ state: 'awaiting_user', job: JOB })],
     ['QUEUED', board({ state: 'downloading', job: JOB })],
     ['IN_PROGRESS', board({ state: 'downloading', job: JOB, progress: 10 })],
   ];
-  assert.deepEqual(walk.map(([status, device]) => phase({ status, step: 'downloading', device }).phase),
-    ['waiting_for_device', 'waiting_for_button', 'waiting_for_button', 'downloading']);
+  assert.deepEqual(asking.map(([status, device]) => phase({ status, step: 'downloading', device }).phase),
+    ['waiting_for_device', 'waiting_for_button', 'starting', 'downloading']);
+
+  // And one that does not ask never comes to a button.
+  const notAsking = [
+    ['QUEUED', board({ state: 'idle' })],
+    ['QUEUED', board({ state: 'downloading', job: JOB })],
+    ['IN_PROGRESS', board({ state: 'downloading', job: JOB, progress: 10 })],
+  ];
+  assert.deepEqual(notAsking.map(([status, device]) => phase({ status, step: 'downloading', device }).phase),
+    ['waiting_for_device', 'starting', 'downloading']);
 });
 
 test('a running update shows the live step and progress from the shadow', () => {

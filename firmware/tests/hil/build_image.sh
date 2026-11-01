@@ -7,17 +7,19 @@
 #   firmware/tests/hil/build_image.sh 1.1.2 0 build-bench/images/1.1.2+0.bin
 #   firmware/tests/hil/build_image.sh 1.1.9 0 build-bench/images/hang.bin -Dapp_CONFIG_APP_TEST_FAULT_HANG=y
 #
-# Each kind of image keeps its own build directory under build-bench/, named after its
-# fault or the KIND environment variable, so that a rebuild is incremental. Run from an
+# Each kind of image keeps its own build directory under build-bench/, named after the KIND
+# environment variable or else its fault, so that a rebuild is incremental. Run from an
 # nRF Connect SDK environment with ZEPHYR_BASE set. The image is signed with the key in
 # ~/.cranium.
 set -e
 repo=${0:A:h:h:h:h}
 version=$1; tweak=$2; out=${3:A}; shift 3
 kind=${KIND:-normal}
-for arg in "$@"; do
-  case "$arg" in *TEST_FAULT*) kind=${arg#*TEST_FAULT_}; kind=${kind%%=*};; esac
-done
+if [[ -z ${KIND:-} ]]; then
+  for arg in "$@"; do
+    case "$arg" in *TEST_FAULT*) kind=${arg#*TEST_FAULT_}; kind=${kind%%=*};; esac
+  done
+fi
 src=$repo/build-bench/src-$kind
 build=$repo/build-bench/build-$kind
 mkdir -p "$src" "${out:h}"

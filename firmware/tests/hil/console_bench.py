@@ -49,7 +49,7 @@ sys.path.insert(0, str(REPO / "tools"))
 from board import (BoardError, Console, FINAL_LINE, ShellFirmware, crc16_ccitt_false,  # noqa: E402
                    find_console_port, parse_key_values)
 from local import WIFI_SECRETS  # noqa: E402
-from ota_bench import (ACCOUNT_SHOWN, STUCK_RESTART, Aws, ChipStuck, LoggedPort,  # noqa: E402
+from ota_bench import (ACCOUNT_SHOWN, EXIT_NOT_APPLICABLE, STUCK_RESTART, Aws, ChipStuck, LoggedPort,  # noqa: E402
                        TestFailed, WifiWatch, account_names_in, hang_context, image_version,
                        judge_stuck_during_join, note, scrub)
 from provision_device import OUTPUTS, read_wifi_secrets  # noqa: E402
@@ -1337,6 +1337,15 @@ def main() -> int:
 
     if args.command == "run" and args.erase == args.no_erase:
         parser.error("say whether this may erase the board: --erase or --no-erase")
+
+    # A board that stays off USB has no console, and that is no failure of the board or of this.
+    if not args.port:
+        try:
+            find_console_port()
+        except BoardError as error:
+            note(f"=== NOT_APPLICABLE: every step here talks to the board's console, and this machine "
+                 f"has none: {error}")
+            return EXIT_NOT_APPLICABLE
 
     table = STEPS
     if args.only:

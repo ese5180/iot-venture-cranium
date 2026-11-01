@@ -98,7 +98,8 @@ const FORM_BODY = /^application\/x-www-form-urlencoded\b/i;
 const CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 const VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
 
-// The firmware's heartbeat comes every 30 s, and a board counts as online for 90 s after one.
+// The firmware's heartbeat comes every 30 s, and a board counts as online for 90 s after one
+// (240 s if it says that it is restarting).
 const HEARTBEAT_MS = 30_000;
 // A board left to itself (--live): ten percent of the download every two seconds,
 // and twelve seconds for the restart into the new firmware.
@@ -436,8 +437,9 @@ function previewId(what, length) {
 }
 
 /**
- * A board, as far as the console can tell one from the outside. It does what the
- * firmware does (firmware/app/src/ota.c): it reports its state to its shadow on every
+ * A board, as far as the console can tell one from the outside. It does what firmware
+ * before 1.7.2 does, which is what these boards run (firmware/app/src/ota.c with
+ * CONFIG_APP_OTA_REQUIRE_USER_CONSENT on): it reports its state to its shadow on every
  * change, keeps an offered update queued until Button 1 is pressed, and asks AWS IoT
  * before it downloads and again before it installs.
  *

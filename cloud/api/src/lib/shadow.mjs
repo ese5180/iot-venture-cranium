@@ -15,13 +15,23 @@
  *
  * This report is the board's heartbeat: it comes every 30 s, and there is no other message and no
  * last will. A board is online if AWS IoT received its uptime less than 90 s ago, which allows for
- * one late report of a board on 60 s, as the golden image is. That time is set by AWS
+ * one late report of a board on 60 s, as the golden image is, but not for one that is lost: that board
+ * counts as offline from 90 s until its next report. That time is set by AWS
  * (metadata.reported.uptime.timestamp, in epoch seconds), not by the board.
+ *
+ * A board that last said `rebooting` gets 240 s. That is the one state in which it goes quiet on
+ * purpose, and a real restart takes longer than 90 s: from the report, 20 s of settling and a reply
+ * make about 21 s to the reset, the swap takes 81 s, and the first report of the image comes about
+ * 113 s after the report. So a board that dies in this state says Restarting for up to 240 s. The
+ * other states around a swap have no such gap on the way forward. `verifying` is followed by
+ * `rebooting`, and a new image reports as soon as it is on the cloud. A trial that fails goes quiet
+ * too, in `testing`, for the swap back, and offline is what that should look like.
  */
 
 import { parseJobId, strictVersion } from './validate.mjs';
 
 export const ONLINE_WINDOW_MS = 90_000;
+export const RESTART_WINDOW_MS = 240_000;
 
 const OTA_STATES = Object.freeze(
   ['idle', 'awaiting_user', 'downloading', 'verifying', 'rebooting', 'testing']);
@@ -63,11 +73,14 @@ export function deviceFromShadow(thing, shadow, nowMs) {
   const reported = own(own(shadow, 'state'), 'reported');
   if (reported === undefined) return device;
 
+  const ota = own(reported, 'ota');
+  const state = oneOf(own(ota, 'state'), OTA_STATES);
+
   const seenSec = own(own(own(own(shadow, 'metadata'), 'reported'), 'uptime'), 'timestamp');
   if (Number.isInteger(seenSec) && seenSec > 0 && seenSec <= MAX_EPOCH_SEC) {
     const seenMs = seenSec * 1000;
     device.lastSeen = new Date(seenMs).toISOString();
-    device.online = nowMs - seenMs < ONLINE_WINDOW_MS;
+    device.online = nowMs - seenMs < (state === 'rebooting' ? RESTART_WINDOW_MS : ONLINE_WINDOW_MS);
   }
 
   const fw = own(reported, 'fw');
@@ -76,8 +89,6 @@ export function deviceFromShadow(thing, shadow, nowMs) {
     device.fw = { version: version.text, confirmed: own(fw, 'confirmed') === true };
   }
 
-  const ota = own(reported, 'ota');
-  const state = oneOf(own(ota, 'state'), OTA_STATES);
   if (state !== null) {
     const error = own(ota, 'error');
     device.ota = {

@@ -80,7 +80,7 @@ static struct {
 	enum ota_state state;
 	int seconds_in_state;
 
-	/* The job being offered, downloaded or installed. */
+	/* The job being started (or offered), downloaded or installed. */
 	struct ota_job job;
 	/* The cloud has accepted that this device is working on the job. */
 	bool started;
@@ -553,8 +553,9 @@ static void install_download(void)
 }
 
 /*
- * A job that passed every check: offer it. Nothing is sent to the cloud, so the
- * execution stays queued and whoever created the job can still take it back.
+ * A job that passed every check. It starts now, with the download link that just came with
+ * it. Only with CONFIG_APP_OTA_REQUIRE_USER_CONSENT is it offered instead: nothing is sent to
+ * the cloud, so the execution stays queued and whoever created the job can still take it back.
  */
 static void accept_job(const struct ota_job *job)
 {
@@ -570,6 +571,8 @@ static void accept_job(const struct ota_job *job)
 			job->version.build);
 		enter(OTA_AWAITING_USER);
 	} else {
+		LOG_INF("Firmware %u.%u.%u+%u is available: installing it", job->version.major,
+			job->version.minor, job->version.revision, job->version.build);
 		announce_start();
 	}
 }
@@ -624,7 +627,7 @@ static void settle_interrupted_job(const struct ota_job *job)
 	set_last("failed", "interrupted");
 }
 
-/* True if the document still describes the image the person at the device approved. */
+/* True if the document still describes the image that this update started with. */
 static bool same_image(const struct ota_job *a, const struct ota_job *b)
 {
 	return fw_version_compare(&a->version, &b->version) == 0 && a->size == b->size &&
@@ -903,7 +906,15 @@ void ota_on_job_message(enum cloud_job_message kind, const char *payload, size_t
 		on_job(&incoming);
 		break;
 	case OTA_JOB_NONE:
-		on_job_withdrawn();
+		/*
+		 * Not while the start is being announced. With no button in between, the start follows
+		 * the list that named the job at once, and an older list, asked for before the job
+		 * existed, could still be on its way. The answer to the announcement says whether the
+		 * job is gone, and without one the tick asks for the list again.
+		 */
+		if (ota.state != OTA_STARTING) {
+			on_job_withdrawn();
+		}
 		break;
 	case OTA_JOB_MALFORMED:
 		LOG_WRN("Ignoring a jobs message that could not be parsed");

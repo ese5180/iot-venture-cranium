@@ -627,7 +627,8 @@ class WhatPeopleTypeTest(SimulatedBoard, unittest.TestCase):
         deadline, text = time.time() + 5, b""
         while time.time() < deadline:
             text += self.link.read(4096)
-            lines = text.decode().split("\r\n")
+            # The answer to the handshake can come late, as Console.exchange knows.
+            lines = [line for line in text.decode().split("\r\n") if line != board.ECHO_OFF_REPLY]
             finished = [i for i, line in enumerate(lines) if board.FINAL_LINE.match(line)]
             if finished:
                 # Log lines come in between replies, and never inside one.
@@ -2112,6 +2113,12 @@ class StuckRestartVerdictTest(unittest.TestCase):
         self.assertEqual(ota_bench.WIFI_SILENT_SECONDS, limit("STUCK_WIFI_SILENT_SECONDS"))
         self.assertEqual(ota_bench.NO_CLOUD_SECONDS, limit("STUCK_NO_CLOUD_SECONDS"))
         self.assertGreater(ota_bench.HANG_PATIENCE_SECONDS, ota_bench.WIFI_SILENT_SECONDS)
+        # It does not give up just before the restart of a chip that hung in a disconnect request.
+        self.assertGreater(ota_bench.HANG_PATIENCE_SECONDS,
+                           ota_bench.JOIN_QUIET_SECONDS + ota_bench.DISCONNECT_REQUEST_SECONDS
+                           + ota_bench.WIFI_SILENT_SECONDS)
+        policy = (REPO / "firmware/app/src/join_policy.h").read_text()
+        self.assertIn(f"#define JOIN_QUIET_MS       {ota_bench.JOIN_QUIET_SECONDS}000", policy)
         self.assertGreater(ota_bench.CHIP_DEAD_WAIT_SECONDS, ota_bench.NO_CLOUD_SECONDS)
 
 
@@ -2140,6 +2147,24 @@ class FaultIsCompiledOutTest(unittest.TestCase):
         for marker in fault_check.MARKERS:
             self.assertTrue(fault_check.problems_of_fault(self.FAULT,
                                                           self.MARKED.replace(marker, b"")), marker)
+
+    def test_the_fault_that_fires_by_itself(self):
+        marker = fault_check.SELF_FIRING_MARKER
+        firing = self.FAULT + "CONFIG_APP_TEST_WIFI_DEAD_AFTER_SECONDS=300\n"
+        waiting = self.FAULT + "CONFIG_APP_TEST_WIFI_DEAD_AFTER_SECONDS=0\n"
+
+        # A clean image has neither the code nor the setting.
+        self.assertTrue(fault_check.problems_of_clean(self.CLEAN, b"a" + marker + b"b"))
+        self.assertTrue(fault_check.problems_of_clean(self.CLEAN + "CONFIG_APP_TEST_WIFI_DEAD_AFTER_SECONDS=0\n", b"x"))
+
+        # An image that fires has the code. That is the positive control of the check above.
+        self.assertEqual(fault_check.problems_of_fault(firing, self.MARKED + marker), [])
+        self.assertTrue(fault_check.problems_of_fault(firing, self.MARKED))
+
+        # One that waits for the command does not.
+        self.assertEqual(fault_check.problems_of_fault(waiting, self.MARKED), [])
+        self.assertEqual(fault_check.problems_of_fault(self.FAULT, self.MARKED), [])
+        self.assertTrue(fault_check.problems_of_fault(waiting, self.MARKED + marker))
 
     def test_each_kind_of_image_has_the_same_event_queue(self):
         # Without the driver's recovery, its Kconfig would leave this at 5.
@@ -2216,7 +2241,7 @@ class ChipDeadScenarioTest(SimulatedBoard, unittest.TestCase):
 
         class Stand_in(ota_bench.Bench):
             def __init__(self):
-                self.args = SimpleNamespace(real_button=False)
+                self.args = SimpleNamespace(real_button=False, has_offer=False)
                 self.out = out
                 self.boot_lines = []
                 self.console_log = []
@@ -2452,8 +2477,7 @@ class ChipDeadScenarioTest(SimulatedBoard, unittest.TestCase):
         bench = self.failure_after_the_restart()
         (bench.out / "results.jsonl").unlink()
         bench.offer = lambda data, name: ("job-real", ota_bench.image_version(data))
-        bench.wait_offered = lambda job: None
-        bench.press = lambda button: None
+        bench.start_update = lambda job: None
         bench.wait_job = lambda job, timeout, follow=None: {"status": "SUCCEEDED"}
         self.assertTrue(ota_bench.run(bench, "update", ota_bench.Bench.update, self.image))
         record = self.last_record(bench)
@@ -2467,8 +2491,7 @@ class ChipDeadScenarioTest(SimulatedBoard, unittest.TestCase):
         bench = self.failure_after_the_restart()
         (bench.out / "results.jsonl").unlink()
         bench.offer = lambda data, name: ("job-real", ota_bench.image_version(data))
-        bench.wait_offered = lambda job: None
-        bench.press = lambda button: None
+        bench.start_update = lambda job: None
         bench.wait_job = lambda job, timeout, follow=None: {"status": "SUCCEEDED"}
         bench.network_names = {self.digest[4:8], self.firmware[:3]}
         self.assertTrue(ota_bench.run(bench, "update", ota_bench.Bench.update, self.image))
@@ -2588,6 +2611,905 @@ class ChipDeadScenarioTest(SimulatedBoard, unittest.TestCase):
                                 capture_output=True, text=True, timeout=30)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("one image", result.stderr)
+
+
+class FakeClock:
+    """So that waits of minutes take no time."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class StartOfAnUpdateTest(unittest.TestCase):
+    """The bench on an image that waits for Button 1, and on one that starts by itself."""
+
+    def bench_on(self, firmware="1.7.2+0", states=("downloading",), after_press=None, real_button=False,
+                 has_offer=False, execution=None):
+        """A bench whose board says idle until a job exists, and then each of `states` in turn, staying
+        at the last. A press moves it on to `after_press`."""
+        clock = FakeClock()
+        for function in ("time", "sleep"):
+            patcher = mock.patch.object(ota_bench.time, function, getattr(clock, function))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        out = Path(folder.name)
+
+        class Board:
+            """What a console says, and what it was told."""
+
+            def __init__(self):
+                self.script = None
+                self.presses = []
+
+            def status(self):
+                if self.script is None:
+                    state = "idle"
+                elif len(self.script) > 1:
+                    state = self.script.pop(0)
+                else:
+                    state = self.script[0]
+                return {"cloud": "connected", "update": f"{state} (job)", "firmware": firmware,
+                        "thing name": "cranium-0000", "wifi network": "unset"}
+
+            def press(self, button):
+                self.presses.append(button)
+                if after_press is not None:
+                    self.script = list(after_press)
+
+        board = Board()
+
+        class Stand_in(ota_bench.Bench):
+            def __init__(self):
+                self.args = SimpleNamespace(real_button=real_button, has_offer=has_offer, via="direct",
+                                            stop_on_failure=False, command="decline")
+                self.out = out
+                self.boot_lines = []
+                self.console_log = []
+                self.watch = WifiWatch()
+                self.network_names = set()
+                self.account_names = set()
+                self.chip_stuck = False
+                self.console = board
+                self.thing = None
+                self.jobs = []
+                self.cancelled = []
+
+            def job(self, *arguments):
+                self.jobs.append(arguments)
+                board.script = list(states)
+                return f"job-{len(self.jobs)}"
+
+            def offer(self, data, filename):
+                return self.job(filename), ota_bench.image_version(data)
+
+            def bench_job(self, version, size, sha256, object_name=None):
+                return self.job(version)
+
+            def put_object(self, data, name):
+                pass
+
+            def cancel(self, job_id, force):
+                self.cancelled.append((job_id, force))
+                board.script = ["idle"]
+
+            def wait_job(self, job_id, timeout, follow=None):
+                return execution or {"status": "SUCCEEDED"}
+
+            def shadow(self):
+                return {"fw": {"version": "1.8.0+0", "confirmed": True}, "ota": {"last": "rolled_back"}}
+
+            def expect_confirmed(self, target):
+                pass
+
+        bench = Stand_in()
+        bench.board = board
+        image = out / "image.bin"
+        image.write_bytes((0x96f3b83d).to_bytes(4, "little") + b"\0" * 16 + bytes([1, 8])
+                          + (0).to_bytes(2, "little") + (0).to_bytes(4, "little") + b"\0" * 32)
+        return bench, image
+
+    def outcome_of(self, bench, name, function, image):
+        result = ota_bench.run(bench, name, function, image)
+        return result, json.loads((bench.out / "results.jsonl").read_text().splitlines()[-1])
+
+    # ---- start_update ------------------------------------------------------------------
+
+    def test_an_image_that_asks_gets_the_button(self):
+        bench, _ = self.bench_on("1.5.0+0", ["awaiting_user"], after_press=["downloading"])
+        self.assertEqual(bench.board.status()["update"].split()[0], "idle")
+        bench.job("x")
+        self.assertIsNotNone(bench.start_update("job-1"))
+        self.assertEqual(bench.board.presses, [1])
+
+    def test_an_image_that_has_started_gets_no_press(self):
+        for state in ota_bench.UNDER_WAY:
+            bench, _ = self.bench_on("1.7.2+0", [state])
+            bench.job("x")
+            self.assertIsNone(bench.start_update("job-1"), state)
+            self.assertEqual(bench.board.presses, [], state)
+
+    def test_it_goes_by_what_the_board_says_and_not_by_its_version(self):
+        # A build of 1.7.2 with the option on asks, and is pressed.
+        bench, _ = self.bench_on("1.7.2+0", ["awaiting_user"], after_press=["downloading"])
+        bench.job("x")
+        self.assertIsNotNone(bench.start_update("job-1"))
+        self.assertEqual(bench.board.presses, [1])
+
+    def test_a_press_that_does_nothing_is_a_failure(self):
+        # The console said OK to it. The board goes on asking.
+        bench, _ = self.bench_on("1.5.0+0", ["awaiting_user"])
+        bench.job("x")
+        with self.assertRaisesRegex(TestFailedError, "Button 1 to start the update"):
+            bench.start_update("job-1")
+        self.assertEqual(bench.board.presses, [1])
+
+    def test_a_press_after_which_the_offer_has_gone_is_a_failure(self):
+        bench, _ = self.bench_on("1.5.0+0", ["awaiting_user"], after_press=["idle"])
+        bench.job("x")
+        with self.assertRaisesRegex(TestFailedError, "last status .*idle"):
+            bench.start_update("job-1")
+
+    def test_a_press_the_board_refuses_is_a_failure(self):
+        bench, image = self.bench_on("1.5.0+0", ["awaiting_user"])
+
+        def refused(button):
+            raise BoardError("`BUTTON|1` failed: the application is busy")
+
+        bench.board.press = refused
+        result, record = self.outcome_of(bench, "update", ota_bench.Bench.update, image)
+        self.assertFalse(result)
+        self.assertEqual(record["outcome"], "FAIL")
+        self.assertIn("busy", record["error"])
+
+    def test_a_board_that_does_nothing_about_the_job_is_a_failure(self):
+        bench, image = self.bench_on("1.7.2+0", ["idle"])
+        result, record = self.outcome_of(bench, "update", ota_bench.Bench.update, image)
+        self.assertFalse(result)
+        self.assertEqual(record["outcome"], "FAIL")
+        self.assertIn("offer the update or to start it", record["error"])
+        self.assertEqual(bench.board.presses, [])
+
+    def test_a_person_gets_more_time_and_the_console_stays_out_of_it(self):
+        bench, _ = self.bench_on("1.5.0+0", ["awaiting_user"] * 100 + ["downloading"], real_button=True)
+        bench.job("x")
+        self.assertIsNotNone(bench.start_update("job-1"))
+        self.assertEqual(bench.board.presses, [])
+
+        bench, _ = self.bench_on("1.5.0+0", ["awaiting_user"], real_button=True)
+        bench.job("x")
+        started = time.time()
+        with self.assertRaises(TestFailedError):
+            bench.start_update("job-1")
+        self.assertGreaterEqual(time.time() - started, ota_bench.PERSON_PRESS_SECONDS)
+
+    # ---- which image asks -----------------------------------------------------------------
+
+    def test_which_versions_ask(self):
+        for version in ("1.0.0+0", "1.5.0+0", "1.6.9", "1.7.1+99", "0.9.99+1"):
+            self.assertTrue(ota_bench.asks_for_button(version), version)
+        for version in ("1.7.2+0", "1.7.2", "1.7.10+0", "1.8.0+0", "2.0.0+0"):
+            self.assertFalse(ota_bench.asks_for_button(version), version)
+        # Unknown: the scenario finds out from the board. It cannot run into an image that installs
+        # what it should only offer without noticing, as the tests below show.
+        for version in ("", None, "unknown"):
+            self.assertTrue(ota_bench.asks_for_button(version), version)
+
+    def test_the_version_is_the_one_the_source_says(self):
+        version = (REPO / "firmware/app/VERSION").read_text()
+        numbers = tuple(int(re.search(rf"{name} = (\d+)", version).group(1))
+                        for name in ("VERSION_MAJOR", "VERSION_MINOR", "PATCHLEVEL"))
+        self.assertGreaterEqual(numbers, ota_bench.FIRST_WITH_NO_OFFER)
+        kconfig = (REPO / "firmware/app/Kconfig").read_text()
+        self.assertRegex(kconfig, r'config APP_OTA_REQUIRE_USER_CONSENT\n\tbool "[^"]*"\n\tdefault n\n')
+        golden = json.loads((REPO / "firmware/golden.json").read_text())
+        self.assertTrue(ota_bench.asks_for_button(golden["version"]), "the golden image asks")
+
+    # ---- scenarios about the offer ----------------------------------------------------------
+
+    def test_with_no_offer_they_do_not_apply_and_touch_nothing(self):
+        for name, function in (("decline", ota_bench.Bench.decline), ("cancel-offer", ota_bench.Bench.cancel_offer)):
+            bench, image = self.bench_on("1.7.2+0")
+            result, record = self.outcome_of(bench, name, function, image)
+            self.assertFalse(result, "not a pass")
+            self.assertEqual(record["outcome"], "NOT_APPLICABLE", "not a failure either")
+            self.assertIn("1.7.2+0", record["reason"])
+            self.assertIn("makes no offer", record["reason"])
+            self.assertNotIn("error", record)
+            self.assertNotIn("result", record)
+            # No job exists: this image would have installed it.
+            self.assertEqual(bench.jobs, [])
+            self.assertEqual(bench.board.presses, [])
+            self.assertEqual(bench.cancelled, [])
+
+    def test_decline_on_an_image_that_asks(self):
+        bench, image = self.bench_on("1.5.0+0", ["awaiting_user"], after_press=["idle"], execution={
+            "status": "REJECTED", "statusDetails": {"detailsMap": {"reason": "declined"}}})
+        result, record = self.outcome_of(bench, "decline", ota_bench.Bench.decline, image)
+        self.assertTrue(result, record)
+        self.assertEqual(bench.board.presses, [2])
+
+    def test_cancel_offer_on_an_image_that_asks(self):
+        bench, image = self.bench_on("1.7.1+0", ["awaiting_user"])
+        result, record = self.outcome_of(bench, "cancel-offer", ota_bench.Bench.cancel_offer, image)
+        self.assertTrue(result, record)
+        self.assertEqual(bench.cancelled, [("job-1", False)])
+        self.assertEqual(bench.board.presses, [])
+
+    def test_a_build_with_the_option_says_so(self):
+        bench, image = self.bench_on("1.7.2+0", ["awaiting_user"], after_press=["idle"], has_offer=True, execution={
+            "status": "REJECTED", "statusDetails": {"detailsMap": {"reason": "declined"}}})
+        result, record = self.outcome_of(bench, "decline", ota_bench.Bench.decline, image)
+        self.assertTrue(result, record)
+
+    def test_an_image_that_should_ask_and_starts_fails_and_is_stopped(self):
+        for name, function in (("decline", ota_bench.Bench.decline), ("cancel-offer", ota_bench.Bench.cancel_offer)):
+            bench, image = self.bench_on("1.5.0+0", ["downloading"])
+            result, record = self.outcome_of(bench, name, function, image)
+            self.assertFalse(result)
+            self.assertEqual(record["outcome"], "FAIL")
+            self.assertIn("with no offer", record["error"])
+            self.assertEqual(bench.cancelled, [("job-1", True)])
+
+    # ---- the other scenarios, both ways ------------------------------------------------------
+
+    def test_cancel_stop_still_applies_with_no_offer(self):
+        bench, image = self.bench_on("1.7.2+0", ["downloading"])
+        result, record = self.outcome_of(bench, "cancel-stop", ota_bench.Bench.cancel_stop, image)
+        self.assertTrue(result, record)
+        self.assertEqual(bench.board.presses, [])
+        self.assertEqual(bench.cancelled, [("job-1", True)])
+
+    def test_cancel_stop_on_an_image_that_asks(self):
+        bench, image = self.bench_on("1.5.0+0", ["awaiting_user"], after_press=["downloading"])
+        result, record = self.outcome_of(bench, "cancel-stop", ota_bench.Bench.cancel_stop, image)
+        self.assertTrue(result, record)
+        self.assertEqual(bench.board.presses, [1])
+        self.assertEqual(bench.cancelled, [("job-1", True)])
+
+    def test_an_update_says_what_its_times_count_from(self):
+        bench, image = self.bench_on("1.7.2+0", ["downloading", "idle"])
+        bench.board.status_real = bench.board.status
+        bench.board.status = lambda: {**bench.board.status_real(), "firmware": "1.8.0+0"}
+        result, record = self.outcome_of(bench, "update", ota_bench.Bench.update, image)
+        self.assertTrue(result, record)
+        self.assertEqual(record["result"]["seconds_from"], "the job")
+        self.assertEqual(bench.board.presses, [])
+
+        bench, image = self.bench_on("1.5.0+0", ["awaiting_user"], after_press=["downloading", "idle"])
+        bench.board.status_real = bench.board.status
+        bench.board.status = lambda: {**bench.board.status_real(), "firmware": "1.8.0+0"}
+        result, record = self.outcome_of(bench, "update", ota_bench.Bench.update, image)
+        self.assertTrue(result, record)
+        self.assertEqual(record["result"]["seconds_from"], "the button")
+        self.assertEqual(bench.board.presses, [1])
+
+    def test_what_a_scenario_looks_for_in_the_boot_log_is_marked_before_the_job(self):
+        # With no button in between, the mark cannot wait until the board has taken the job up.
+        bench, image = self.bench_on("1.7.2+0", ["downloading", "idle"], execution={
+            "status": "FAILED", "statusDetails": {"detailsMap": {"reason": "rolled_back"}}})
+        real_job = bench.bench_job
+
+        def job(*arguments, **named):
+            job_id = real_job(*arguments, **named)
+            bench.boot_lines += ["Swap type: test", "Swap type: revert"]
+            return job_id
+
+        bench.bench_job = job
+        result, record = self.outcome_of(bench, "faulty", ota_bench.Bench.faulty, image)
+        self.assertTrue(result, record)
+
+    def test_corrupt_and_reset_download_need_no_press(self):
+        bench, image = self.bench_on("1.7.2+0", ["downloading", "idle"], execution={
+            "status": "FAILED", "statusDetails": {"detailsMap": {"reason": "digest_mismatch"}}})
+        result, record = self.outcome_of(bench, "corrupt", ota_bench.Bench.corrupt, image)
+        self.assertTrue(result, record)
+        self.assertEqual(bench.board.presses, [])
+
+        bench, image = self.bench_on("1.7.2+0", ["downloading", "downloading", "idle"], execution={
+            "status": "FAILED", "statusDetails": {"detailsMap": {"reason": "interrupted"}}})
+        bench.reset_board = lambda: None
+        result, record = self.outcome_of(bench, "reset-download", ota_bench.Bench.reset_download, image)
+        self.assertTrue(result, record)
+        self.assertEqual(bench.board.presses, [])
+
+    # ---- the end of a run -------------------------------------------------------------------
+
+    def exit_status(self, outcomes):
+        bench, image = self.bench_on("1.7.2+0")
+        bench.args.images = [image] * len(outcomes)
+        answers = iter(outcomes)
+
+        def fake_run(bench, name, function, path):
+            bench.last_outcome = next(answers)
+            return bench.last_outcome == "PASS"
+
+        with mock.patch.object(ota_bench, "run", fake_run):
+            return ota_bench.run_all(bench, bench.args, None)
+
+    def test_the_exit_status(self):
+        self.assertEqual(self.exit_status(["PASS"]), 0)
+        self.assertEqual(self.exit_status(["FAIL"]), 1)
+        self.assertEqual(self.exit_status(["NOT_RUN"]), 1, "as before")
+        self.assertEqual(self.exit_status(["NOT_APPLICABLE"]), ota_bench.EXIT_NOT_APPLICABLE)
+        self.assertEqual(self.exit_status(["PASS", "NOT_APPLICABLE"]), 0)
+        self.assertEqual(self.exit_status(["FAIL", "NOT_APPLICABLE"]), 1)
+
+    def test_a_run_says_how_many_did_not_apply(self):
+        bench, image = self.bench_on("1.7.2+0")
+        bench.args.images = [image]
+        bench.args.command = "decline"
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            status = ota_bench.run_all(bench, bench.args, ota_bench.Bench.decline)
+        self.assertEqual(status, ota_bench.EXIT_NOT_APPLICABLE)
+        self.assertIn("=== NOT_APPLICABLE decline image.bin", said.getvalue())
+        self.assertIn("0 of 1 passed, 1 not applicable", said.getvalue())
+
+
+class CloudBoard:
+    """A board as AWS knows it: what its shadow says, and what the clock makes of that. `alive` is
+    whether it reports. Things that happen later are given with `at`, in seconds from now."""
+
+    def __init__(self, clock, firmware="1.7.2+0"):
+        self.clock = clock
+        self.firmware = firmware
+        self.confirmed = True
+        self.state = "idle"
+        self.job = None
+        self.last = "none"
+        self.error = ""
+        self.boot = clock.now - 1000
+        self.seen = clock.now
+        self.alive = True
+        self.stuck = {"count": 0, "reason": "none"}
+        self.later = []
+
+    def at(self, seconds, change):
+        self.later.append((self.clock.now + seconds, change))
+        self.later.sort(key=lambda item: item[0])
+
+    def restart(self):
+        self.boot = self.clock.now
+        self.alive = True
+
+    def document(self):
+        while self.later and self.later[0][0] <= self.clock.now:
+            self.later.pop(0)[1](self)
+        if self.alive:
+            self.seen = self.clock.now
+        return {"state": {"reported": {
+                    "fw": {"version": self.firmware, "confirmed": self.confirmed},
+                    "ota": {"state": self.state, "job": self.job, "progress": 0, "last": self.last,
+                            "error": self.error},
+                    "wifi": {"rssi": -50}, "stuck": self.stuck, "uptime": int(self.seen - self.boot)}},
+                "metadata": {"reported": {"uptime": {"timestamp": int(self.seen)}}}}
+
+
+class CloudOnlyTest(unittest.TestCase):
+    """The bench with no serial port and no probe, against a stand-in for AWS."""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        for function in ("time", "sleep"):
+            patcher = mock.patch.object(ota_bench.time, function, getattr(self.clock, function))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.out = Path(folder.name)
+        self.image = self.out / "image.bin"
+        self.image.write_bytes((0x96f3b83d).to_bytes(4, "little") + b"\0" * 4 + (32).to_bytes(2, "little")
+                               + b"\0" * 2 + (8).to_bytes(4, "little") + b"\0" * 4 + bytes([1, 8])
+                               + (0).to_bytes(2, "little") + (0).to_bytes(4, "little") + b"\0" * 40)
+
+    def bench_on(self, firmware="1.7.2+0", on_job=None, execution=None):
+        cloud = CloudBoard(self.clock, firmware)
+        test = self
+
+        class Stand_in(ota_bench.Bench):
+            cloud_only = True
+
+            def __init__(self):
+                self.args = SimpleNamespace(real_button=False, has_offer=False, via="direct",
+                                            stop_on_failure=False, command="update", images=[test.image])
+                self.out = test.out
+                self.boot_lines = []
+                self.console_log = []
+                self.watch = WifiWatch()
+                self.network_names = set()
+                self.account_names = set()
+                self.chip_stuck = False
+                self.console = None
+                self.boot = None
+                self.thing = "cranium-0000"
+                self.jobs = []
+                self.cancelled = []
+                self.cloud = cloud
+
+            def shadow_document(self):
+                return cloud.document()
+
+            def job(self):
+                self.jobs.append(f"job-{len(self.jobs) + 1}")
+                if on_job:
+                    on_job(cloud, self.jobs[-1])
+                return self.jobs[-1]
+
+            def offer(self, data, filename):
+                return self.job(), ota_bench.image_version(data)
+
+            def bench_job(self, version, size, sha256, object_name=None):
+                return self.job()
+
+            def put_object(self, data, name):
+                pass
+
+            def cancel(self, job_id, force):
+                self.cancelled.append((job_id, force))
+                cloud.state = "idle"
+                cloud.job = None
+
+            def wait_job(self, job_id, timeout, follow=None):
+                if follow:
+                    follow()
+                status = execution or {"status": "SUCCEEDED"}
+                # The job ends when the board says so: its status comes from here, and time goes on.
+                self.clock_goes_on(job_id)
+                return status
+
+            def clock_goes_on(self, job_id):
+                test.clock.sleep(60)
+                cloud.document()
+
+        return Stand_in()
+
+    def run_it(self, bench, name):
+        function = ota_bench.Bench.update if name == "update" else ota_bench.SCENARIOS[name]
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            passed = ota_bench.run(bench, name, function, self.image)
+        record = json.loads((self.out / "results.jsonl").read_text().splitlines()[-1])
+        return passed, record, said.getvalue()
+
+    @staticmethod
+    def installs(version="1.8.0+0"):
+        """A board that starts by itself, and is on the new image with its job done."""
+        def start(cloud, job):
+            cloud.state, cloud.job = "downloading", job
+            cloud.at(30, lambda c: (setattr(c, "firmware", version), setattr(c, "state", "idle"),
+                                    setattr(c, "job", None), setattr(c, "last", "succeeded"), c.restart()))
+        return start
+
+    # ---- what the shadow says -----------------------------------------------------------------
+
+    def test_a_status_from_a_shadow(self):
+        cloud = CloudBoard(self.clock)
+        status = ota_bench.status_from_shadow("thing", cloud.document(), self.clock.now)
+        self.assertEqual(status["thing name"], "thing")
+        self.assertEqual(status["firmware"], "1.7.2+0")
+        self.assertIs(status["confirmed"], True)
+        self.assertEqual(ota_bench.update_state(status), "idle")
+        self.assertEqual(status["cloud"], "connected")
+        self.assertEqual(status["heartbeat age"], 0)
+        self.assertEqual(status["uptime"], 1000)
+        self.assertEqual((status["stuck count"], status["stuck reason"]), (0, "none"))
+
+    def test_how_old_a_heartbeat_can_be(self):
+        cloud = CloudBoard(self.clock)
+        document = cloud.document()
+        seen = self.clock.now
+        cloud_at = lambda age: ota_bench.status_from_shadow("t", document, seen + age)["cloud"]  # noqa: E731
+        self.assertEqual(cloud_at(89), "connected")
+        self.assertEqual(cloud_at(90), "quiet")
+        document["state"]["reported"]["ota"]["state"] = "rebooting"
+        self.assertEqual(cloud_at(239), "connected")
+        self.assertEqual(cloud_at(240), "quiet")
+
+    def test_what_the_api_says_about_those_times_is_the_same(self):
+        source = (REPO / "cloud/api/src/lib/shadow.mjs").read_text()
+        self.assertIn(f"ONLINE_WINDOW_MS = {ota_bench.ONLINE_SECONDS}_000;", source)
+        self.assertIn(f"RESTART_WINDOW_MS = {ota_bench.RESTART_WINDOW_SECONDS}_000;", source)
+
+    def test_a_shadow_of_older_firmware_or_of_nothing_much(self):
+        status = ota_bench.status_from_shadow("t", {"state": {"reported": {"fw": {"version": "1.5.0+0"}}}}, 1000)
+        self.assertEqual(status["firmware"], "1.5.0+0")
+        self.assertIsNone(status["stuck count"])
+        self.assertEqual(status["cloud"], "quiet")
+        self.assertIsNone(status["heartbeat age"])
+        self.assertEqual(ota_bench.status_from_shadow("t", {}, 1000)["cloud"], "quiet")
+
+    def test_a_shadow_that_cannot_be_read_is_no_status(self):
+        bench = self.bench_on()
+
+        def refused():
+            raise TestFailedError("get-thing-shadow: no")
+
+        bench.shadow_document = refused
+        self.assertIsNone(bench.status())
+
+    # ---- the commands that work ------------------------------------------------------------------
+
+    def assert_says_what_it_rests_on(self, record):
+        self.assertEqual(record["mode"], "cloud-only")
+        self.assertEqual(record["result"]["evidence"], ota_bench.CLOUD_ONLY_SAYS)
+        self.assertIn("no console and no bootloader log", record["result"]["evidence"])
+
+    def test_update_on_an_image_that_starts_by_itself(self):
+        bench = self.bench_on(on_job=self.installs())
+        passed, record, said = self.run_it(bench, "update")
+        self.assertTrue(passed, record)
+        self.assert_says_what_it_rests_on(record)
+        self.assertEqual(record["result"]["to"], "1.8.0+0")
+        self.assertEqual(record["result"]["seconds_from"], "the job")
+        self.assertNotIn("PRESS", said)
+
+    def test_update_on_an_image_that_asks_waits_for_a_person(self):
+        def asks(cloud, job):
+            cloud.state, cloud.job = "awaiting_user", job
+            cloud.at(50, lambda c: setattr(c, "state", "downloading"))
+            cloud.at(80, lambda c: (setattr(c, "firmware", "1.8.0+0"), setattr(c, "state", "idle"),
+                                    setattr(c, "job", None), c.restart()))
+
+        bench = self.bench_on("1.5.0+0", on_job=asks)
+        passed, record, said = self.run_it(bench, "update")
+        self.assertTrue(passed, record)
+        self.assertIn("THE FIRMWARE ON THE BOARD WAITS FOR BUTTON 1: PRESS IT ON THE BOARD NOW", said)
+        self.assertEqual(record["result"]["seconds_from"], "the button")
+
+    def test_nobody_pressing_is_a_clear_failure_and_nothing_stays_behind(self):
+        def asks(cloud, job):
+            cloud.state, cloud.job = "awaiting_user", job
+
+        bench = self.bench_on("1.5.0+0", on_job=asks)
+        started = self.clock.now
+        passed, record, _ = self.run_it(bench, "update")
+        self.assertFalse(passed)
+        self.assertEqual(record["outcome"], "FAIL")
+        self.assertEqual(record["mode"], "cloud-only")
+        self.assertIn(f"nobody pressed Button 1 on the board within {ota_bench.PERSON_PRESS_SECONDS} s", record["error"])
+        self.assertEqual(bench.cancelled, [("job-1", False)])
+        self.assertGreaterEqual(self.clock.now - started, ota_bench.PERSON_PRESS_SECONDS)
+
+    def test_it_is_not_taken_in_by_a_shadow_about_another_job(self):
+        def other(cloud, job):
+            cloud.state, cloud.job = "awaiting_user", "an-older-job"
+
+        bench = self.bench_on("1.5.0+0", on_job=other)
+        passed, record, said = self.run_it(bench, "update")
+        self.assertFalse(passed)
+        self.assertIn("offer the update or to start it", record["error"])
+        self.assertNotIn("PRESS", said)
+
+    def test_older_from_the_job_and_the_shadow_alone(self):
+        bench = self.bench_on(execution={"status": "REJECTED", "statusDetails": {"detailsMap": {"reason": "not_newer"}}})
+        passed, record, _ = self.run_it(bench, "older")
+        self.assertTrue(passed, record)
+        self.assert_says_what_it_rests_on(record)
+        self.assertEqual(record["result"]["reason"], "not_newer")
+
+    def test_a_wrong_answer_from_the_job_is_a_failure(self):
+        bench = self.bench_on(execution={"status": "SUCCEEDED"})
+        passed, record, _ = self.run_it(bench, "older")
+        self.assertFalse(passed)
+        self.assertIn("expected REJECTED/not_newer", record["error"])
+
+    def started(self, cloud, job):
+        cloud.state, cloud.job = "downloading", job
+
+    def failing_with(self, reason):
+        return {"status": "FAILED", "statusDetails": {"detailsMap": {"reason": reason}}}
+
+    def test_corrupt(self):
+        def start(cloud, job):
+            self.started(cloud, job)
+            cloud.at(20, lambda c: (setattr(c, "state", "idle"), setattr(c, "job", None)))
+
+        bench = self.bench_on(on_job=start, execution=self.failing_with("digest_mismatch"))
+        passed, record, _ = self.run_it(bench, "corrupt")
+        self.assertTrue(passed, record)
+        self.assert_says_what_it_rests_on(record)
+
+    def test_faulty_needs_no_bootloader_log(self):
+        def start(cloud, job):
+            self.started(cloud, job)
+            cloud.at(20, lambda c: (setattr(c, "state", "idle"), setattr(c, "job", None),
+                                    setattr(c, "last", "rolled_back")))
+
+        bench = self.bench_on(on_job=start, execution=self.failing_with("rolled_back"))
+        passed, record, _ = self.run_it(bench, "faulty")
+        self.assertTrue(passed, record)
+        self.assert_says_what_it_rests_on(record)
+        self.assertEqual(record["result"]["reason"], "rolled_back")
+
+    def test_faulty_still_has_to_get_its_last_result_right(self):
+        def start(cloud, job):
+            self.started(cloud, job)
+            cloud.at(20, lambda c: (setattr(c, "state", "idle"), setattr(c, "job", None)))
+
+        bench = self.bench_on(on_job=start, execution=self.failing_with("rolled_back"))
+        passed, record, _ = self.run_it(bench, "faulty")
+        self.assertFalse(passed)
+        self.assertIn("last result", record["error"])
+
+    def test_bad_signature_needs_no_bootloader_log(self):
+        def start(cloud, job):
+            self.started(cloud, job)
+            cloud.at(20, lambda c: (setattr(c, "state", "idle"), setattr(c, "job", None),
+                                    setattr(c, "last", "failed")))
+
+        def imgtool(command, **_):
+            if "sign" in command:
+                Path(command[-1]).write_bytes(b"signed with another key")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        bench = self.bench_on(on_job=start, execution=self.failing_with("not_installed"))
+        with mock.patch.object(ota_bench.subprocess, "run", imgtool), \
+                mock.patch.dict(os.environ, {"ZEPHYR_BASE": "/nowhere/zephyr"}):
+            passed, record, _ = self.run_it(bench, "bad-signature")
+        self.assertTrue(passed, record)
+        self.assert_says_what_it_rests_on(record)
+        self.assertNotIn("bootloader", record["result"])
+
+    def test_cancel_stop(self):
+        bench = self.bench_on(on_job=self.started)
+        passed, record, _ = self.run_it(bench, "cancel-stop")
+        self.assertTrue(passed, record)
+        self.assert_says_what_it_rests_on(record)
+        self.assertEqual(bench.cancelled, [("job-1", True)])
+
+    def test_cancel_stop_sees_a_restart_in_the_uptime(self):
+        bench = self.bench_on(on_job=self.started)
+        real = bench.cancel
+
+        def cancel(job_id, force):
+            real(job_id, force)
+            bench.cloud.at(10, lambda c: c.restart())
+
+        bench.cancel = cancel
+        passed, record, _ = self.run_it(bench, "cancel-stop")
+        self.assertFalse(passed)
+        self.assertIn("restarted", record["error"])
+
+    # ---- the commands that cannot ------------------------------------------------------------------
+
+    def test_what_takes_a_console_does_not_apply(self):
+        for name, says in (("reset-download", "reset pin"), ("reset-swap", "bootloader's log"),
+                           ("chip-dead", "chip-dead-cloud"), ("recovery", "serial port")):
+            bench = self.bench_on(on_job=self.started)
+            passed, record, said = self.run_it(bench, name)
+            self.assertFalse(passed, name)
+            self.assertEqual(record["outcome"], "NOT_APPLICABLE", name)
+            self.assertEqual(record["mode"], "cloud-only", name)
+            self.assertIn(says, record["reason"], name)
+            self.assertIn("this run has no console", record["reason"], name)
+            self.assertEqual(bench.jobs, [], name)
+            self.assertIn(f"=== NOT_APPLICABLE {name}", said)
+
+    def test_the_exit_status_of_what_does_not_apply(self):
+        bench = self.bench_on()
+        bench.args.command = "reset-swap"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ota_bench.run_all(bench, bench.args, ota_bench.Bench.reset_swap),
+                             ota_bench.EXIT_NOT_APPLICABLE)
+
+    def test_a_console_run_says_so_too(self):
+        bench = self.bench_on(on_job=self.installs())
+        type(bench).cloud_only = False
+        bench.console = SimpleNamespace(status=lambda: ota_bench.status_from_shadow("cranium-0000", bench.cloud.document(), self.clock.now),
+                                        press=lambda button: None)
+        passed, record, _ = self.run_it(bench, "update")
+        self.assertTrue(passed, record)
+        self.assertEqual(record["mode"], "console")
+        self.assertNotIn("evidence", record["result"])
+
+    # ---- how it starts ---------------------------------------------------------------------------
+
+    def real_bench(self, *argv, ports=None):
+        outputs = self.out / "outputs.json"
+        outputs.write_text(json.dumps({"Region": "us-east-1", "FirmwareBucketName": "bucket"}))
+        args = SimpleNamespace(out=str(self.out), cloud_only="--cloud-only" in argv, thing=None)
+        if "--thing" in argv:
+            args.thing = argv[argv.index("--thing") + 1]
+        with mock.patch.object(ota_bench, "OUTPUTS", outputs), \
+                mock.patch.object(ota_bench.Aws, "call", self.fake_call):
+            return ota_bench.Bench(args)
+
+    fake_things = ("cranium-0000",)
+
+    def fake_call(self_aws, *args, check=True):  # noqa: N805
+        return {"things": [{"thingName": name} for name in CloudOnlyTest.fake_things] + [{"thingName": "other"}]}
+
+    def test_no_console_found_means_cloud_only(self):
+        with mock.patch.object(ota_bench, "find_console_port", side_effect=BoardError("no J-Link port found.")), \
+                contextlib.redirect_stdout(io.StringIO()) as said:
+            bench = self.real_bench()
+        self.assertTrue(bench.cloud_only)
+        self.assertIsNone(bench.console)
+        self.assertEqual(bench.thing, "cranium-0000")
+        self.assertIn("Following the board through the cloud alone", said.getvalue())
+        bench.close()
+
+    def test_the_flag_does_not_even_look_for_a_port(self):
+        with mock.patch.object(ota_bench, "find_console_port", side_effect=AssertionError("it looked")):
+            bench = self.real_bench("--cloud-only", "--thing", "cranium-named")
+        self.assertTrue(bench.cloud_only)
+        self.assertEqual(bench.thing, "cranium-named")
+
+    def test_which_board_when_nobody_says(self):
+        for things in ((), ("cranium-1", "cranium-2")):
+            with mock.patch.object(CloudOnlyTest, "fake_things", things), \
+                    self.assertRaisesRegex(TestFailedError, "name one with --thing"):
+                self.real_bench("--cloud-only")
+
+    def test_chip_dead_cloud_takes_one_image_and_needs_no_flag(self):
+        seen = {}
+
+        class Fake:
+            cloud_only = True
+
+            def __init__(self, args):
+                seen.update(vars(args))
+
+            update = chip_dead_cloud = ota_bench.Bench.chip_dead_cloud
+
+            def close(self):
+                pass
+
+        with mock.patch.object(ota_bench, "Bench", Fake), \
+                mock.patch.object(ota_bench, "run_all", return_value=0), \
+                mock.patch.object(ota_bench, "SCENARIOS", {**ota_bench.SCENARIOS}), \
+                mock.patch.object(sys, "argv", ["ota_bench.py", "chip-dead-cloud", "x.bin", "--via", "direct"]):
+            self.assertEqual(ota_bench.main(), 0)
+        self.assertTrue(seen["cloud_only"])
+
+    # ---- chip-dead-cloud --------------------------------------------------------------------------
+
+    def fires(self, comes_back_after=1000, firmware="1.8.0+0", reason="no_cloud", count=1, fires_again=False,
+              restarts=True, confirmed=True):
+        """The image installs, is confirmed, and stops the chip 300 s later."""
+        def dies(cloud):
+            cloud.alive = False
+
+            def back(c):
+                c.alive = True
+                c.firmware = firmware
+                c.confirmed = confirmed
+                c.stuck = {"count": count, "reason": reason}
+                if restarts:
+                    c.restart()
+                if fires_again:
+                    c.at(300, dies)
+
+            if comes_back_after is not None:
+                cloud.at(comes_back_after, back)
+
+        def start(cloud, job):
+            cloud.state, cloud.job = "downloading", job
+
+            def installed(c):
+                c.firmware, c.state, c.job, c.last = "1.8.0+0", "idle", None, "succeeded"
+                c.restart()
+                c.at(ota_bench.SELF_FIRE_SECONDS, dies)
+
+            cloud.at(30, installed)
+
+        return start
+
+    def test_chip_dead_cloud_from_start_to_end(self):
+        bench = self.bench_on(on_job=self.fires())
+        passed, record, said = self.run_it(bench, "chip-dead-cloud")
+        self.assertTrue(passed, record)
+        self.assert_says_what_it_rests_on(record)
+        result = record["result"]
+        self.assertEqual(result["to"], "1.8.0+0")
+        self.assertEqual(result["reason"], "no_cloud")
+        self.assertEqual(result["count"], 1)
+        self.assertTrue(result["fired_once"])
+        self.assertGreaterEqual(result["quiet_for_seconds"], 900)
+        self.assertLess(result["uptime_at_return"], result["last_uptime"])
+        self.assertEqual(result["firmware"], "1.8.0+0")
+        self.assertIn("heartbeats have stopped", said)
+
+    def test_chip_dead_cloud_passes_with_wifi_silent_as_well(self):
+        passed, record, _ = self.run_it(self.bench_on(on_job=self.fires(comes_back_after=150, reason="wifi_silent")),
+                                        "chip-dead-cloud")
+        self.assertTrue(passed, record)
+        self.assertEqual(record["result"]["reason"], "wifi_silent")
+
+    def test_chip_dead_cloud_fails(self):
+        for why, says, fires in (
+                ("it never comes back", "did not come back", dict(comes_back_after=None)),
+                ("it comes back too late", "did not come back",
+                 dict(comes_back_after=ota_bench.CHIP_DEAD_WAIT_SECONDS + ota_bench.BACK_ON_CLOUD_SECONDS + 200)),
+                ("it never restarted", "came back with no restart", dict(restarts=False)),
+                ("it reverted", "reverted", dict(firmware="1.7.2+0")),
+                ("it is not confirmed", "reverted", dict(confirmed=False)),
+                ("a watchdog did it", "watchdog", dict(reason="none", count=0)),
+                ("a reason and no count", "watchdog", dict(count=0)),
+                ("it fired twice", "once per install", dict(fires_again=True))):
+            with self.subTest(why):
+                (self.out / "results.jsonl").unlink(missing_ok=True)
+                passed, record, _ = self.run_it(self.bench_on(on_job=self.fires(**fires)), "chip-dead-cloud")
+                self.assertFalse(passed, record)
+                self.assertEqual(record["outcome"], "FAIL")
+                self.assertIn(says, record["error"])
+
+    def test_chip_dead_cloud_on_an_image_that_does_not_fire(self):
+        passed, record, _ = self.run_it(self.bench_on(on_job=self.installs()), "chip-dead-cloud")
+        self.assertFalse(passed)
+        self.assertIn("CONFIG_APP_TEST_WIFI_DEAD_AFTER_SECONDS", record["error"])
+
+    def test_chip_dead_cloud_on_a_restart_with_no_gap(self):
+        def start(cloud, job):
+            cloud.state, cloud.job = "downloading", job
+
+            def installed(c):
+                c.firmware, c.state, c.job = "1.8.0+0", "idle", None
+                c.restart()
+                c.at(120, lambda d: d.restart())
+
+            cloud.at(30, installed)
+
+        passed, record, _ = self.run_it(self.bench_on(on_job=start), "chip-dead-cloud")
+        self.assertFalse(passed)
+        self.assertIn("without going quiet", record["error"])
+
+    def test_chip_dead_cloud_will_not_start_on_what_has_fired_already(self):
+        bench = self.bench_on("1.8.0+0", on_job=self.fires())
+        passed, record, _ = self.run_it(bench, "chip-dead-cloud")
+        self.assertFalse(passed)
+        self.assertEqual(record["outcome"], "NOT_RUN")
+        self.assertIn("once per install", record["error"])
+        self.assertEqual(bench.jobs, [])
+
+
+class ConsoleChecksWithNoConsoleTest(unittest.TestCase):
+    def test_they_do_not_apply(self):
+        said = io.StringIO()
+        with mock.patch.object(console_bench, "find_console_port", side_effect=BoardError("no J-Link port.")), \
+                mock.patch.object(sys, "argv", ["console_bench.py", "run", "--no-erase"]), \
+                contextlib.redirect_stdout(said):
+            status = console_bench.main()
+        self.assertEqual(status, ota_bench.EXIT_NOT_APPLICABLE)
+        self.assertIn("=== NOT_APPLICABLE", said.getvalue())
+        self.assertIn("no J-Link port", said.getvalue())
+
+    def test_the_plan_is_only_words(self):
+        with mock.patch.object(console_bench, "find_console_port", side_effect=AssertionError("it looked")), \
+                mock.patch.object(sys, "argv", ["console_bench.py", "plan"]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(console_bench.main(), 0)
+
+
+class UpdateScriptTest(unittest.TestCase):
+    def test_it_leaves_the_button_to_the_bench(self):
+        script = (REPO / "scripts/ota.sh").read_text()
+        self.assertNotIn("--real-button", script)
+        self.assertIn("--cloud-only", script)
+        self.assertIn('ota_bench.py" update "$image"', script)
+        self.assertIn("--via api", script)
+        syntax = subprocess.run(["bash", "-n", str(REPO / "scripts/ota.sh")], capture_output=True, text=True)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+    def test_what_it_says_it_can_do(self):
+        told = subprocess.run([str(REPO / "scripts/ota.sh"), "--help"], capture_output=True, text=True)
+        self.assertEqual(told.returncode, 0, told.stderr)
+        self.assertIn("--cloud-only", told.stdout)
+        self.assertIn("does not have to be on USB", told.stdout)
+        self.assertNotIn("must be on USB", told.stdout)
+
+    def test_a_thing_needs_a_name(self):
+        told = subprocess.run([str(REPO / "scripts/ota.sh"), "--thing"], capture_output=True, text=True)
+        self.assertEqual(told.returncode, 1)
+        self.assertIn("--thing needs the board's thing name", told.stderr)
 
 
 class SecretsFileTest(unittest.TestCase):

@@ -80,8 +80,9 @@ python tools/keys.py check
 
 ## If the signing key leaks
 
-Whoever has the key can sign images that the boards accept. Over the air a board still needs a job
-and Button 1. With access to the UART, serial recovery takes the image with no button. An update
+Whoever has the key can sign images that the boards accept. Over the air a board still needs a job,
+which takes a release manager or AWS rights, and the frozen golden image 1.5.0 still waits for Button 1.
+With access to the UART, serial recovery takes the image with no button. An update
 over the air cannot change the key in a bootloader, so every board has to be reflashed.
 
 1. Tell the team, and stop building with the old key.

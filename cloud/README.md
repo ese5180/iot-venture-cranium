@@ -512,7 +512,8 @@ node cloud/dev/preview.mjs --scenario waiting-for-button    # --help lists the s
 A local preview on `127.0.0.1`: the real console and the real API, with an in-memory
 stand-in for AWS, an emulated sign-in without a password, and simulated boards. It talks
 to nothing outside this computer, shows no real data, and is never deployed. Add `--live`
-to let the boards act and press their buttons from the terminal, or `--viewer` to see the
+to let the boards act and press their buttons from the terminal, as firmware before 1.7.2 has them do,
+which is what these boards run, or `--viewer` to see the
 console as a viewer does. `--home` shows the public home page instead, served by the real
 web function as one of its home page names.
 

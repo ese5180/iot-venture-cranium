@@ -7,19 +7,26 @@
  * which step of an update it is in, and how far the download is. The shadow is used
  * only while it names this deployment (ota.job), and only for display.
  *
- *   QUEUED       waiting_for_device, or waiting_for_button once the board is online
- *                and says that it holds this deployment
+ *   QUEUED       waiting_for_device; waiting_for_button once the board is online and says
+ *                awaiting_user about this deployment; starting once it is online and says
+ *                that it has started this deployment
  *   IN_PROGRESS  downloading -> verifying -> rebooting -> testing
  *   SUCCEEDED    succeeded
  *   FAILED       rolled_back when the board says the bootloader went back, else failed
  *   REJECTED     declined when someone said no on the board, else refused
  *   CANCELED     cancelled        TIMED_OUT  timed_out        REMOVED  removed
  *
- * A board says "downloading" from the moment its button is pressed, which is a moment
- * before AWS has accepted that the update starts. Until AWS has, the execution is
- * queued and the phase stays waiting_for_button: the execution, not the shadow, says
- * whether an update has started, and a phase never goes back to waiting_for_device
- * once the board holds the offer.
+ * Only a board that says awaiting_user is waiting for its button. Firmware from 1.7.2 on
+ * never says that: it starts as soon as it sees the job. Older firmware, the golden image
+ * among it, does until the button is pressed.
+ *
+ * Either way a board says "downloading" a moment before AWS has accepted that the update
+ * starts. Until AWS has, the execution is queued and the phase is starting: the execution,
+ * not the shadow, says whether an update has started.
+ *
+ * A phase can go back. All of this needs the board to count as online, so a board that is held
+ * at its button, on 60 s with one report lost, goes back to waiting_for_device at 90 s, until
+ * its next report. That is what is known at that moment, and it is left that way.
  */
 
 const STEPS = Object.freeze(['downloading', 'verifying', 'rebooting', 'testing']);
@@ -39,9 +46,11 @@ export function deriveTimeline({ status, reason = null, step = null, jobId, devi
 
   switch (status) {
     case 'QUEUED': {
-      // Any state but idle: the board has picked the offer up.
-      const holding = device?.online === true && tracking && ota.state !== 'idle';
-      return { phase: holding ? 'waiting_for_button' : 'waiting_for_device', progress: null };
+      const holding = device?.online === true && tracking;
+      let phase = 'waiting_for_device';
+      if (holding && ota.state === 'awaiting_user') phase = 'waiting_for_button';
+      else if (holding && STEPS.includes(ota.state)) phase = 'starting';
+      return { phase, progress: null };
     }
     case 'IN_PROGRESS': {
       // The execution names the step the board announced to AWS; the shadow may be a

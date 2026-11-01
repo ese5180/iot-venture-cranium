@@ -4,7 +4,8 @@
 #
 #   scripts/ota.sh                     install binaries/latest.signed.bin
 #   scripts/ota.sh <image>             install that signed image
-#   scripts/ota.sh --real-button       wait for a person to press Button 1 on the board
+#   scripts/ota.sh --cloud-only        use no serial port, also if one is there
+#   scripts/ota.sh --thing <name>      which board, if the account has more than one
 #
 # It uploads the image through the console's API, which checks the signature before it
 # stores anything, deploys it to the board, and follows the update until the new firmware
@@ -12,10 +13,13 @@
 # The version must be newer than every release uploaded so far: set it in
 # firmware/app/VERSION and build. A build puts its image in binaries/ by itself.
 #
-# Without --real-button, Button 1 is pressed through the board's development console. The
-# board must be on USB. The AWS profile comes from AWS_PROFILE (default cranium). The
-# release manager to act as comes from CRANIUM_RELEASE_MANAGER; if it is not set, the one
-# active release manager is used, and if there are several the script asks you to choose.
+# The board does not have to be on USB. With no console found, or with --cloud-only, the update is
+# followed through the job and the device shadow with AWS credentials. Firmware from 1.7.2 on starts
+# the update by itself. Older firmware, such as the frozen golden image 1.5.0, reports that it waits
+# for Button 1: the button is then pressed through the board's development console if it has one, and
+# otherwise the script says so and waits for a person. The AWS profile comes from AWS_PROFILE (default
+# cranium). The release manager to act as comes from CRANIUM_RELEASE_MANAGER; if it is not set, the
+# one active release manager is used, and if there are several the script asks you to choose.
 
 set -euo pipefail
 
@@ -47,8 +51,13 @@ while [ $# -gt 0 ]; do
       usage
       exit 0
       ;;
-    --real-button)
-      extra+=("--real-button")
+    --cloud-only)
+      extra+=("--cloud-only")
+      ;;
+    --thing)
+      [ $# -ge 2 ] || die "--thing needs the board's thing name"
+      extra+=("--thing" "$2")
+      shift
       ;;
     -*)
       die "unknown option: $1" "See scripts/ota.sh --help."

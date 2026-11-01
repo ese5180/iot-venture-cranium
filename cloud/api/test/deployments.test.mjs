@@ -600,7 +600,7 @@ test('a board is followed through a whole update', async () => {
   // accepted the start. Until then nothing has started, and the phase does not go back.
   board.report({ ota: { state: 'downloading', progress: 0 }, uptime: 618 });
   seen = await row();
-  assert.deepEqual([seen.status, seen.phase, seen.progress, seen.startedAt], ['QUEUED', 'waiting_for_button', null, null]);
+  assert.deepEqual([seen.status, seen.phase, seen.progress, seen.startedAt], ['QUEUED', 'starting', null, null]);
 
   // The board announces the download and starts once AWS accepted that.
   assert.deepEqual(execution.update('IN_PROGRESS', { step: 'downloading' }), { accepted: true });

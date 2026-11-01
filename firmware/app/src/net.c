@@ -59,6 +59,8 @@ static atomic_t associated;
 static atomic_t association_news;
 /* The uptime in ms of the last change of the link or request to the stack, plus 1. 0 means none yet. */
 static atomic_t link_changed_at;
+/* The uptime in ms at which a join was asked for and no result has come since, plus 1. 0 means none. */
+static atomic_t join_asked_at;
 /* A join that is being held. Only the main loop touches this. */
 static struct join_state join;
 
@@ -192,6 +194,9 @@ static void on_wifi_event(struct net_mgmt_event_callback *callback, uint64_t eve
 
 	if (event == NET_EVENT_WIFI_CONNECT_RESULT) {
 		atomic_inc(&wifi_answers);
+		/* Good or bad, the chip has just been at work on it, and that join is over. */
+		note_link_change();
+		atomic_set(&join_asked_at, 0);
 	}
 
 	if (event == NET_EVENT_WIFI_CONNECT_RESULT && status != NULL && status->status != 0) {
@@ -204,6 +209,7 @@ static void on_wifi_event(struct net_mgmt_event_callback *callback, uint64_t eve
 		   (event == NET_EVENT_WIFI_DISCONNECT_COMPLETE && status != NULL &&
 		    status->status == 0)) {
 		note_left();
+		atomic_set(&join_asked_at, 0);
 	}
 }
 
@@ -338,11 +344,13 @@ static int connect_now(void)
 			return -EAGAIN;
 		}
 
+		atomic_set(&join_asked_at, (atomic_val_t)(uint32_t)(k_uptime_get() + 1));
 		err = conn_mgr_all_if_connect(true);
 		note_link_change();
 	}
 
 	if (err) {
+		atomic_set(&join_asked_at, 0);
 		LOG_WRN("Connection request failed: %d", err);
 		post_join_failed(JOIN_FAILED_REQUEST);
 	}
@@ -374,6 +382,7 @@ static void give_up_on_leaving(void)
 {
 	LOG_WRN("The Wi-Fi stack did not report the disconnect: the link counts as gone");
 	atomic_set(&associated, 0);
+	atomic_set(&join_asked_at, 0);
 
 	if (atomic_set(&link_up, 0)) {
 		(void)app_event_post_simple(APP_EVENT_NET_DOWN);
@@ -384,11 +393,14 @@ static void give_up_on_leaving(void)
 static int join_step(void)
 {
 	const uint32_t changed_at = (uint32_t)atomic_get(&link_changed_at);
+	const uint32_t asked_at = (uint32_t)atomic_get(&join_asked_at);
 	const struct join_view view = {
 		.now_ms = (uint32_t)k_uptime_get(),
 		.associated = atomic_get(&associated) != 0 || atomic_get(&link_up) != 0,
 		.changed = changed_at != 0,
 		.changed_at_ms = changed_at - 1,
+		.joining = asked_at != 0,
+		.joining_since_ms = asked_at - 1,
 	};
 
 	switch (join_next(&join, &view)) {
@@ -425,6 +437,11 @@ void net_tick(void)
 
 	if (atomic_set(&association_news, 0)) {
 		seconds_down = 0;
+		join_link_came_up(&join);
+	}
+
+	if (atomic_get(&link_up)) {
+		join_link_came_up(&join);
 	}
 
 	if (!stored) {
@@ -451,7 +468,9 @@ void net_tick(void)
 		}
 
 		LOG_INF("Still offline: trying to join the network again");
-		(void)net_connect();
+		atomic_set(&last_failure, 0);
+		join_retry(&join);
+		(void)join_step();
 	}
 }
 

@@ -73,7 +73,10 @@ enum stuck_reason {
 const char *stuck_reason_text(enum stuck_reason reason);
 
 enum stuck_update {
-	/* Idle, or an offer is waiting for a button. A restart loses nothing: an offer comes back. */
+	/*
+	 * Idle, or, with CONFIG_APP_OTA_REQUIRE_USER_CONSENT, an offer is waiting for a button. A
+	 * restart loses nothing: an offer comes back.
+	 */
 	STUCK_UPDATE_NONE,
 	/* Under way, in a state that STUCK_UPDATE_STALL_SECONDS watches. */
 	STUCK_UPDATE_WATCHED,

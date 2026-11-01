@@ -45,10 +45,15 @@ config APP_WATCHDOG_TIMEOUT_SECONDS
 
 config APP_OTA_REQUIRE_USER_CONSENT
 	bool "Wait for a button press before installing an update"
-	default y
+	default n
 	help
-	  An update that passed every check is only offered. It is downloaded and
-	  installed after Button 1 is pressed, and refused if Button 2 is pressed.
+	  Off: an update that passed every check starts as soon as the board sees the job,
+	  with nobody at the board. The signature check, the version check, the trial and
+	  the revert hold either way.
+
+	  On, for a product that wants a person to agree: such an update is only offered. It
+	  is downloaded and installed after Button 1 is pressed, and refused if Button 2 is
+	  pressed. Firmware before 1.7.2 was built this way, and that includes the golden image.
 
 config APP_OTA_SELF_TEST_TIMEOUT_SECONDS
 	int "Seconds a new image has to prove itself"
@@ -195,6 +200,9 @@ config APP_TEST_FAULT_WIFI_DEAD
 	  and the timers in src/stuck.c never fire. For the chip-dead scenario of
 	  firmware/tests/hil/ota_bench.py.
 
+	  With APP_TEST_WIFI_DEAD_AFTER_SECONDS it also fires by itself, for a board with no
+	  console: chip-dead-cloud in the same file.
+
 config APP_TEST_FAULT_WRECK_SLOTS
 	bool "Damages both image slots and restarts"
 	help
@@ -211,6 +219,20 @@ config APP_TEST_FAULT_GOLDEN_FLIP
 	  firmware/tests/hil/golden_bench.py.
 
 endchoice
+
+config APP_TEST_WIFI_DEAD_AFTER_SECONDS
+	int "Seconds after its confirmation that the fault fires by itself"
+	depends on APP_TEST_FAULT_WIFI_DEAD
+	default 0
+	range 0 3600
+	help
+	  0: only TEST_WIFI_DEAD does it. Otherwise it fires this long after the image was
+	  confirmed, counted while no update is under way and the cloud is connected, and once
+	  per install: the version it fired on is kept in storage, so it does not fire again
+	  after the restart it causes. An image that got here with no swap has no trailer, so a
+	  revert could not show, and there it does not fire. Build it with KIND set, as in
+	  KIND=wifi-dead-auto firmware/tests/hil/build_image.sh, so that its build directory is
+	  not the one of the image that waits for the command.
 
 config APP_TEST_GOLDEN_FLIP_OFFSET
 	int "Offset in the golden image of the byte that loses a bit"

@@ -24,6 +24,8 @@ enum store_id {
 	STORE_BT_OTA_RECORD = 5,
 	/* struct stuck_record: how many restarts in a row for being stuck, and the last reason. */
 	STORE_STUCK = 6,
+	/* The version that a test image's fault fired on, with APP_TEST_FAULT_WIFI_DEAD only. */
+	STORE_TEST_FAULT = 7,
 };
 
 /* Read a record of exactly size bytes. -ENOENT if it does not exist. */

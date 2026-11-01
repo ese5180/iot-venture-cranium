@@ -542,7 +542,7 @@ static void test_a_stall_only_counts_in_the_states_it_watches(void)
 
 static void test_a_stall_is_not_held_off_by_the_count(void)
 {
-	/* It takes a job under way, so it cannot go round in a loop, and it leaves the count alone. */
+	/* It takes a job under way, and it leaves the count alone. See restart() in stuck_policy.c. */
 	for (uint8_t count = 0; count < STUCK_COUNT_MAX; count++) {
 		start(count, STUCK_REASON_WIFI_SILENT);
 		board.update = STUCK_UPDATE_WATCHED;

@@ -51,7 +51,7 @@ and what size it is. [`docs/ci.md`](../docs/ci.md) has the rest.
 ```sh
 scripts/ota.sh                                      # install binaries/latest.signed.bin
 scripts/ota.sh binaries/cranium-1.7.0-0.signed.bin  # install that image
-scripts/ota.sh --real-button                        # wait for a person to press Button 1
+scripts/ota.sh --cloud-only                         # use no serial port, also if one is there
 ```
 
 The script needs a signed-in AWS profile. It invokes the console's API function directly. This
@@ -61,8 +61,13 @@ manager, and it checks the signature before it stores anything. The script acts 
 name, and the audit entry names them. [`docs/aws-iot.md`](../docs/aws-iot.md#known-limits) has more.
 
 It deploys the image to the board and follows the update until the new firmware has confirmed
-itself. Without `--real-button` it presses Button 1 through the board's serial console, so the board
-must be on USB. The way with a sign-in is by hand, on the console's Firmware page.
+itself. The board does not have to be on USB. With no console found, or with `--cloud-only`, the script
+follows it through the job and the device shadow, and `--thing` says which board if the account has more
+than one. Firmware from 1.7.2 on starts by itself. Older firmware, the golden image among it, reports that
+it waits for Button 1: the script then presses that through the serial console if there is one, and
+otherwise says so and waits three minutes for a person. Without a console, that is a result from the cloud alone, and
+it says so. [`firmware/README.md`](../firmware/README.md#tests-with-no-cable) has which tests can run this way.
+The way with a sign-in is by hand, on the console's Firmware page.
 `scripts/open-console.sh` signs in to AWS and opens the console.
 
 ## The golden image

@@ -1274,8 +1274,8 @@ export function createApi({ auth, fetch, XMLHttpRequest, crypto, clock, onUnauth
 }
 
 // How often to ask again. A deployment is polled every 3 s while a board is installing
-// or is online and may move at any moment, because someone stands at it to press its
-// button. It is polled every 10 s while the only boards left are offline, and not at
+// or is online and may move at any moment: it starts by itself, or someone stands at it
+// to press its button. It is polled every 10 s while the only boards left are offline, and not at
 // all once nothing is in flight.
 
 export const POLL_INSTALLING_MS = 3000;
@@ -1423,6 +1423,18 @@ export function alreadyRuns(device, version) {
   return target !== null && runs !== null && compareVersions(runs, target) >= 0;
 }
 
+// The first firmware that starts an update by itself. Older images, the frozen golden image
+// among them, wait for Button 1. What a board reports (awaiting_user) says whether it waits
+// now: this is only for what has not happened yet, as in the words before a deployment.
+export const FIRST_WITH_NO_BUTTON = '1.7.2';
+const NO_BUTTON_FROM = Object.freeze({ major: 1, minor: 7, revision: 2, build: 0 });
+
+/** True if a board reports firmware that holds an update until Button 1 is pressed. */
+export function asksForButton(device) {
+  const runs = device.fw ? parseVersion(device.fw.version) : null;
+  return runs !== null && compareVersions(runs, NO_BUTTON_FROM) < 0;
+}
+
 /**
  * True for a version that is not in the list of releases: it reached the board some other
  * way than a deployment of a release from this list. Nothing is said while the list has
@@ -1459,7 +1471,9 @@ const BUTTON_1 = 'Button\u00a01';
 // when the update stopped there.
 export const STEPS = [
   { name: 'Offered' },
-  { name: 'Approved on the board', doing: `Waiting for ${BUTTON_1}`, failed: 'Not approved' },
+  // Nothing here says that a person agreed: firmware from 1.7.2 on takes a job by itself, once
+  // it has checked it. `doing` is only used while a board reports that it waits for its button.
+  { name: 'Accepted by the board', doing: `Waiting for ${BUTTON_1}`, failed: 'Not accepted' },
   { name: 'Downloading', failed: 'Download failed' },
   // What the board checks here is the digest and the version. The signature is the
   // bootloader's to check, at the restart: this step must not read as that.
@@ -1468,7 +1482,7 @@ export const STEPS = [
   { name: 'On trial', failed: 'Rolled back' },
   { name: 'Confirmed' },
 ];
-const APPROVED = 1;
+const ACCEPTED = 1;
 const DOWNLOADED = 2;
 const VERIFIED = 3;
 const RESTARTED = 4;
@@ -1676,12 +1690,22 @@ export function describeExecution(execution, {
         'The board is online but has not picked up the offer yet. That normally takes a few seconds.',
         steps(0, { current: 0 }));
     case 'waiting_for_button':
-      // The one moment in an update when everything waits for a person: said as an
-      // instruction, in a tone of its own.
+      // The one moment in an update when everything waits for a person, on a board that
+      // reports that it does: said as an instruction, in a tone of its own.
       return description('act', 'press', `Press ${BUTTON_1} on the board`,
         `The board has the offer and waits for someone to press ${BUTTON_1}. LED1 blinks quickly ` +
         'while the offer is open; Button 2 declines it.',
         steps(1, { current: 1 }));
+    case 'starting':
+      // The board has taken the job on, and AWS has not said yet that it agrees.
+      return underWay('download', 2, {
+        title: 'Starting',
+        text: 'The board has told AWS IoT that it starts this update, and downloads the image as soon ' +
+          'as AWS IoT agrees. The firmware it runs is not touched yet.',
+      }, {
+        was: `starting ${target}`,
+        quiet: `The board went offline as it started this update.${STILL_OPEN}`,
+      });
     case 'downloading':
       return underWay('download', 2, {
         title: progress === null ? 'Downloading' : `Downloading ${progress}%`,
@@ -1783,11 +1807,11 @@ export function describeExecution(execution, {
           const installedBy = runsIt ? otherInstall(history, deployment, version) : null;
           return description('idle', 'stop', 'Cancelled',
             `Cancelled before the board started, so this deployment installed nothing.${reports}`,
-            steps(APPROVED, { ended: true }), installedBy ? { installedBy } : {});
+            steps(ACCEPTED, { ended: true }), installedBy ? { installedBy } : {});
         }
         return description('idle', 'stop', 'Cancelled',
           `Cancelled before the board started. Nothing was installed.${reports}`,
-          steps(APPROVED, { ended: true }), again());
+          steps(ACCEPTED, { ended: true }), again());
       }
       // It stopped when it was told to, and a later deployment is what installed the version.
       const installedBy = runsIt ? otherInstall(history, deployment, version) : null;

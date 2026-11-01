@@ -1526,16 +1526,25 @@ test('the only free board is chosen without being asked, unless it would refuse 
   assert.equal(core.onlyChoice([], none, '1.1.0+7'), null);
 });
 
+test('which boards hold an update until Button 1 is pressed goes by the firmware they report', () => {
+  const on = (version) => ({ fw: { version, confirmed: true } });
+  for (const version of ['1.5.0+0', '1.7.1+0', '1.7.1+99', '0.9.0+1']) assert.equal(core.asksForButton(on(version)), true, version);
+  for (const version of ['1.7.2+0', '1.7.2+1', '1.7.10+0', '1.8.0+0', '2.0.0+0']) assert.equal(core.asksForButton(on(version)), false, version);
+  // A board that has reported nothing, or nothing that can be read, is not said to ask.
+  assert.equal(core.asksForButton({ fw: null }), false);
+  assert.equal(core.asksForButton({ fw: { version: 'nonsense' } }), false);
+});
+
 // Words.
 
 const PHASES = [
-  'waiting_for_device', 'waiting_for_button', 'downloading', 'verifying', 'rebooting', 'testing',
+  'waiting_for_device', 'waiting_for_button', 'starting', 'downloading', 'verifying', 'rebooting', 'testing',
   'succeeded', 'failed', 'rolled_back', 'declined', 'refused', 'cancelled', 'timed_out', 'removed',
 ];
 const TONES = ['act', 'wait', 'live', 'good', 'warn', 'bad', 'idle'];
 const STEP_STATES = ['done', 'current', 'failed', 'stopped', 'skipped', 'upcoming', 'unknown'];
 const STEP_NAMES = [
-  'Offered', 'Approved on the board', 'Downloading', 'Download checked', 'Restarting', 'On trial', 'Confirmed',
+  'Offered', 'Accepted by the board', 'Downloading', 'Download checked', 'Restarting', 'On trial', 'Confirmed',
 ];
 const STARTED = '2026-10-10T12:01:00Z';
 
@@ -1603,13 +1612,22 @@ test('a step is called by what is true of it: done, being waited for, or where i
   // Done and still ahead: the name. Everything is done after a success.
   assert.deepEqual(labels(describe('succeeded')), STEP_NAMES);
   assert.deepEqual(labels(describe('waiting_for_device')), STEP_NAMES);
-  assert.equal(labels(describe('downloading'))[1], 'Approved on the board');
+  assert.equal(labels(describe('downloading'))[1], 'Accepted by the board');
   assert.equal(labels(describe('rebooting'))[3], 'Download checked');
 
-  // Nobody has approved anything while the board waits for its button, or after Button 2.
+  // Nothing is accepted while the board waits for its button, or after Button 2.
   // "Button 1" is one word to a line break: the space in it is a no-break space.
   assert.equal(labels(describe('waiting_for_button'))[1], 'Waiting for Button\u00a01');
-  assert.equal(labels(describe('declined'))[1], 'Not approved');
+  assert.equal(labels(describe('declined'))[1], 'Not accepted');
+  // No step of a board that did not ask reads as if it had: only the board's own word does that.
+  for (const phase of PHASES.filter((name) => name !== 'waiting_for_button')) {
+    assert.doesNotMatch(labels(describe(phase)).join(' '), /Button|Approved/, phase);
+  }
+  // A board that has started, and AWS has not agreed yet.
+  assert.equal(describe('starting').title, 'Starting');
+  assert.equal(describe('starting').tone, 'live');
+  assert.equal(labels(describe('starting'))[1], 'Accepted by the board');
+  assert.doesNotMatch(describe('starting').text, /Button|press/);
   // A board that refuses has not been turned down by anybody.
   assert.equal(labels(describe('refused', { reason: 'not_newer' }))[1], 'Refused');
 
@@ -1627,7 +1645,7 @@ test('a step is called by what is true of it: done, being waited for, or where i
   for (const [phase, description] of everyDescription()) {
     description.steps.forEach((step, index) => {
       if (step.state === 'current' || step.state === 'failed' || step.state === 'stopped') {
-        assert.doesNotMatch(step.label, /^(?:Approved|Download checked|Confirmed)/, `${phase}: ${step.label}`);
+        assert.doesNotMatch(step.label, /^(?:Accepted|Download checked|Confirmed)/, `${phase}: ${step.label}`);
       } else {
         assert.equal(step.label, STEP_NAMES[index], phase);
       }
@@ -2517,7 +2535,7 @@ test('an update that ended with no reason on record does not say which way it we
   assert.equal(unread.retry, true);
   assert.equal(unread.next, 'To try again, start a new deployment.');
   assert.deepEqual(states(unread), ['done', 'failed', ...new Array(5).fill('skipped')]);
-  assert.equal(labels(unread)[1], 'Not approved');
+  assert.equal(labels(unread)[1], 'Not accepted');
   // A reason, known or not, is the board's refusal.
   assert.equal(describe('refused', { reason: 'too_large' }).title, 'Refused by the board');
   const unheard = describe('refused', { reason: 'something_new' });

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-import { ONLINE_WINDOW_MS, deviceFromShadow, unknownDevice } from '../src/lib/shadow.mjs';
+import { ONLINE_WINDOW_MS, RESTART_WINDOW_MS, deviceFromShadow, unknownDevice } from '../src/lib/shadow.mjs';
 
 const THING = 'cranium-fe5b26c0c5b1dcd7';
 const JOB = 'cranium-1-1-0-b7-20261010T221500Z-9f3a';
@@ -73,6 +73,34 @@ test('the window has room for a late heartbeat at the interval that the firmware
   const interval = Number(seconds[1]);
   assert.equal(interval, 30);
   assert.equal(ONLINE_WINDOW_MS, interval * 3 * 1000);
+});
+
+test('what a board says about being stuck is not for the console: it reads as if it were not there', () => {
+  const said = { ...healthy(), stuck: { count: 2, reason: 'no_cloud' } };
+  assert.deepEqual(read(said), read(healthy()));
+  assert.equal(Object.hasOwn(read(said), 'stuck'), false);
+  // Nor does anything in it upset the rest.
+  for (const stuck of [null, 'no', 7, [], { count: 'many', reason: {} }]) {
+    assert.deepEqual(read({ ...healthy(), stuck }), read(healthy()), JSON.stringify(stuck));
+  }
+});
+
+test('a board that said it is restarting has the time a restart takes, and only that state has', () => {
+  const seenAgo = (state, secondsAgo) => {
+    const reported = healthy();
+    reported.ota = { ...reported.ota, state };
+    return read(reported, { seen: Math.floor(NOW / 1000) - secondsAgo }).online;
+  };
+  assert.equal(RESTART_WINDOW_MS, 240_000);
+  for (const seconds of [0, 21, 89, 90, 102, 113, 120, 239]) assert.equal(seenAgo('rebooting', seconds), true, `${seconds} s`);
+  assert.equal(seenAgo('rebooting', 240), false);
+  assert.equal(seenAgo('rebooting', 86400), false);
+  for (const state of ['idle', 'awaiting_user', 'downloading', 'verifying', 'testing']) {
+    assert.equal(seenAgo(state, 89), true, state);
+    assert.equal(seenAgo(state, 90), false, state);
+  }
+  // A state that is not in the contract has no claim on it.
+  assert.equal(seenAgo('rebooting!', 90), false);
 });
 
 test('online means AWS received the uptime less than 90 seconds ago', () => {

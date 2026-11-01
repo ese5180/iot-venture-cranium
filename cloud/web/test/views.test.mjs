@@ -161,7 +161,7 @@ test('every icon that a description names is drawn', () => {
   const named = new Set();
 
   const phases = [
-    'waiting_for_device', 'waiting_for_button', 'downloading', 'verifying', 'rebooting', 'testing',
+    'waiting_for_device', 'waiting_for_button', 'starting', 'downloading', 'verifying', 'rebooting', 'testing',
     'succeeded', 'failed', 'rolled_back', 'declined', 'refused', 'cancelled', 'timed_out', 'removed',
     'a_new_phase',
   ];
@@ -540,7 +540,8 @@ test('a board says what state it is in and when its last heartbeat arrived, in t
     assert.equal(textOf(one(list, 'p.device-seen')), words);
     const shown = one(one(list, 'header.device-head'), 'span.badge');
     assert.equal(textOf(shown), badge);
-    if (title instanceof RegExp) assert.match(shown.getAttribute('title'), title);
+    // Offline, the tooltip gives the moment itself, and not how long ago that was.
+    if (title instanceof RegExp) assert.equal(shown.getAttribute('title'), `Last heartbeat ${core.exactTime(board.lastSeen)}`);
     else if (title) assert.equal(shown.getAttribute('title'), title);
     else assert.equal(shown.hasAttribute('title'), false);
 
@@ -550,6 +551,23 @@ test('a board says what state it is in and when its last heartbeat arrived, in t
     assert.equal(textOf(one(one(own, 'div.fact', 'Heartbeat'), 'dd')), words.replace(/^.*heartbeat /, ''));
     assert.equal(textOf(one(one(own, 'div.device-presence'), 'span.badge')), badge);
   }
+});
+
+test('a board that is restarting does not count as up, whatever its connection still counts as', async () => {
+  const rebooting = { state: 'rebooting', job: OFFERED, progress: 0, last: 'none', error: '' };
+  const fleet = [device(WAITING, { ota: rebooting, lastSeen: ago(100) }), device(INSTALLING, { lastSeen: ago(5) })];
+  const overview = page(views.overviewView, await consoleState({ ...WORLD, devices: fleet, deployments: [] }));
+  const dots = all(overview, 'span.presence-dot');
+  assert.deepEqual(dots.map((dot) => dot.getAttribute('class')), ['presence-dot', 'presence-dot is-on']);
+  assert.equal(textOf(all(overview, 'p.figure')[0]), '1 of 2 boards online');
+  assert.match(textOf(one(overview, 'p.tile-words')), /^1 online ?1 offline$/);
+  assert.equal(all(overview, 'span.tile.is-on').length, 1, 'the tiles say what the figure says');
+  assert.equal(all(overview, 'span.tile.is-off').length, 1);
+
+  // Alone: none of its one board is up.
+  const alone = page(views.overviewView, await consoleState({ ...WORLD, devices: [fleet[0]], deployments: [] }));
+  assert.equal(textOf(all(alone, 'p.figure')[0]), '0 of 1 board online');
+  assert.equal(one(alone, 'span.presence-dot').getAttribute('class'), 'presence-dot');
 });
 
 test('a board that has never had a heartbeat says so, and the list of devices keeps its columns', async () => {
@@ -612,6 +630,28 @@ test('a board that waits for its button is the one thing on the page that asks f
   assert.equal(all(page(views.deploymentView, state, { id: WITHDRAWN }), 'article.is-act').length, 0);
 });
 
+test('a board that does not ask is not said to wait for a button, on any page', async () => {
+  // Firmware from 1.7.2 on: the board has taken the job on, and AWS has not agreed yet.
+  const started = {
+    ...WORLD,
+    devices: [device(WAITING, { fw: { version: '1.7.2+0', confirmed: true }, ota: { state: 'downloading', job: OFFERED, progress: 0, last: 'none', error: '' } })],
+    deployments: [deployment(OFFERED, { executions: [execution(WAITING, 'starting')] })],
+  };
+  const state = await consoleState(started);
+  const pages = [
+    page(views.deploymentView, state, { id: OFFERED }), page(views.deploymentsView, state),
+    page(views.devicesView, state), page(views.overviewView, state),
+  ];
+  for (const drawn of pages) {
+    assert.equal(all(drawn, '.is-act').length, 0);
+    assert.equal(all(drawn, 'div.keys').length, 0);
+    assert.doesNotMatch(textOf(drawn), /Press Button|Waiting for Button|waiting for Button|Waiting for its button/);
+  }
+  const card = one(pages[0], 'article.execution');
+  assert.equal(textOf(one(card, 'p.execution-title')), 'Starting');
+  assert.match(textOf(card), /Accepted by the board: done/);
+});
+
 test('the steps of a board are kept in place while what they are called changes', async () => {
   const box = document.createElement('div');
   const at = async (item) => {
@@ -625,7 +665,7 @@ test('the steps of a board are kept in place while what they are called changes'
   const waiting = await at(execution(WAITING, 'waiting_for_button'));
   const downloading = await at(execution(WAITING, 'downloading', { ...started, progress: 40 }));
   assert.deepEqual(downloading, waiting, 'the same seven elements');
-  assert.equal(textOf(downloading[1]), 'Approved on the board: done');
+  assert.equal(textOf(downloading[1]), 'Accepted by the board: done');
   assert.equal(textOf(downloading[2]), 'Downloading 40%: in progress');
   // The rail to the next step carries the progress of the download.
   assert.equal(downloading[2].getAttribute('class'), 'step is-current has-progress');
@@ -635,12 +675,12 @@ test('the steps of a board are kept in place while what they are called changes'
   assert.equal(verifying[2].custom.has('--progress'), false);
   assert.equal(textOf(verifying[3]), 'Checking the download: in progress');
   const declined = await at(execution(WAITING, 'declined', { status: 'REJECTED', reason: 'declined' }));
-  assert.equal(textOf(declined[1]), 'Not approved: stopped here');
+  assert.equal(textOf(declined[1]), 'Not accepted: stopped here');
   // The mark of a step that failed takes the tone of the headline.
   assert.equal(declined[1].parentNode.getAttribute('class'), 'steps is-warn');
   const cancelled = await at(execution(WAITING, 'cancelled', { status: 'CANCELED' }));
   assert.equal(textOf(cancelled[0]), 'Offered: done');
-  assert.equal(textOf(cancelled[1]), 'Approved on the board: not reached');
+  assert.equal(textOf(cancelled[1]), 'Accepted by the board: not reached');
   // Stopped on its way: where it had got to is marked, in no colour of failure.
   const stopped = await at(execution(WAITING, 'cancelled', { status: 'CANCELED', startedAt: ago(100) }));
   assert.equal(textOf(stopped[2]), 'Downloading: stopped here');
@@ -651,7 +691,7 @@ test('the steps of a board are kept in place while what they are called changes'
 // What the deployment page draws for each state of a board.
 
 const PHASES = [
-  ['waiting_for_device', {}], ['waiting_for_button', {}],
+  ['waiting_for_device', {}], ['waiting_for_button', {}], ['starting', {}],
   ['downloading', { status: 'IN_PROGRESS', progress: 40, startedAt: ago(30) }],
   ['verifying', { status: 'IN_PROGRESS', startedAt: ago(30) }],
   ['rebooting', { status: 'IN_PROGRESS', startedAt: ago(30) }],
@@ -1755,7 +1795,28 @@ test('the last step repeats what was said about a board at the moment of commitm
   const [refusing, unseen] = all(dialog, 'dd')[1].children[0].children;
   assert.match(textOf(refusing), /so it will refuse the offer\./);
   assert.doesNotMatch(textOf(unseen), /refuse/);
-  assert.match(textOf(one(dialog, 'div.callout')), /1 board has never connected and will see the offer when first connected\./);
+  assert.match(textOf(one(dialog, 'div.callout')), /1 board has never connected and will see the update when first connected\./);
+});
+
+test('what happens next when deploying tells of a button only where a board has one', () => {
+  const on = (thing, version) => board(thing, { fw: { version, confirmed: true } });
+  const callout = (...devices) => textOf(one(wizard({
+    step: 2, devices, things: new Set(devices.map((item) => item.thing)),
+  }).dialog, 'div.callout'));
+
+  // Nothing tells anybody to press what does nothing.
+  const fresh = callout(on(WAITING, '1.7.2+0'));
+  assert.match(fresh, /Firmware 1\.7\.2 or newer installs it as soon as the board sees it, with nobody at the board\./);
+  assert.doesNotMatch(fresh, /Button|presses/);
+
+  // The golden image and every other older one do wait.
+  const older = callout(on(WAITING, '1.5.0+0'));
+  assert.match(older, /1 board runs older firmware, which installs nothing until someone presses Button 1 on the board; Button 2 declines\./);
+  const mixed = callout(on(WAITING, '1.7.1+0'), on(INSTALLING, '1.5.0+0'), on(NEVER, '1.8.0+0'));
+  assert.match(mixed, /2 boards run older firmware/);
+
+  // What has not reported a version is not said to ask.
+  assert.doesNotMatch(callout(board(NEVER, { online: false, lastSeen: null, fw: null })), /Button/);
 });
 
 test('moving between the steps of a dialog is said to a screen reader', () => {
@@ -2252,8 +2313,10 @@ test('the activity log says what it covers, without claiming more', async () => 
   assert.match(textOf(one(drawn, 'p.log-summary')), /^All 4 entries/);
   assert.equal(textOf(one(drawn, 'div.log-more')), 'That is every entry in this log.');
   assert.doesNotMatch(textOf(drawn), /whole log/);
-  assert.match(textOf(one(page(views.deploymentsView, await consoleState(WORLD)), 'p.page-lede')),
-    /A job made directly in AWS IoT is not listed here/);
+  const deployments = textOf(one(page(views.deploymentsView, await consoleState(WORLD)), 'p.page-lede'));
+  assert.match(deployments, /A job made directly in AWS IoT is not listed here/);
+  // What a board does depends on what it runs, and this says so.
+  assert.match(deployments, /A board on firmware 1\.7\.2 or newer starts as soon as it sees it, and older firmware waits for someone to press Button 1/);
 });
 
 test('a declined deployment is told as what it was, and is offered again only where that can work', async () => {

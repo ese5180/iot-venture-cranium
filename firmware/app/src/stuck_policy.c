@@ -147,7 +147,12 @@ static uint32_t restart(struct stuck_state *state, enum stuck_reason reason)
 	state->reason = reason;
 	state->restarting = true;
 
-	/* An update stall needs a job under way, so it cannot go round in a loop by itself. */
+	/*
+	 * An update stall needs a job under way. A job the cloud has agreed to start ends at the next
+	 * restart, as `interrupted`. One that it never agreed to is still queued and starts again, so
+	 * that one comes round every STUCK_UPDATE_STALL_SECONDS for as long as the cloud goes on
+	 * listing the job and not agreeing. It is not counted: the board is not what is wrong then.
+	 */
 	if (write && reason != STUCK_REASON_UPDATE_STALL) {
 		state->count++;
 	}

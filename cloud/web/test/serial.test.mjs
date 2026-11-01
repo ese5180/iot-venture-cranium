@@ -719,6 +719,28 @@ test('HELP\'s table keeps its columns, and what holds a time is what is above an
   assert.equal(all(one(plain, 'li.serial-line.is-output'), 'time').length, 1);
 });
 
+test('what counts as a row of a table is a line that starts like one, and only in a reply', async (t) => {
+  const { board, session } = await connected(t, { reply: () => 'OK\r\n' });
+  session.clear();
+  const rows = ['| Reset          software            |', '+----------------+', '* ECHO   <ON or OFF>', '  WIFI   <ssid>'];
+  const plain = ['*no blank after it', ' one blank in front', 'plain | with a bar'];
+  board.send(`${[...rows, ...plain].join('\r\n')}\r\nOK\r\n`);
+  await settle();
+  const output = all(drawn(session).box, 'li.serial-line.is-output');
+  assert.equal(output.length, rows.length + plain.length);
+  output.forEach((row, index) => {
+    const table = index < rows.length;
+    assert.equal(one(row, 'span.serial-text').getAttribute('class').includes('is-box'), table, textOf(row));
+    assert.equal(all(row, 'time').length, table ? 0 : 1, textOf(row));
+  });
+
+  // A command that looks like a row has its time, as every command has.
+  session.clear();
+  await session.send('| not a row');
+  await settle();
+  assert.equal(all(one(drawn(session).box, 'li.serial-line.is-sent'), 'time').length, 1);
+});
+
 test('the free input sends, keeps commands for the arrow keys, and refuses in words', async (t) => {
   const { board, session } = await connected(t);
   const { box, redraw } = drawn(session);

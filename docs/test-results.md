@@ -32,7 +32,8 @@ Every run below was on one nRF7002 DK. The benches write one line per run to a l
 **One update has finished, and the regression has not run.** On 2026-11-01, from 12:15 to 12:18,
 `scripts/ota.sh` took the board from the frozen 1.5.0 to 1.7.0, built from commit 8eca4b0, on the bootloader that
 holds the pin. It uploaded the release through the console's API function, invoked directly, so it bypassed
-API Gateway and sign-in, and the signature was checked on upload. The bench pressed Button 1 through the console.
+API Gateway and sign-in, and the signature was checked on upload. The bench pressed Button 1 through the console: 1.5.0
+waits for it, and firmware from 1.7.2 on does not.
 
 | Step | After the button |
 | --- | --- |
@@ -42,7 +43,13 @@ API Gateway and sign-in, and the signature was checked on upload. The bench pres
 | Confirmed, job `SUCCEEDED` | 188 s |
 
 Not run on any firmware from 1.5.0 on: ten updates in a row, the failure scenarios, and `ota_bench.py chip-dead`.
-They will run on 1.7.1, with test images built from its code, so that the results are about what ships.
+The plan, after installing 1.7.2 over the air with the board off USB: a corrupted download (`corrupt`), a bad signature
+(`bad-signature`), an older version (`older`) and one rollback (`faulty`, with a test image that never confirms itself).
+Those rest on the job and the shadow alone, and each line of `results.jsonl` says that it ran `cloud-only`, so a swap or
+a revert is only seen by what the board reports afterwards. Ten updates in a row and the hang test (`chip-dead-cloud`)
+are for later, after the checkoff. These cannot run without a cable, and are `NOT_APPLICABLE` until one is plugged in:
+`reset-download`, `reset-swap`, `chip-dead`, `recovery` and `console_bench.py`. `golden_bench.py` also takes the serial
+ports and the debug probe.
 G15 and G16 below also took real jobs into the bootloader's swap, and the gesture went back to 1.5.0 on purpose.
 Until then, the other over-the-air results are those
 [on the older shell firmware](#over-the-air-on-the-older-shell-firmware), below.
@@ -215,7 +222,7 @@ changed before the run above, and these logs do not say what.
 
 All of this ran on the deployed AWS IoT, on 2026-10-31, with
 [`firmware/tests/hil/ota_bench.py`](../firmware/tests/hil/ota_bench.py). The times count from the button
-press.
+press, which that firmware waited for. Firmware from 1.7.2 on starts with no press, and these have not been timed there.
 
 These results have four limits:
 

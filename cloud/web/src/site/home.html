@@ -121,7 +121,7 @@
     <section class="panel on-ink" id="updates" aria-labelledby="updates-title">
       <div class="panel-head">
         <p class="eyebrow">Secure updates</p>
-        <h2 class="title" id="updates-title">Over the air, a board takes only what was signed, and only after a person says yes.</h2>
+        <h2 class="title" id="updates-title">Over the air, a board takes only what was signed, and only after a release manager deploys it.</h2>
         <p class="body">Firmware for the nRF7002 DK arrives over <span class="nb">Wi-Fi</span> through AWS IoT. An update has to pass every step below, and a new image that cannot prove itself is replaced by the previous one, with nobody touching the board.</p>
       </div>
 
@@ -142,11 +142,11 @@
             </li>
             <li class="flow-step">
               <span class="flow-mark"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20.5 3.5L10 14M20.5 3.5l-6.5 17-4-6.5-6.5-4z"/></svg></span>
-              <span class="flow-text"><span class="flow-label">Offered</span><span class="flow-word">An AWS IoT job. Nothing downloads yet</span></span>
+              <span class="flow-text"><span class="flow-label">Sent</span><span class="flow-word">By a release manager, as an AWS IoT job</span></span>
             </li>
-            <li class="flow-step is-you is-arc-end">
-              <span class="flow-mark"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5"/></svg></span>
-              <span class="flow-text"><span class="flow-label">Button 1 pressed</span><span class="flow-word">A person says yes</span></span>
+            <li class="flow-step is-work is-arc-end">
+              <span class="flow-mark"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5"/><polyline points="8 12.5 11 15.5 16.5 9"/></svg></span>
+              <span class="flow-text"><span class="flow-label">Accepted</span><span class="flow-word">The board refuses anything not newer</span></span>
             </li>
             <li class="flow-step is-work is-arc">
               <span class="flow-mark"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4v11.5M5 20h14"/><polyline points="7 11 12 16 17 11"/></svg></span>
@@ -188,9 +188,9 @@
         <li class="lock is-you">
           <h3 class="lock-title">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5"/></svg>
-            A person presses a button
+            A release manager deploys it
           </h3>
-          <p>An update arrives as an offer. Nothing is downloaded until Button 1 on the board is pressed, and Button 2 declines. A cancelled update is dropped, before the download and again before installing.</p>
+          <p>An update starts when a release manager deploys it on the console, and the board then installs it with nobody at the board. A cancelled update is dropped, before the download and again before installing. The frozen image is older firmware, and it still waits for Button 1 on the board.</p>
         </li>
         <li class="lock is-work">
           <h3 class="lock-title">
@@ -381,7 +381,7 @@
           <dd>10<span class="unit">of 10</span></dd>
         </div>
         <div class="figure">
-          <dt>From Button 1 to confirmed</dt>
+          <dt>From the button press to confirmed</dt>
           <dd>181&ndash;227<span class="unit">s</span></dd>
         </div>
         <div class="figure">
@@ -389,7 +389,7 @@
           <dd>81<span class="unit">s</span></dd>
         </div>
       </dl>
-      <figcaption class="caption"><span class="fig">Measured</span> On October 31, 2026, on one nRF7002 DK and AWS IoT, with firmware 1.1.30 to 1.1.39. A test bench pressed the button, and these runs created the job with AWS credentials, not through the console.</figcaption>
+      <figcaption class="caption"><span class="fig">Measured</span> On October 31, 2026, on one nRF7002 DK and AWS IoT, with firmware 1.1.30 to 1.1.39. A test bench pressed the button, and these runs created the job with AWS credentials, not through the console. That firmware waited for Button 1, so the time starts at the press. From 1.7.2 on no press is needed, and that has not been timed.</figcaption>
     </figure>
 
     <div class="exits">

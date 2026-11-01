@@ -251,6 +251,20 @@ test('the page says what it is, and that it is in development', () => {
   }
 });
 
+test('the page does not say that every update needs a button, and keeps what was measured with one', () => {
+  const text = html.replace(/<[^>]+>/g, ' ').replace(/&ndash;/g, '-').replace(/\s+/g, ' ');
+  assert.doesNotMatch(text, /Button 1 pressed|person says yes|A person presses a button|Nothing is downloaded until/);
+  assert.ok(text.includes('A release manager deploys it'));
+  assert.ok(text.includes('the board then installs it with nobody at the board'));
+  // The frozen image is older firmware, and it still asks.
+  assert.ok(text.includes('it still waits for Button 1 on the board'));
+  // The times came from runs that had a press, and that is what they are called.
+  assert.ok(text.includes('From the button press to confirmed'));
+  assert.ok(text.includes('181-227'));
+  assert.ok(text.includes('That firmware waited for Button 1, so the time starts at the press'));
+  assert.ok(text.includes('that has not been timed'));
+});
+
 test('the page says no more than the project\'s own documents do', () => {
   const text = html.replace(/<[^>]+>/g, ' ').replace(/&ndash;/g, '-').replace(/\s+/g, ' ');
   // What the update path promises holds over the air, and it says so.

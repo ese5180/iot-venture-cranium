@@ -447,13 +447,19 @@ class CloudJobs(ota_bench.Bench):
 
     def __init__(self, bench: "Bench"):
         self.bench = bench
-        self.args = argparse.Namespace(real_button=False, serial_number=bench.args.serial_number)
+        self.args = argparse.Namespace(real_button=False, has_offer=False,
+                                       serial_number=bench.args.serial_number)
         self.outputs = json.loads(ota_bench.OUTPUTS.read_text())
         self.region = self.outputs["Region"]
         self.bucket = self.outputs["FirmwareBucketName"]
         self.aws = ota_bench.Aws(os.environ.get("AWS_PROFILE", "cranium"), self.region)
         self.out = bench.out
         self.boot_lines = bench.boot_lines
+        # What ota_bench's waits and its status need. This bench owns the console, so nothing feeds the
+        # watch, and it never gives up early here.
+        self.watch = ota_bench.WifiWatch()
+        self.network_names = set()
+        self.account_names = set()
         self.thing = None
         self.release_manager = None
         self.presign_role = None
@@ -1126,7 +1132,9 @@ class Bench:
 
     def update_in_progress(self, image: Path) -> tuple[CloudJobs, str, str, int]:
         """A real update, from the golden image, up to the point where the bootloader starts its
-        swap. Needs Wi-Fi and AWS, unlike the rest of this bench."""
+        swap. Needs Wi-Fi and AWS, unlike the rest of this bench. The frozen image waits for Button 1,
+        and a press that does nothing fails here. start_update() also takes an image that does not
+        ask, for a rehearsal on one."""
         self.get_golden_running_and_sealed()
         cloud = CloudJobs(self)
         cloud.wait_online()
@@ -1134,10 +1142,9 @@ class Bench:
         target = ota_bench.image_version(data)
         sha256 = hashlib.sha256(data).hexdigest()
         cloud.put_object(data, sha256)
-        job_id = cloud.bench_job(target, len(data), sha256)
-        cloud.wait_offered(job_id)
         mark = self.mark()
-        cloud.press(1)
+        job_id = cloud.bench_job(target, len(data), sha256)
+        cloud.start_update(job_id)
         self.wait_said(r"Swap type: test", mark, UPDATE_SECONDS)
         return cloud, job_id, target, mark
 

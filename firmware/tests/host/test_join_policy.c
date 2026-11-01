@@ -46,8 +46,10 @@ static void test_the_limits_are_what_the_task_gave(void)
 {
 	CHECK(JOIN_QUIET_MS == 5000);
 	CHECK(JOIN_LEAVE_LIMIT_MS == 10000);
-	/* The hold, the longest wait for a disconnect, and a tick: well below a retry's 30 s. */
-	CHECK(JOIN_QUIET_MS + JOIN_LEAVE_LIMIT_MS < 30000);
+	CHECK(JOIN_FLIGHT_MS == 31000);
+	CHECK(JOIN_HOLD_LIMIT_MS == 30000);
+	/* The holds, the longest wait for a disconnect, and a tick: well below a retry's 30 s. */
+	CHECK(JOIN_QUIET_MS + JOIN_LEAVE_LIMIT_MS + JOIN_QUIET_MS < 30000);
 }
 
 static void test_nothing_asked_nothing_done(void)
@@ -250,6 +252,12 @@ static void test_a_link_that_comes_up_during_a_hold(void)
 	view.now_ms += 1000;
 	view.associated = true;
 	changed_ago(0);
+
+	/* Not in the second that the link came up: the first hang. */
+	CHECK(next() == JOIN_WAIT);
+	view.now_ms += JOIN_QUIET_MS - 1;
+	CHECK(next() == JOIN_WAIT);
+	view.now_ms += 1;
 	CHECK(next() == JOIN_DISCONNECT);
 	CHECK(join_pending(&join));
 	view.associated = false;
@@ -257,6 +265,221 @@ static void test_a_link_that_comes_up_during_a_hold(void)
 	CHECK(next() == JOIN_WAIT);
 	view.now_ms += JOIN_QUIET_MS;
 	CHECK(next() == JOIN_CONNECT);
+}
+
+/* A join that has been asked for, this long ago, with no result yet. */
+static void asked_ago(uint32_t ms)
+{
+	view.joining = true;
+	view.joining_since_ms = view.now_ms - ms;
+}
+
+static void test_a_join_under_way_leaves_before_the_next_one(void)
+{
+	/* Past the quiet time, and still under way: like an associated board. */
+	start();
+	asked_ago(6000);
+	changed_ago(6000);
+	join_request(&join);
+	CHECK(next() == JOIN_DISCONNECT);
+	CHECK(join_pending(&join));
+	CHECK(join.leaving);
+
+	/* Asked once. The stack reports it: 5 s from there. */
+	view.now_ms += 100;
+	CHECK(next() == JOIN_WAIT);
+	view.joining = false;
+	changed_ago(0);
+	CHECK(next() == JOIN_WAIT);
+	CHECK(!join.leaving);
+	view.now_ms += JOIN_QUIET_MS;
+	CHECK(next() == JOIN_CONNECT);
+
+	/* Sooner than the quiet time: nothing yet. */
+	start();
+	asked_ago(1000);
+	changed_ago(1000);
+	join_request(&join);
+	CHECK(next() == JOIN_WAIT);
+	CHECK(!join.leaving);
+	view.now_ms += JOIN_QUIET_MS - 1000;
+	CHECK(next() == JOIN_DISCONNECT);
+
+	/* To the millisecond of how long a join counts as under way. */
+	start();
+	asked_ago(JOIN_FLIGHT_MS - 1);
+	join_request(&join);
+	CHECK(next() == JOIN_DISCONNECT);
+
+	start();
+	asked_ago(JOIN_FLIGHT_MS);
+	join_request(&join);
+	CHECK(next() == JOIN_CONNECT);
+
+	/* A time on its own says nothing: no join has been asked for. */
+	start();
+	view.joining_since_ms = view.now_ms - 1;
+	join_request(&join);
+	CHECK(next() == JOIN_CONNECT);
+
+	/* The disconnect never reports: its limit ends it, and then it goes. */
+	start();
+	asked_ago(6000);
+	join_request(&join);
+	CHECK(next() == JOIN_DISCONNECT);
+	view.now_ms += JOIN_LEAVE_LIMIT_MS - 1;
+	CHECK(next() == JOIN_WAIT);
+	view.now_ms += 1;
+	CHECK(next() == JOIN_GAVE_UP);
+	CHECK(!join.leaving);
+	view.joining = false;
+	CHECK(next() == JOIN_CONNECT);
+
+	/* The join runs out of its time while it is asked to leave: that is no failure to report. */
+	start();
+	asked_ago(JOIN_FLIGHT_MS - 1);
+	join_request(&join);
+	CHECK(next() == JOIN_DISCONNECT);
+	view.now_ms += 1;
+	CHECK(next() == JOIN_CONNECT);
+	CHECK(!join.leaving);
+
+	/* Somebody else's disconnect waits for it as well. */
+	start();
+	asked_ago(1000);
+	join_leaving(&join, view.now_ms);
+	CHECK(next() == JOIN_WAIT);
+	CHECK(join.leaving);
+	view.now_ms += JOIN_LEAVE_LIMIT_MS;
+	CHECK(next() == JOIN_GAVE_UP);
+}
+
+static void test_a_retry_starts_over_a_join_that_has_said_nothing(void)
+{
+	start();
+	asked_ago(30000);
+	join_retry(&join);
+	CHECK(join_pending(&join));
+	CHECK(next() == JOIN_CONNECT);
+	CHECK(!join.leaving);
+	CHECK(!join_pending(&join));
+
+	/* An association still has to go first, with no address after all this time. */
+	start();
+	view.associated = true;
+	join_retry(&join);
+	CHECK(next() == JOIN_DISCONNECT);
+
+	/* It holds like anything else. */
+	start();
+	changed_ago(2000);
+	join_retry(&join);
+	CHECK(next() == JOIN_WAIT);
+	view.now_ms += 3000;
+	CHECK(next() == JOIN_CONNECT);
+
+	/* Somebody's request that is held stays what it is: it is not a retry. */
+	start();
+	asked_ago(6000);
+	changed_ago(0);
+	join_request(&join);
+	CHECK(next() == JOIN_WAIT);
+	join_retry(&join);
+	join_link_came_up(&join);
+	CHECK(join_pending(&join));
+	view.now_ms += JOIN_QUIET_MS;
+	CHECK(next() == JOIN_DISCONNECT);
+
+	/* A request on top of a retry makes it somebody's request. */
+	start();
+	asked_ago(6000);
+	changed_ago(0);
+	join_retry(&join);
+	join_request(&join);
+	join_link_came_up(&join);
+	CHECK(join_pending(&join));
+	view.now_ms += JOIN_QUIET_MS;
+	CHECK(next() == JOIN_DISCONNECT);
+}
+
+static void test_a_retry_goes_away_when_the_link_comes_up(void)
+{
+	start();
+	changed_ago(0);
+	join_retry(&join);
+	CHECK(next() == JOIN_WAIT);
+	view.now_ms += 1000;
+	view.associated = true;
+	changed_ago(0);
+	join_link_came_up(&join);
+	CHECK(!join_pending(&join));
+	for (int i = 0; i < 30; i++) {
+		view.now_ms += 1000;
+		CHECK(next() == JOIN_WAIT);
+	}
+	CHECK(!join.leaving);
+
+	/* That says nothing about a request that comes later. */
+	join_request(&join);
+	CHECK(next() == JOIN_DISCONNECT);
+
+	/* With nothing held, it changes nothing. */
+	start();
+	join_link_came_up(&join);
+	CHECK(!join_pending(&join));
+}
+
+static void test_a_stack_that_keeps_reporting_cannot_hold_a_join_for_ever(void)
+{
+	start();
+	changed_ago(0);
+	join_request(&join);
+	CHECK(next() == JOIN_WAIT);
+
+	/* A failed result every 4 s, each of which is a change. */
+	uint32_t held = 0;
+
+	while (held + 4000 < JOIN_HOLD_LIMIT_MS) {
+		view.now_ms += 4000;
+		held += 4000;
+		changed_ago(0);
+		CHECK(next() == JOIN_WAIT);
+	}
+
+	view.now_ms += JOIN_HOLD_LIMIT_MS - 1 - held;
+	changed_ago(1000);
+	CHECK(next() == JOIN_WAIT);
+	view.now_ms += 1;
+	changed_ago(1000);
+	CHECK(next() == JOIN_CONNECT);
+	CHECK(!join_pending(&join));
+
+	/* The time starts with each request that gets held, and not with the first one ever. */
+	join_request(&join);
+	changed_ago(0);
+	CHECK(next() == JOIN_WAIT);
+	view.now_ms += 1000;
+	changed_ago(0);
+	CHECK(next() == JOIN_WAIT);
+
+	/* And from the same moment for a cancelled one, which does not leave its time behind. */
+	join_cancel(&join);
+	view.now_ms += JOIN_HOLD_LIMIT_MS;
+	changed_ago(0);
+	join_request(&join);
+	CHECK(next() == JOIN_WAIT);
+
+	/* A hold that ends in a link that was quiet: no limit is left over from it for the next. */
+	start();
+	changed_ago(0);
+	join_request(&join);
+	CHECK(next() == JOIN_WAIT);
+	view.now_ms += JOIN_QUIET_MS;
+	CHECK(next() == JOIN_CONNECT);
+	view.now_ms += JOIN_HOLD_LIMIT_MS;
+	changed_ago(0);
+	join_request(&join);
+	CHECK(next() == JOIN_WAIT);
 }
 
 static void test_a_later_request_replaces_a_held_one(void)
@@ -338,6 +561,10 @@ int main(void)
 	test_a_stack_that_still_says_associated_after_giving_up();
 	test_a_disconnect_somebody_else_asked_for();
 	test_a_link_that_comes_up_during_a_hold();
+	test_a_join_under_way_leaves_before_the_next_one();
+	test_a_retry_starts_over_a_join_that_has_said_nothing();
+	test_a_retry_goes_away_when_the_link_comes_up();
+	test_a_stack_that_keeps_reporting_cannot_hold_a_join_for_ever();
 	test_a_later_request_replaces_a_held_one();
 	test_a_cancelled_join_stays_quiet();
 	test_the_clock_can_wrap();

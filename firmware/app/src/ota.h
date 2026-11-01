@@ -2,10 +2,11 @@
  * Firmware update manager.
  *
  * An update is an AWS IoT job. The device refuses anything that is not strictly newer
- * than what it runs and waits for a button press; until then the job stays queued in
- * the cloud and can simply be withdrawn. After the press it tells the cloud that it
- * starts, downloads the image over HTTPS into the secondary slot in external flash,
- * checks its SHA-256 and tells the cloud that it is about to install. Both
+ * than what it runs. It tells the cloud that it starts, downloads the image over HTTPS
+ * into the secondary slot in external flash, checks its SHA-256 and tells the cloud that
+ * it is about to install. With CONFIG_APP_OTA_REQUIRE_USER_CONSENT it first waits for a
+ * button press, and until then the job stays queued in the cloud and can simply be
+ * withdrawn. Both
  * announcements have to be accepted before the device goes on. It then waits a
  * little, looks at the job once more, and only then asks the bootloader for a trial
  * swap and restarts, so that a job cancelled in the meantime is not installed.
@@ -28,7 +29,10 @@
 
 enum ota_state {
 	OTA_IDLE,
-	/* A valid update is on offer and waits for Button 1 (install) or 2 (decline). */
+	/*
+	 * A valid update is on offer and waits for Button 1 (install) or 2 (decline). Only with
+	 * CONFIG_APP_OTA_REQUIRE_USER_CONSENT: otherwise nothing enters this state.
+	 */
 	OTA_AWAITING_USER,
 	/* A download failed. Waiting before the next attempt, so that a short outage of
 	 * the network does not use up all the attempts.

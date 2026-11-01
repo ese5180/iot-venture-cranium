@@ -1051,9 +1051,10 @@ static void cmd_stream_cancel(int argc, char **argv)
 /* ---- test bench ----------------------------------------------------------------- */
 
 /*
- * A press of a button without a finger on it, so that a test bench can drive an update
- * from start to finish. It takes the path of the real button. Like everything here it
- * does not exist in a release build, where only a person can consent.
+ * A press of a button without a finger on it, for a test bench. It takes the path of the
+ * real button. An update needs one only in a build with CONFIG_APP_OTA_REQUIRE_USER_CONSENT,
+ * and everywhere else this does nothing to one. Like everything here it does not exist in a
+ * release build, where only a person can consent.
  */
 static void cmd_button(int argc, char **argv)
 {

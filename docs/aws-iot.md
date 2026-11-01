@@ -88,8 +88,12 @@ The board writes its state to its classic shadow when something changes and, as 
     "fw":   { "version": "1.0.1+0", "confirmed": true },
     "ota":  { "state": "idle", "job": null, "progress": 0, "last": "succeeded", "error": "" },
     "wifi": { "rssi": -52 },
+    "stuck": { "count": 0, "reason": "none" },
     "uptime": 1234 } } }
 ```
+
+`stuck` is there from firmware 1.7.2 on: how many restarts in a row [the board's timers](../firmware/README.md#when-the-board-is-stuck)
+have come to, and the last reason. It is for a bench with no console. The console does not read it.
 
 `ota.state` is `idle`, `awaiting_user`, `downloading`, `verifying`, `rebooting` or
 `testing`. A build for firmware update over Bluetooth can also report `bluetooth`, which the console
@@ -101,8 +105,15 @@ field before showing it and never bases a decision on it.
 This report is the heartbeat. There is no second message, and no last will: the device policy allows a board to
 publish to its own shadow and jobs topics only, and a connection that announces any other topic is refused. AWS IoT
 stamps the time at which it received `uptime`, and a board is online when that is less than 90 seconds ago
-(`ONLINE_WINDOW_MS` in `cloud/api/src/lib/shadow.mjs`). A board that dies shows offline within 90 seconds. A board on
-the golden image, which reports every 60 seconds, stays online with one report that is late. The API sends the
+(`ONLINE_WINDOW_MS` in `cloud/api/src/lib/shadow.mjs`). A board that dies counts as offline in the API after 90
+seconds. A page that is open can take about 125 seconds to show it: the API keeps a shadow for 5 seconds, and a page
+with nothing under way asks every 30 seconds. A board on the golden image, which reports every 60 seconds, stays online
+with one report that is late, and counts as offline from 90 seconds until its next report if one is lost.
+
+A board that last said `rebooting` gets 240 seconds (`RESTART_WINDOW_MS`), because a real restart takes longer than
+90 seconds: about 21 seconds to the reset, 81 for the swap, and the first report of the image about 113 seconds after
+the last report. The page keeps saying Restarting and keeps asking every 3 seconds. So a board that dies in that state
+says Restarting for up to 240 seconds. The API sends the
 flag and the time, and the page shows them, as `Online, heartbeat 6 s ago` or `Offline, last heartbeat 3 min ago`,
 without working out the flag again.
 
@@ -129,9 +140,8 @@ document, so a link is never stored and is valid for 10 minutes only.
 | Step | Board | Job execution | Shadow `ota.state` |
 | --- | --- | --- | --- |
 | Deployment created | gets `notify-next`, asks for `$next` | `QUEUED` | `idle` |
-| Document checked: known format, strictly newer version, fits the slot, allowed URL prefix | waits for a button | `QUEUED` | `awaiting_user` |
-| Button 2 (decline), or a check failed | reports the refusal | `REJECTED`, `reason` | `idle` |
-| Button 1 | asks for the document again (fresh link), announces the start, waits for AWS IoT to accept | `IN_PROGRESS`, `step=downloading` | `downloading` |
+| A check failed: known format, strictly newer version, fits the slot, allowed URL prefix | reports the refusal | `REJECTED`, `reason` | `idle` |
+| Document checked | announces the start at once, with the link that came with it, and waits for AWS IoT to accept | `IN_PROGRESS`, `step=downloading` | `downloading` |
 | Download over HTTPS into the secondary slot | | | `downloading`, `progress` |
 | SHA-256 and signed header checked | announces the installation, waits for AWS IoT to accept | `IN_PROGRESS`, `step=rebooting` | `verifying`, then `rebooting` |
 | 20 seconds later | fetches the job once more; goes on only if it is still in progress | | `rebooting` |
@@ -139,8 +149,13 @@ document, so a link is never stored and is valid for 10 minutes only.
 | New image running on trial | reconnects to AWS IoT, confirms itself | `SUCCEEDED`, `running` | `testing`, then `idle` |
 | Not confirmed within 5 minutes, or the watchdog fires (120 seconds) | reset, MCUboot swaps back, old image reports | `FAILED`, `reason=rolled_back` | `idle` |
 
-Because an offered update stays `QUEUED` until the button is pressed, cancelling a
-deployment simply withdraws it. Because the board waits for AWS IoT to accept both
+That is firmware from 1.7.2 on. Firmware before it, the golden image 1.5.0 among it, and a build with
+`CONFIG_APP_OTA_REQUIRE_USER_CONSENT` wait for a button once the document has been checked: the execution stays `QUEUED`
+and the shadow says `awaiting_user`. Button 2 declines (`REJECTED`, `reason=declined`). Button 1 asks for the document
+again, for a fresh link, and goes on with the start as above.
+
+An update that has not reached a board yet is withdrawn by cancelling its deployment, and on a board that
+waits for a button so is one on offer. Because the board waits for AWS IoT to accept both
 announcements, an update that is cancelled, or whose release is revoked, after the
 button press is dropped before it is installed.
 
@@ -239,7 +254,8 @@ Releasing an update:
 1. Raise the version in `firmware/app/VERSION` and build. The build signs the image with
    the key in `~/.cranium/` and stores it in `binaries/`.
 2. In the console, upload `binaries/latest.signed.bin`.
-3. Deploy it, then press Button 1 on each board.
+3. Deploy it. A board on 1.7.2 or newer installs it as soon as it sees it. A board on older firmware, the golden image
+   among it, waits until someone presses Button 1 on it.
 
 `scripts/ota.sh` does steps 2 and 3 for one board and follows the update to the end. It invokes
 the API function directly, which bypasses API Gateway and sign-in (see [Known limits](#known-limits)).
@@ -262,7 +278,7 @@ log group `AWSIotLogsV2`.
 | Keys isolated from application software | Partly met. Device credentials are in TF-M Protected Storage, encrypted with a key derived from the hardware unique key, and never in the image. TLS and signing run through PSA Crypto in the secure world. That is encryption at rest, not isolation: the TLS stack reads the device key into non-secure memory at each connection (see [Known limits](#known-limits)). |
 | TLS everywhere, forward secrecy, authenticated encryption | MQTT with mutual TLS on port 8883 and HTTPS for the download. The firmware offers only ECDHE suites, so every session has forward secrecy. It sets no narrower list, so it also offers CCM and CBC suites next to AES-GCM, and the server chooses (see [Known limits](#known-limits)). The bucket refuses plain HTTP. |
 | Least privilege | Met for the boards and the console. The device policy is limited to the board's own topics. The console's roles have no delete, publish, signing or certificate rights. Not met for the operator: deployment and the bench run as the AWS root user (see [Known limits](#known-limits)). |
-| Secure update: safe failure, no rollback to old firmware | Partly met. Over the air: trial boot with automatic revert; version checks in the console and the application, and in MCUboot for a test or permanent swap; user consent on the board. A revert skips MCUboot's check, and code in the application can forge one. Serial recovery has no version check and no trial, and a golden image restore goes back to the frozen image on purpose (see [Known limits](#known-limits)). |
+| Secure update: safe failure, no rollback to old firmware | Partly met. Over the air: trial boot with automatic revert; version checks in the console and the application, and in MCUboot for a test or permanent swap; an update begins only when a release manager deploys it. A revert skips MCUboot's check, and code in the application can forge one. Serial recovery has no version check and no trial, and a golden image restore goes back to the frozen image on purpose (see [Known limits](#known-limits)). |
 | No default or shared passwords, two-factor sign-in | Administrator-created accounts with a temporary password and a required authenticator code. |
 | Log security-relevant actions, never secrets | An audit entry for every attempted change that reaches the API function. A request that API Gateway's token check refuses appears only in the access log. An entry that cannot be stored is lost, and if the change itself succeeded the caller gets `audit_failed`. IAM lets the API's role only put and query entries, so it cannot delete or update one. A put could still replace an entry with the same key, and IAM cannot forbid that: the code sends a condition on every put that refuses it. To notice a rewrite, the function logs a digest of each entry, which the role cannot change, and `cloud/api/verify-audit.mjs` compares the two for the 90 days the log keeps its lines. Access log without query strings; no tokens, links or request bodies in any log. |
 | Only the servers a device needs | The board talks to its AWS IoT endpoint and downloads from one bucket prefix. |
@@ -282,6 +298,11 @@ Stated plainly. What has been measured, and on which firmware, is in the
   that is off, not a running one. Moving the key into AWS KMS
   (sign with `imgtool --vector-to-sign`, `aws kms sign`, `imgtool --fix-sig`) would mean
   no person holds it at all.
+- From firmware 1.7.2 on nobody at the board agrees to an update. Whoever can deploy, which is a signed-in release
+  manager, can install any signed image that is newer than what a board runs, on a board with nobody at it, and so can
+  anyone with AWS rights to create a job. That was given up on purpose. The signature check, the version check, the trial
+  and the revert all still hold, so what gets installed is still something this project signed, and an image that cannot
+  reach the cloud still goes back. The frozen golden image 1.5.0 is older and still asks for Button 1.
 - Downgrade protection is by version comparison in MCUboot, not by a hardware counter.
 - A compromised application can get round that comparison. MCUboot makes it before a test or permanent
   swap, and skips it for a revert (`check_downgrade_prevention()` in `loader.c`). The application can
@@ -393,11 +414,11 @@ console accounts and the audit log. Firmware images hold no secrets.
 | --- | --- | --- |
 | Someone on the network path | TLS with verified certificates on every connection, and signed images. | They can block traffic. An update then waits or fails, and nothing is installed. |
 | Someone on the internet, with no account | Sign-in with a password and an authenticator code. Uploads need a valid signature. | A flood can use up the API's shared request limit, because an HTTP API has no per-caller limit. Wrong passwords against a known address can keep that person from signing in. The AWS CLI stop still works in both cases, and an administrator can add an account at another address. |
-| A stolen release-manager session | The console cannot sign. Boards verify with their own key, refuse older versions and wait for Button 1. | Until the token expires they can deploy existing releases, cancel and revoke. |
+| A stolen release-manager session | The console cannot sign. Boards verify with their own key and refuse older versions. | Until the token expires they can deploy existing releases, cancel and revoke, and from firmware 1.7.2 on a board installs a newer release with nobody at it. |
 | A break-in at the API function | The same: the function cannot sign, and boards make the same checks. | Until the code is replaced it holds the API role, with no token limit. It can create jobs, cancel, revoke and add false audit entries. |
 | Code running in the application on one board | MCUboot refuses unsigned firmware. Other boards are out of reach. The pin in the bootloader keeps any other image from being restored as the golden one. | That board's device key can be read. Retire its certificate. It can forge a revert to an older signed image, the golden image among them, and it can erase the golden copy (see [Known limits](#known-limits)). |
 | Someone holding a development kit | Nothing yet: the debug port is open. | They can read or replace anything on that board, and Button 2 takes it back to the golden image and its known flaws. A product build would have to lock the port. This repository has no such build yet. |
-| Someone with the signing key | Nothing on the boards, which would accept the image. Over the air, Button 1 is still needed. With access to the UART, serial recovery takes the image with no button. | The key is a file on the builder's machine. Replacing it means reflashing boards and freezing a new golden image. The pin keeps the golden copy itself from being replaced with the key alone. |
+| Someone with the signing key | Nothing on the boards, which would accept the image. Over the air it still takes a job, which takes a release manager or AWS rights, and the golden image 1.5.0 still waits for Button 1. With access to the UART, serial recovery takes the image with no button. | The key is a file on the builder's machine. Replacing it means reflashing boards and freezing a new golden image. The pin keeps the golden copy itself from being replaced with the key alone. |
 | An AWS administrator | Nothing in the cloud. The CloudTrail record (`cloud/trail.sh`) and the audit digests show many changes afterwards. | They can change anything in the cloud, and can act in the console as any active release manager by invoking the API function. They cannot sign firmware without the key. Today this is the root user (see [Known limits](#known-limits)). |
 
 ## Cost

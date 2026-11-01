@@ -1,7 +1,6 @@
 /*
  * Host build: the download library and PSA, as far as ota.c uses them. Functions are only
- * declared here, and test_ota_bt.c defines them. It only looks at what Bluetooth updates add to
- * ota.c, so nothing in these does any real work.
+ * declared here, and test_ota_bt.c defines them, and nothing in those does any real work.
  */
 #ifndef HOST_STUB_OTA_H_
 #define HOST_STUB_OTA_H_
