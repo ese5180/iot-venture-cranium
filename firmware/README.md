@@ -54,7 +54,7 @@ app/                     application-core image and the sysbuild configuration
 netcore/                 network-core image
 certs/AmazonRootCA1.pem  root CA that tools/provision_device.py loads onto each board
 keys/fw_signing_pub.pem  public half of the signing key
-golden.json              the frozen golden image, written by tools/golden.py once there is one
+golden.json              the frozen golden image, firmware 1.5.0, written by tools/golden.py
 tests/host/              host tests of the job parser, the version code, the console and Bluetooth updates
 tests/hil/               hardware test benches, and tests of the tools that talk to a board
 ```
@@ -200,7 +200,7 @@ nothing: one failed read must not take it off the network.
 | `tests/hil/ota_bench.py` | Hardware tests of firmware updates. |
 | `tests/hil/console_bench.py` | Hardware tests of this console. `console_bench.py plan` shows what it would do, and which steps erase the board. It runs nothing until told to with `run --no-erase` or `run --erase`. It checks first that it could provision the board again, does so after erasing it, and keeps a note of whatever is not undone yet, so that `console_bench.py restore` can put it right after an interrupted run. |
 | `tools/golden.py` | Freeze the [golden image](#golden-image), record what qualified it, check that the manifest, the bootloader's configuration and the file agree, and send it through serial recovery. |
-| `tests/hil/golden_bench.py` | Hardware tests of the golden image, with no Wi-Fi. `golden_bench.py plan` lists them and touches nothing, and `golden_bench.py images` builds the fault images they upload. |
+| `tests/hil/golden_bench.py` | Hardware tests of the golden image, with no Wi-Fi but for G15 and G16. `golden_bench.py plan` lists them and touches nothing, and `golden_bench.py images` builds the fault images they upload. |
 | `tests/hil/build_image.sh` | Build a signed test image from a scratch copy, for example with `-Dapp_CONFIG_APP_TEST_FAULT_INIT_POWER_LOSS=y`, the image that loses power in the middle of `INIT`. |
 
 ## What the LEDs show
@@ -575,7 +575,7 @@ the bootloader. There is no cloud, job, console, serial or automatic way to star
 `CONFIG_CRANIUM_GOLDEN` stays off in the bootloader's `prj.conf` until an image has been frozen, and
 is on now: firmware 1.5.0 is the frozen image. With it off nothing of this is built into the bootloader. The one
 trace is `golden_partition` in its devicetree, which adds one 16-byte entry to its flash map. With it
-on, the bootloader was 50,324 bytes of its 64 KiB when this was written, against 47,452 with it off.
+on, the bootloader is 50,324 bytes of its 64 KiB in the 1.5.0 and 1.6.0 builds, against 47,452 with it off.
 Both counts include the check on serial recovery's image number, described under
 [Who can change it](#who-can-change-it), which is built in either way.
 
@@ -658,22 +658,31 @@ but the secondary slot stays as it was, and an image waiting there for a swap wo
 
 ### Freezing an image
 
+These are the steps as they were done for firmware 1.5.0 on 2026-11-01: the version went in at commit
+907d8cd, the image was built from that commit, and the pin went in at commit f9685e9.
+`golden_bench.py run G0 G1 G2 G3 G4` did steps 4 to 8 on the board, with the debug port holding the
+button.
+
 1. Set a new version in `app/VERSION`, commit, and build from a clean tree, with
    `west build --pristine`. The image lands in `binaries/`. `tools/golden.py freeze` refuses an image
    built with uncommitted changes, a tree with uncommitted changes, an image from before the latest
    commit (`--older-commit` is the way round that) and an image built with `-D` settings, which stay
    in a build directory until it is removed.
-2. `python tools/golden.py freeze binaries/cranium-<version>.signed.bin`. This verifies the
+2. `python tools/golden.py freeze binaries/cranium-<version>-<build>.signed.bin`. This verifies the
    signature with `keys/fw_signing_pub.pem`, copies the file to `binaries/golden/`, writes
    `golden.json`, and sets the three lines in `app/sysbuild/mcuboot/prj.conf`. Commit those two
    files. From here on the copy in `binaries/golden/` is the golden image, and no other: the next step
-   builds the same commit again, which writes a new `binaries/cranium-<version>.signed.bin` with
-   another digest, because TF-M and Zephyr put the build time in their boot banners.
-3. Save the bootloader that is on the board now: `golden_bench.py run G0` reads it back through
+   builds the same commit again, which writes a new `binaries/cranium-<version>-<build>.signed.bin` with
+   another digest, because TF-M and Zephyr put the build time in their boot banners. For 1.5.0 that
+   file came out at 759,060 bytes, and the frozen one is 759,058.
+3. Rebuild, and check that the build used the pin with
+   `python tools/golden.py check --config build/mcuboot/zephyr/.config`.
+4. Save the bootloader that is on the board now: `golden_bench.py run G0` reads it back through
    the debug port, into `binaries/golden/mcuboot-before-golden.hex`.
-4. Rebuild, check that the build used the pin with
-   `python tools/golden.py check --config build/mcuboot/zephyr/.config`, and flash the bootloader only.
-   This is the command the bench uses (G3), and its options are what keeps TF-M storage and provisioning:
+5. `python tools/golden.py restore --reset --serial-number <probe>` puts the image in the primary slot,
+   in about 4 minutes, through the bootloader that is still on the board (G2).
+6. Flash the bootloader only. This is the command the bench uses (G3), and its options are what keeps
+   TF-M storage and provisioning:
 
    ```sh
    nrfutil device program --serial-number <probe> --firmware build/mcuboot/zephyr/zephyr.hex \
@@ -681,17 +690,16 @@ but the secondary slot stays as it was, and an image waiting there for a swap wo
    nrfutil device reset --serial-number <probe> --reset-kind RESET_PIN
    ```
 
-5. `python tools/golden.py restore --reset --serial-number <probe>` puts the image in the primary slot,
-   in about 4 minutes.
-6. Do the gesture. The bootloader's log, on the board's first virtual COM port, says `sealed`.
-   Do it again, and it says `nothing to do`.
 7. `python tools/recover.py --reset --serial-number <probe> list` shows a hash equal to `hash_tlv` in
    `golden.json`.
-8. When the image has passed the bench on this bootloader, and its over-the-air regression, record
+8. Do the gesture. The bootloader's log, on the board's first virtual COM port, says `sealed`.
+   Do it again, and it says `nothing to do` (G4).
+9. When the image has passed the bench on this bootloader, and its over-the-air regression, record
    that: `python tools/golden.py qualify "<the bench run>"`, and commit `golden.json`. The regression
    needs this bootloader, so it comes after the freeze. `golden.py check --qualified` insists on it.
    A run that qualifies has `"rehearsal": false` in `results.jsonl`, with the image's and the
    bootloader's SHA-256, and no `PARTIAL`: `qualify` takes your word for that, and does not read the file.
+   This step has not been done for 1.5.0: see [Tests](#tests).
 
 The image file is not in git, because the repository is public. Keep a copy with whoever holds
 the signing key.
@@ -764,14 +772,45 @@ to it again. Going back also brings back the hole in serial recovery's image num
 restore's erase, the image number check and the button fix. `python3 firmware/tests/hil/test_golden.py`
 tests what the tool refuses and how the bench drives the debug port, and runs the whole bench on a
 stand-in for the board. `python3 firmware/tests/hil/golden_bench.py` runs the rest on a board, with no
-Wi-Fi: see `golden_bench.py plan`. By default it needs nobody. It holds the button from the debug port,
-by driving P1.09 low once the bootloader has configured the pin, and the bootloader has no test code
-for this.
+Wi-Fi but for G15 and G16: see `golden_bench.py plan`. By default it needs nobody. It holds the button
+from the debug port, by driving P1.09 low once the bootloader has configured the pin, and the bootloader
+has no test code for this.
+
+What these tests showed on the frozen 1.5.0 and its bootloader is in the
+[README](../README.md#the-golden-image-on-firmware-150), test by test.
+
+G14 is the test of the image number check. It sends the first chunk of an upload for image numbers 1
+and 3, which a bootloader without the check maps to the primary and the secondary slot, and each has
+to be refused. Then the board must still run the image, and the gesture must find nothing to do. It
+does not send the numbers that would reach the bootloader's own partition, TF-M storage or the golden
+copy, and it stops on a bootloader without the check, so this bench has never run the hole itself. On
+the frozen bootloader both numbers got error 3.
+
+G15 and G16 do the gesture during a real update: G15 while a new image runs on trial, G16 in the middle
+of the swap. In both, the board has to end up on the golden image with no revert and no resumed swap,
+and the update must not report success. They need Wi-Fi and AWS, G15 also `--trial-image`, and **they
+have not run yet**. Whether the rest of the over-the-air regression has run is in the
+[README](../README.md#over-the-air-on-the-final-firmware).
 
 That stand-in has limits, and a test it cannot finish ends as `PARTIAL`, not `PASS`, with the part that
 did not run in its line of `results.jsonl`. It cannot hold the button down into the application, because
 every stage of the boot configures the pin again, so G5c leaves out the check in `ui.c` and G5f reaches
 it from the input driver on. And it is not a hand. A reading of the pin before the breakpoint would not
 be seen on the bench, though with a hand it would stop the gesture: `test_golden.py` checks the source
-for one, and only a person can check the rest. Before an image is frozen or the gesture is taught, a
-person runs G4, G5a to G5e with `--gesture person`, and G5d and G11 with `--power-cuts` as well.
+for one, and only a person can check the rest.
+
+**What needs a person.** G5e, the gesture from power-off, needs a person to pull the cable, and so do
+the power cuts in G5d and G11. Those two and G5c are `PARTIAL` on the frozen image for this reason, and
+G5e has not run. A person should do this before the gesture is taught. None of it has been done, and
+1.5.0 was frozen without it:
+
+```sh
+python3 firmware/tests/hil/golden_bench.py run G4 G5a G5b G5c G5d G5e G11 --gesture person --power-cuts
+```
+
+Add `--out <folder>` to choose where the logs and `results.jsonl` go: by default that is
+`build-hil-golden/`.
+
+`python tools/golden.py qualify` has not been used, because that needs those runs, G15, G16 and the
+over-the-air regression. `qualifying_bench_run` in `golden.json` is empty until then, and
+`golden.py check --qualified` refuses.

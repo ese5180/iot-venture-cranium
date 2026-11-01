@@ -21,8 +21,8 @@ copies of the system, which every option below adds in some form.
 
 ## Requirements
 
-Taken from the README's requirement tables and manual section 3.5.6. The manual asks for
-FOTA on the nRF board only; applying 3.5.6 to the Pi is our own choice.
+Taken from the README's requirement tables and manual section 3.5.5. The manual asks for
+FOTA on the nRF board only; applying 3.5.5 to the Pi is our own choice.
 
 | ID | Requirement | Source |
 | --- | --- | --- |
@@ -30,9 +30,9 @@ FOTA on the nRF board only; applying 3.5.6 to the Pi is our own choice.
 | P2 | Talks to the nRF board over UART (heartbeat, battery level). | SRS 03 |
 | P3 | Ready to use within 30 s of power-on. | SRS 01 |
 | P4 | A shutdown on low battery leaves no filesystem corruption. | SRS 05 |
-| P5 | Installs an update only if it is signed with our key. | 3.5.6, invalid signature |
-| P6 | Returns to the previous version by itself if a signed update fails to boot or start. | 3.5.6, faulty code with a valid signature |
-| P7 | A corrupted or interrupted download leaves the running system untouched. | 3.5.6, corrupted download |
+| P5 | Installs an update only if it is signed with our key. | 3.5.5, invalid signature |
+| P6 | Returns to the previous version by itself if a signed update fails to boot or start. | 3.5.5, faulty code with a valid signature |
+| P7 | A corrupted or interrupted download leaves the running system untouched. | 3.5.5, corrupted download |
 | P8 | Keeps the music library and settings across updates. | SRS 04 |
 | P9 | Updated over Wi-Fi, ideally from the same console as the nRF board. | [aws-iot.md](aws-iot.md) |
 | P10 | Starts an update only after the user confirms it, and never while audio is playing. | SEC 04 |

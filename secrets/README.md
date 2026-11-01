@@ -3,6 +3,7 @@
 No secret is stored in this repository's folder, not even in an ignored file. Each
 developer's secrets live in `~/.cranium/` on their own machine, where they cannot be
 committed by accident and are not picked up by a synchronised Desktop or Documents folder.
+The tools and the build read the two files below from that folder, and nothing else.
 
 | File in `~/.cranium/` | What it is | How it gets there |
 | --- | --- | --- |
@@ -11,6 +12,9 @@ committed by accident and are not picked up by a synchronised Desktop or Documen
 
 `wifi_secrets.h.example` in this directory shows the format of the second file.
 `python tools/secrets.py status` lists what exists and who can read it.
+
+The test benches' logs are not secrets, but keep them private too. `build-hil/` and the other `build-*`
+folders, which git ignores, hold the Wi-Fi network's name, AWS endpoints and the like.
 
 `python tools/secrets.py wifi --unlocked` writes the file owned by you instead of by root. Then
 no administrator password is needed, so a test bench can provision a board with nobody at the
@@ -45,6 +49,10 @@ bootloader, and an update over the air does not change the bootloader. A board f
 change still has the old key's bootloader, so it refuses every image signed with the new key.
 Build from this checkout, then run `west flash --recover`, which erases both cores, and provision
 the board again with `python tools/provision_device.py`.
+
+**The golden image is signed with the key too.** A bootloader with a new key refuses the old golden
+copy. So a new key also means freezing a new golden image:
+[`firmware/README.md`](../firmware/README.md#freezing-an-image) has the steps.
 
 ## Back up the signing key
 
@@ -81,10 +89,13 @@ over the air cannot change the key in a bootloader, so every board has to be ref
    refuses to overwrite a key. It also rewrites `firmware/keys/fw_signing_pub.pem`. Commit that file.
 3. Run `cloud/deploy.sh --replace-signing-key`, so that the console trusts the new public half and
    refuses images signed with the old key.
-4. Build from this checkout, reflash every board with `west flash --recover`, and provision it
+4. Freeze a new golden image with the new key:
+   [`firmware/README.md`](../firmware/README.md#freezing-an-image). The old one is signed with the
+   leaked key, and a bootloader with the new key refuses it.
+5. Build from this checkout, reflash every board with `west flash --recover`, and provision it
    again with `python tools/provision_device.py`. A board accepts images signed with the old key
    until this is done.
-5. Destroy the old key and its backups, make a new backup, and update the table under
+6. Destroy the old key and its backups, make a new backup, and update the table under
    [The current key](#the-current-key).
 
 Replacing the key for any other reason takes the same steps.

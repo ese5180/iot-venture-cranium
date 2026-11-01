@@ -14,14 +14,21 @@ everything in this folder except this file.
 Two ways to put an image on a board over the air:
 
 - **From the command line:** `scripts/ota.sh` installs the newest build, and
-  `scripts/ota.sh binaries/cranium-1.2.0-0.signed.bin` installs that one.
+  `scripts/ota.sh binaries/cranium-1.6.0-0.signed.bin` installs that one.
 - **From the website:** on the console's Firmware page, choose the file here. The server
   checks its signature against the project's public key before it stores anything, and
   then offers to deploy it.
 
 A release must be newer than every release uploaded before it, so set a new version in
-`firmware/app/VERSION` before you build. Images built by the test bench and images with a
-test fault built in are not kept here.
+`firmware/app/VERSION` before you build. Images built by the test bench, images with a
+test fault built in and images built for Bluetooth are not kept here.
+
+**Before a demo on the website.** A file dropped on the console's Firmware page must be newer than
+every release ever registered, revoked ones included. Otherwise the console refuses it and names the
+highest version it has seen. `latest.signed.bin` is only the newest build, and the same file cannot be
+uploaded twice, so it is refused once it has been uploaded, or once anything higher has. So
+`latest.signed.bin` needs a higher build first: raise the version in `firmware/app/VERSION`, run
+`west build`, and check the version in `latest.json`. Do this before the demo starts.
 
 ## The golden image
 
