@@ -26,11 +26,14 @@ CONSOLE_SOURCES := $(SRC)/console_cmd.c $(SRC)/console_parser.c $(SRC)/console_s
 CONSOLE_HEADERS := $(wildcard $(SRC)/*.h) console_fakes.h
 
 .PHONY: test clean
-test: $(BUILD)/host_tests $(BUILD)/console_tests $(BUILD)/console_output_tests $(BUILD)/app_tests $(BUILD)/console_sim
+test: $(BUILD)/host_tests $(BUILD)/console_tests $(BUILD)/console_output_tests $(BUILD)/app_tests $(BUILD)/console_sim \
+		$(BUILD)/ui_tests $(BUILD)/golden_policy_tests
 	./$(BUILD)/host_tests
 	./$(BUILD)/console_tests
 	./$(BUILD)/console_output_tests
 	./$(BUILD)/app_tests
+	./$(BUILD)/ui_tests
+	./$(BUILD)/golden_policy_tests
 
 $(BUILD)/cJSON.o: $(CJSON_DIR)/cJSON.c
 	@mkdir -p $(BUILD)
@@ -55,6 +58,20 @@ $(BUILD)/console_output_tests: test_console_output.c $(SRC)/console.c $(SRC)/con
 $(BUILD)/app_tests: test_app.c $(SRC)/main.c $(SRC)/net.c $(CONSOLE_HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(WARNINGS) $(CONSOLE_DEFINES) -o $@ test_app.c
+
+# ui.c, included by its test to get at its input callback.
+$(BUILD)/ui_tests: test_ui.c $(SRC)/ui.c $(SRC)/ui.h $(SRC)/app_events.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -DCONFIG_APP_LOG_LEVEL=0 -o $@ test_ui.c
+
+# What the golden image's code in the bootloader decides, and the bootloader's check on serial
+# recovery's image number. They need nothing but the C library and a stub of one MCUboot header.
+GOLDEN_SRC := ../../app/sysbuild/mcuboot/golden/src
+$(BUILD)/golden_policy_tests: test_golden_policy.c $(GOLDEN_SRC)/golden_policy.c $(GOLDEN_SRC)/golden_policy.h \
+		$(GOLDEN_SRC)/image_number_guard.c stubs/bootutil/boot_hooks.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(WARNINGS) -I$(GOLDEN_SRC) -o $@ test_golden_policy.c $(GOLDEN_SRC)/golden_policy.c \
+		$(GOLDEN_SRC)/image_number_guard.c
 
 # The console on a pseudo-terminal, for firmware/tests/hil/test_board.py. No sanitizers
 # are needed for that, and the tools' tests do not have to run with their runtime.

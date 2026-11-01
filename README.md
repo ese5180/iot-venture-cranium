@@ -181,8 +181,8 @@ python tools/recover.py reset                                      # restart a b
 ```
 
 The tool finds the port by itself; `--port` overrides that. MCUboot takes whatever it is sent and
-writes it straight into the primary slot. At the restart it checks the signature and starts
-nothing that fails. It then stays and waits for a good image.
+writes it straight into the primary slot, the one target it accepts. At the restart it checks the
+signature and starts nothing that fails. It then stays and waits for a good image.
 
 This path has limits. It has no version check, so any image ever signed with this key can be
 installed over a newer one. The image does not run on trial and there is no revert. On a

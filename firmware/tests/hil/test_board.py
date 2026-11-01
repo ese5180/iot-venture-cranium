@@ -53,7 +53,7 @@ STATUS_REPLY = (
     "id             ABC123\r\n"
     "thing name     cranium-fe5b26c0c5b1dcd7\r\n"
     "firmware       1.3.0+0\r\n"
-    "wifi network   Vihaan’s iPhone\r\n"
+    "wifi network   Tester’s iPhone\r\n"
     "wifi password  set\r\n"
     "wifi link      up\r\n"
     "wifi address   02:00:00:00:00:01\r\n"
@@ -248,10 +248,10 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual(console_on(fake).run(command), [])
 
     def test_a_network_name_goes_byte_for_byte(self):
-        command = f"WIFI|Vihaan’s iPhone|{PASSWORD}"
+        command = f"WIFI|Tester’s iPhone|{PASSWORD}"
         fake = FakeBoard({command: "OK saved\r\n"})
         console_on(fake).run(command)
-        self.assertIn("Vihaan’s iPhone".encode("utf-8"), fake.written[-1])
+        self.assertIn("Tester’s iPhone".encode("utf-8"), fake.written[-1])
 
     def test_a_board_that_does_not_answer(self):
         board.HANDSHAKE_SECONDS, seconds = 0.05, board.HANDSHAKE_SECONDS
@@ -288,7 +288,7 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual(status["state"], "OPERATING")
         self.assertEqual(status["thing name"], "cranium-fe5b26c0c5b1dcd7")
         self.assertEqual(status["firmware"], "1.3.0+0")
-        self.assertEqual(status["wifi network"], "Vihaan’s iPhone")
+        self.assertEqual(status["wifi network"], "Tester’s iPhone")
         self.assertEqual(status["cloud"], "connected")
         self.assertEqual(status["update"], "idle (last: none)")
         self.assertEqual(status["private key"], "set")
@@ -355,7 +355,7 @@ class ProvisioningTest(unittest.TestCase):
         provision_device.read_wifi_secrets = self.original_read
 
     def test_the_network_is_sent_with_its_security(self):
-        ssid = "Vihaan’s iPhone"
+        ssid = "Tester’s iPhone"
         provision_device.read_wifi_secrets = lambda: (ssid, PASSWORD, "WPA3_SAE")
         command = f"WIFI_SEC|{ssid}|WPA3_SAE|{PASSWORD}"
         fake = FakeBoard({command: f"OK saved, connecting to {ssid}\r\n"})
@@ -460,7 +460,7 @@ class SimulatedBoardTest(unittest.TestCase):
     def test_a_network_name_with_an_apostrophe_arrives_whole(self):
         self.console.run("INIT|ABC123")
         self.console.wait_until_up(3)
-        ssid = "Vihaan’s iPhone"
+        ssid = "Tester’s iPhone"
         self.console.run(f"WIFI|{ssid}|{PASSWORD}")
         self.assertEqual(self.console.status()["wifi network"], ssid)
         self.assertEqual(self.console.status()["wifi password"], "set")
@@ -616,7 +616,7 @@ class BenchAgainstSimulatorTest(SimulatedBoard, unittest.TestCase):
             release_image=str(Path(self.folder.name) / "release.bin"),
             serial_number="123", no_erase=False)
         self.bench = console_bench.ConsoleBench(args)
-        self.bench.credentials = ("Vihaan’s iPhone", PASSWORD, "WPA2_PSK")
+        self.bench.credentials = ("Tester’s iPhone", PASSWORD, "WPA2_PSK")
         self.bench.secret_values.append(PASSWORD)
         self.bench.console.wait_until_up(5)
 

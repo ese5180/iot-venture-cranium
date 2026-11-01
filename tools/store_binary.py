@@ -3,7 +3,7 @@
 
     binaries/cranium-1.2.0-0.signed.bin    this version, named so that the console accepts it
     binaries/latest.signed.bin             a copy of the newest build
-    binaries/latest.json                   its version, size, digest and git commit
+    binaries/latest.json                   its version, size, digest, git commit and -D settings
 
 Only a build of the checkout itself is kept: the test bench builds from scratch copies,
 which have no .git, and an image built with a test fault is refused. A signed image is not
@@ -39,6 +39,17 @@ def image_version(data: bytes) -> tuple[str, str]:
 def has_test_fault(config: Path) -> bool:
     text = config.read_text() if config.exists() else ""
     return re.search(r"^CONFIG_APP_TEST_FAULT_(?!NONE)\w+=y$", text, re.MULTILINE) is not None
+
+
+def command_line_settings(build: Path) -> list[str]:
+    """What -D gave this build. CMake keeps it in the build directory's cache, so it goes on
+    changing images after the command that set it is forgotten, on a tree that git calls clean.
+    An entry of the form -DNAME:TYPE=value is not seen: this is a record, not a lock."""
+    cache = build / "CMakeCache.txt"
+    text = cache.read_text() if cache.exists() else ""
+    found = re.findall(r"^(\w+):UNINITIALIZED=(.*)$", text, re.MULTILINE)
+    # West's own, which every build has.
+    return [f"{name}={value}" for name, value in found if name != "WEST_PYTHON"]
 
 
 def git_commit(repo: Path) -> str:
@@ -88,6 +99,7 @@ def main() -> None:
         "size": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
         "commit": git_commit(args.repo),
+        "command_line": command_line_settings(args.build),
         "built": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }, indent=2) + "\n")
     prune(folder)

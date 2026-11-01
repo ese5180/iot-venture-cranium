@@ -92,7 +92,13 @@
 	};
 };
 
-/* External flash: the secondary image slot, the same size as the primary slot. */
+/*
+ * External flash: the secondary image slot, the same size as the primary slot.
+ *
+ * 0x700000 to 0x7e4000 is reserved for the golden image. MCUboot's overlay declares that
+ * partition, and this one does not on purpose, so that this application's flash map has no
+ * area for it. Keep it out of anything added here. See firmware/README.md.
+ */
 &mx25r64 {
 	status = "okay";
 

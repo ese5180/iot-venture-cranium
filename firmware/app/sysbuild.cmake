@@ -22,6 +22,11 @@ if(SB_CONFIG_NETCORE_BLINKY)
   set_config_bool(${DEFAULT_IMAGE} CONFIG_SOC_NRF53_CPUNET_ENABLE y)
 endif()
 
+# The golden image is a module of MCUboot, not of this application: it has to live with the
+# bootloader's own code. With CONFIG_CRANIUM_GOLDEN off the golden image adds nothing to it, and
+# the module still holds the bootloader's check on serial recovery's image number.
+set(mcuboot_EXTRA_ZEPHYR_MODULES "${CMAKE_CURRENT_LIST_DIR}/sysbuild/mcuboot/golden" CACHE INTERNAL "")
+
 # Keep the signed image of every build of this checkout in binaries/, where scripts/ota.sh
 # and the console's upload page can find it. See tools/store_binary.py.
 get_filename_component(cranium_repo "${APP_DIR}/../.." ABSOLUTE)

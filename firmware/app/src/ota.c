@@ -41,6 +41,10 @@ LOG_MODULE_REGISTER(ota, CONFIG_APP_LOG_LEVEL);
 
 #define RECORD_MAGIC 0x4f544132 /* "OTA2" */
 
+/* BOOT_MAGIC_SZ in MCUboot, at the end of a slot, and what erased internal flash reads as. */
+#define TRAILER_MAGIC_SIZE 16
+#define TRAILER_ERASED     0xff
+
 enum record_phase {
 	/* The trial swap was requested and the device was about to restart. */
 	RECORD_ARMED = 1,
@@ -688,6 +692,32 @@ static void on_job(const struct ota_job *incoming)
 	accept_job(incoming);
 }
 
+/*
+ * A swap leaves its magic number in the last bytes of the slot. Those are erased if the image got
+ * there another way, and boot_is_img_confirmed() cannot tell that from a confirmed image. A read
+ * that fails says nothing, so it does not change what is reported.
+ */
+static bool primary_has_trailer(void)
+{
+	const struct flash_area *area;
+	uint8_t magic[TRAILER_MAGIC_SIZE];
+	bool found = true;
+
+	if (flash_area_open(PARTITION_ID(slot0_partition), &area) != 0) {
+		return true;
+	}
+
+	if (flash_area_read(area, area->fa_size - sizeof(magic), magic, sizeof(magic)) == 0) {
+		found = false;
+		for (size_t i = 0; i < sizeof(magic); i++) {
+			found = found || magic[i] != TRAILER_ERASED;
+		}
+	}
+
+	flash_area_close(area);
+	return found;
+}
+
 int ota_init(void)
 {
 	static struct ota_record stored;
@@ -722,35 +752,50 @@ int ota_init(void)
 	if (ota.have_record) {
 		bool running_target = fw_version_compare(&ota.record.target, fw_version_running()) == 0;
 
-		if (running_target && on_trial) {
+		switch (ota_restart_outcome(running_target, on_trial, primary_has_trailer(),
+					    ota.record.phase == RECORD_TESTING)) {
+		case OTA_RESTART_ON_TRIAL:
 			LOG_INF("Running new firmware %s on trial", fw_version_running_string());
 			ota.record.phase = RECORD_TESTING;
 			(void)store_write(STORE_OTA_RECORD, &ota.record, sizeof(ota.record));
 			health_trial_begin();
 			enter(OTA_TESTING);
-		} else if (running_target) {
+			break;
+		case OTA_RESTART_CONFIRMED:
 			/* Confirmed earlier, but the report did not get out. */
 			ota.report = REPORT_SUCCEEDED;
 			set_last("succeeded", "");
-		} else if (ota.record.phase == RECORD_TESTING) {
+			break;
+		case OTA_RESTART_TRIAL_LOST:
+			LOG_ERR("This image runs with no trailer: its trial was lost, and it proved nothing");
+			ota.report = REPORT_FAILED;
+			ota.report_reason = "trial_lost";
+			set_last("failed", "trial_lost");
+			break;
+		case OTA_RESTART_ROLLED_BACK:
 			LOG_ERR("The updated firmware was not confirmed: the bootloader reverted it");
 			ota.report = REPORT_FAILED;
 			ota.report_reason = "rolled_back";
 			set_last("rolled_back", "not confirmed");
-		} else {
+			break;
+		default:
 			LOG_ERR("The bootloader did not install the downloaded image");
 			ota.report = REPORT_FAILED;
 			ota.report_reason = "not_installed";
 			set_last("failed", "not_installed");
+			break;
 		}
 	} else if (on_trial) {
-		/* An image put on trial by other means, for example the bootloader's serial
-		 * recovery: it still has to prove itself.
+		/* On trial with no record of an update: the record was lost, or something other
+		 * than this code asked for the swap. It still has to prove itself.
 		 */
 		health_trial_begin();
 		enter(OTA_TESTING);
 	} else if (!boot_is_img_confirmed()) {
-		/* Written directly over the debug port: there is nothing to revert to. */
+		/* A trailer that says neither confirmed nor on trial. An image with no trailer does
+		 * not come here, written over the debug port, through serial recovery or by a golden
+		 * image restore: boot_is_img_confirmed() counts it as confirmed, and nothing is written.
+		 */
 		(void)boot_write_img_confirmed();
 	}
 

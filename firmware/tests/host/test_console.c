@@ -28,8 +28,8 @@
 #define PREFIX   "https://bucket.s3.us-east-1.amazonaws.com/firmware/"
 #define PASSWORD "correct-horse-battery"
 #define SOC_ID   "fe5b26c0c5b1dcd7"
-/* The name of a real iPhone's hotspot: its apostrophe is three bytes of UTF-8. */
-#define HOTSPOT  "Vihaan\xe2\x80\x99s iPhone"
+/* Shaped like the name of an iPhone's hotspot: its apostrophe is three bytes of UTF-8. */
+#define HOTSPOT  "Tester\xe2\x80\x99s iPhone"
 
 static int failures;
 static int checks;
@@ -843,7 +843,7 @@ static void test_wifi_validation(void)
 	command("WIFI|a|" PASSWORD);
 	CHECK_TEXT(fake.wifi_ssid, "a");
 
-	/* The name of a real iPhone's hotspot arrives byte for byte. */
+	/* A name shaped like an iPhone's hotspot arrives byte for byte. */
 	command("WIFI|" HOTSPOT "|" PASSWORD);
 	CHECK_TEXT(fake.wifi_ssid, HOTSPOT);
 	CHECK_TEXT(final_line(), "OK saved, connecting to " HOTSPOT);

@@ -84,4 +84,28 @@ enum ota_job_result ota_job_check(const struct ota_job *job, const struct fw_ver
 /* Short machine-readable reason, used in the status sent back to the cloud. */
 const char *ota_job_result_reason(enum ota_job_result result);
 
+/* What a stored record of an update means, once the device has restarted. */
+enum ota_restart_outcome {
+	/* The target runs and has yet to prove itself. */
+	OTA_RESTART_ON_TRIAL,
+	/* The target runs and was confirmed earlier: the report did not get out. */
+	OTA_RESTART_CONFIRMED,
+	/* The target runs with no trailer, so with nothing to revert to, and nothing proved it. */
+	OTA_RESTART_TRIAL_LOST,
+	/* Another image runs, and the target had started: the bootloader went back. */
+	OTA_RESTART_ROLLED_BACK,
+	/* Another image runs, and the target never started. */
+	OTA_RESTART_NOT_INSTALLED,
+};
+
+/*
+ * running_target: the running version is the one in the record. on_trial: the bootloader will
+ * revert this image unless it is confirmed. has_trailer: the primary slot has a trailer, which a
+ * swap always leaves, so a confirmed update has one. An image with none got there another way,
+ * for example a golden image restore that was cut off just after it erased the trailer.
+ * was_testing: the record says that the target has started.
+ */
+enum ota_restart_outcome ota_restart_outcome(bool running_target, bool on_trial, bool has_trailer,
+					     bool was_testing);
+
 #endif /* OTA_JOB_H_ */

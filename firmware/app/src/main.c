@@ -27,6 +27,17 @@
 #include "ui.h"
 #include "version.h"
 
+#if defined(CONFIG_APP_TEST_FAULT_WRECK_SLOTS)
+#include <zephyr/storage/flash_map.h>
+#include <zephyr/sys/util.h>
+#endif
+
+#if defined(CONFIG_APP_TEST_FAULT_GOLDEN_FLIP)
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/flash.h>
+#endif
+
 LOG_MODULE_REGISTER(app, CONFIG_APP_LOG_LEVEL);
 
 #define CLOUD_SETTLE_SECONDS    3
@@ -270,6 +281,127 @@ static void handle(const struct app_event *event)
 	update_ui();
 }
 
+#if defined(CONFIG_APP_TEST_FAULT_WRECK_SLOTS)
+/* Where an MCUboot image keeps its metadata. See bootutil/image.h in MCUboot. */
+#define IMAGE_HEADER_HDR_SIZE_OFFSET 8
+#define IMAGE_TLV_INFO_MAGIC         0x6907
+#define IMAGE_TLV_SHA256             0x10
+
+struct image_sizes {
+	uint16_t header;
+	uint16_t protected_tlv;
+	uint32_t image;
+};
+
+struct image_tlv_entry {
+	uint8_t type;
+	uint8_t unused;
+	uint16_t length;
+};
+
+struct image_tlv_area {
+	uint16_t magic;
+	uint16_t total;
+};
+
+/* Writing zeros needs no erase: that is why anything with write access can do this. */
+static void clear_word(const struct flash_area *area, off_t offset)
+{
+	const uint32_t zero = 0;
+	int err = flash_area_write(area, offset, &zero, sizeof(zero));
+
+	LOG_ERR("Test image: cleared the word at %ld of area %u: %d", (long)offset, area->fa_id, err);
+}
+
+/* The offset of the first whole word of the image's hash, or -1 if it cannot be found. */
+static off_t find_hash(const struct flash_area *area)
+{
+	struct image_sizes sizes;
+	struct image_tlv_area tlvs;
+	struct image_tlv_entry entry;
+	off_t offset;
+	off_t end;
+
+	if (flash_area_read(area, IMAGE_HEADER_HDR_SIZE_OFFSET, &sizes, sizeof(sizes)) != 0) {
+		return -1;
+	}
+
+	offset = (off_t)sizes.header + sizes.image + sizes.protected_tlv;
+	if (flash_area_read(area, offset, &tlvs, sizeof(tlvs)) != 0 ||
+	    tlvs.magic != IMAGE_TLV_INFO_MAGIC) {
+		return -1;
+	}
+
+	end = offset + tlvs.total;
+	offset += sizeof(tlvs);
+
+	while (offset < end && flash_area_read(area, offset, &entry, sizeof(entry)) == 0) {
+		offset += sizeof(entry);
+		if (entry.type == IMAGE_TLV_SHA256) {
+			return ROUND_UP(offset, sizeof(uint32_t));
+		}
+		offset += entry.length;
+	}
+
+	return -1;
+}
+
+/* What a compromised application could do to the way back. It runs once: then nothing is valid. */
+static void wreck_slots(void)
+{
+	const struct flash_area *area;
+	off_t hash;
+
+	if (flash_area_open(PARTITION_ID(slot0_partition), &area) == 0) {
+		hash = find_hash(area);
+		if (hash >= 0) {
+			clear_word(area, hash);
+		} else {
+			LOG_ERR("Test image: the primary slot's hash was not found");
+		}
+		flash_area_close(area);
+	}
+
+	if (flash_area_open(PARTITION_ID(slot1_partition), &area) == 0) {
+		clear_word(area, 0);
+		flash_area_close(area);
+	}
+}
+#endif /* CONFIG_APP_TEST_FAULT_WRECK_SLOTS */
+
+#if defined(CONFIG_APP_TEST_FAULT_GOLDEN_FLIP)
+/* golden_partition in MCUboot's overlay. This application has no area for it, on purpose. */
+#define GOLDEN_FLASH_ADDRESS 0x700000
+
+/* Clear one set bit: writing zeros needs no erase. Each boot of this image clears one more. */
+static void damage_golden_copy(void)
+{
+	const struct device *flash = DEVICE_DT_GET(DT_NODELABEL(mx25r64));
+	const off_t address = GOLDEN_FLASH_ADDRESS + CONFIG_APP_TEST_GOLDEN_FLIP_OFFSET;
+	uint8_t before;
+	uint8_t after;
+	int err = device_is_ready(flash) ? flash_read(flash, address, &before, 1) : -ENODEV;
+
+	if (err == 0 && before == 0) {
+		LOG_ERR("Test image: the golden byte at %ld has no bit left to clear", (long)address);
+		return;
+	}
+
+	if (err == 0) {
+		after = before & (before - 1);
+		err = flash_write(flash, address, &after, 1);
+	}
+
+	if (err != 0) {
+		LOG_ERR("Test image: the golden copy could not be damaged: %d", err);
+		return;
+	}
+
+	LOG_ERR("Test image: golden byte at %ld changed from %02x to %02x", (long)address, before,
+		after);
+}
+#endif /* CONFIG_APP_TEST_FAULT_GOLDEN_FLIP */
+
 int main(void)
 {
 	struct app_event event;
@@ -326,6 +458,18 @@ int main(void)
 			k_msleep(MSEC_PER_SEC);
 		}
 	}
+
+#if defined(CONFIG_APP_TEST_FAULT_WRECK_SLOTS)
+	LOG_ERR("Test image: damaging both image slots on purpose");
+	wreck_slots();
+	LOG_PANIC();
+	sys_reboot(SYS_REBOOT_COLD);
+#endif
+
+#if defined(CONFIG_APP_TEST_FAULT_GOLDEN_FLIP)
+	LOG_ERR("Test image: damaging the golden copy on purpose");
+	damage_golden_copy();
+#endif
 
 	while (true) {
 		(void)k_msgq_get(&event_queue, &event, K_FOREVER);

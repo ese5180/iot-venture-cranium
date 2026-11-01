@@ -55,6 +55,16 @@ MAX_LOST = 3
 # Goes to the running application's console. It starts with a line ending, which finishes
 # anything half-typed there, and the bootloader ignores it if it is the one that is listening.
 ENTER_BOOTLOADER = b"\rENTER_BOOTLOADER\r"
+# How long a board gets to reach the bootloader's window, in seconds. The window comes after the
+# bootloader has dealt with the slots, so a swap being resumed makes it late: 81 s were measured. Button 2
+# held down at a reset makes it later still: the golden image's check gives up on the button after 60 s.
+ENTER_AFTER_RESTART = 15
+ENTER_ALREADY_LISTENING = 3
+ENTER_THROUGH_A_SWAP = 150
+# The bootloader looks at what it has received only once it has checked the image, which takes longer
+# than its half second, and then that look lasts a millisecond (CONFIG_BOOT_SERIAL_WAIT_FOR_DFU in
+# MCUboot's main.c). Now and then a restart goes past it: 1 in 75 on the bench. So --reset tries again.
+ENTER_RESTARTS = 3
 
 
 class NoAnswer(BoardError):
@@ -72,6 +82,9 @@ def crc16(data: bytes) -> int:
 
 
 class Link:
+    # Plain text has arrived: on this port only a running application sends any.
+    heard_text = False
+
     def __init__(self, port: str):
         self.serial = serial.Serial(port, 115200, timeout=0.05)
         self.sequence = 0
@@ -111,6 +124,7 @@ class Link:
                 if line[:2] == b"\x06\x09":
                     framed = b""
                 elif line[:2] != b"\x04\x14":
+                    self.heard_text = self.heard_text or bool(line)
                     continue
                 try:
                     framed += base64.b64decode(line[2:])
@@ -135,19 +149,31 @@ class Link:
         return reply
 
 
-def enter(link: Link, serial_number: str | None, through_console: bool = False) -> None:
-    """Make sure the bootloader is listening, restarting the board first if asked to."""
-    if serial_number is not None:
-        reset = subprocess.Popen(["nrfutil", "device", "reset", "--reset-kind", "RESET_PIN",
-                                  "--serial-number", serial_number],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    else:
-        reset = None
+def enter(link: Link, serial_number: str | None, through_console: bool = False,
+          deadline_seconds: float | None = None) -> None:
+    """Make sure the bootloader is listening, restarting the board first if asked to.
+
+    Give deadline_seconds if the board may be in the middle of a swap (ENTER_THROUGH_A_SWAP).
+
+    If the application answers after a restart through the debug port, the bootloader has passed the
+    board on without seeing a greeting, and it is restarted again. A swap says nothing on this port,
+    so a board that is busy with one is left alone.
+    """
+    def restart() -> subprocess.Popen:
+        return subprocess.Popen(["nrfutil", "device", "reset", "--reset-kind", "RESET_PIN",
+                                 "--serial-number", serial_number],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+    reset = restart() if serial_number is not None else None
+    restarted = False
+    restarts_left = ENTER_RESTARTS
     if through_console:
         # Greetings that reach the application before it restarts are nothing to it but
         # lines it refuses, and it answers them in plain text, which is ignored here.
         link.serial.write(ENTER_BOOTLOADER)
-    deadline = time.time() + (15 if reset or through_console else 3)
+    if deadline_seconds is None:
+        deadline_seconds = ENTER_AFTER_RESTART if reset or through_console else ENTER_ALREADY_LISTENING
+    deadline = time.time() + deadline_seconds
     while time.time() < deadline:
         # Slowly enough that the bootloader's eight line buffers do not fill up before it
         # starts reading them, and often enough for a window of half a second.
@@ -158,8 +184,24 @@ def enter(link: Link, serial_number: str | None, through_console: bool = False) 
             # The bootloader may still answer the greetings sent just before this one.
             link.drain()
             return
+        status = None if reset is None else reset.poll()
+        if status:
+            raise BoardError(f"nrfutil could not restart the board through probe {serial_number}: "
+                             f"{reset.stderr.read().strip()}\nName another probe with --serial-number")
+        if status is None:
+            restarted = False
+        elif not restarted:
+            # The restart has happened now. What was heard up to here came before it.
+            restarted = True
+            link.heard_text = False
+        elif link.heard_text and restarts_left > 0:
+            restarts_left -= 1
+            print("  the board went past the bootloader, restarting it again", flush=True)
+            reset = restart()
+            restarted = False
     raise BoardError("the bootloader is not listening: hold Button 1, press RESET, release "
-                     "Button 1 and try again, or pass --console or --reset")
+                     "Button 1 and try again, or pass --console or --reset. A board resuming a swap, or "
+                     f"with Button 2 stuck down, takes longer to get there: give it --wait {ENTER_THROUGH_A_SWAP}")
 
 
 def upload(link: Link, image: bytes) -> None:
@@ -192,11 +234,21 @@ def upload(link: Link, image: bytes) -> None:
     print(f"Sent {len(image)} bytes in {time.time() - started:.0f} s")
 
 
-def show(link: Link) -> None:
+def show(link: Link) -> list[dict]:
+    """The images the bootloader lists, each with its slot, version and hash where it says so.
+
+    It lists only images that pass validation, so an image with a bad signature is not here.
+    """
     reply = link.request(OP_READ, GROUP_IMAGE, ID_IMAGE_STATE, {})
-    for image in reply.get("images", []):
-        print(f"slot {image.get('slot', 0)}: version {image.get('version', '?')}"
-              + (f", hash {image['hash'].hex()}" if isinstance(image.get("hash"), bytes) else ""))
+    return [{"slot": image.get("slot", 0), "version": image.get("version", "?"),
+             "hash": image["hash"].hex() if isinstance(image.get("hash"), bytes) else None}
+            for image in reply.get("images", [])]
+
+
+def print_images(images: list[dict]) -> None:
+    for image in images:
+        print(f"slot {image['slot']}: version {image['version']}"
+              + (f", hash {image['hash']}" if image["hash"] else ""))
 
 
 def main() -> None:
@@ -211,6 +263,9 @@ def main() -> None:
     parser.add_argument("--console", action="store_true",
                         help="send ENTER_BOOTLOADER to the running application to enter the "
                              "bootloader, without a debugger")
+    parser.add_argument("--wait", type=float, metavar="SECONDS",
+                        help="how long the board gets to reach the bootloader; give about "
+                             f"{ENTER_THROUGH_A_SWAP} if it may be resuming a swap")
     args = parser.parse_args()
 
     if args.command == "upload" and args.image is None:
@@ -220,9 +275,9 @@ def main() -> None:
 
     link = Link(args.port or find_console_port())
     try:
-        enter(link, args.serial_number if args.reset else None, args.console)
+        enter(link, args.serial_number if args.reset else None, args.console, args.wait)
         if args.command == "list":
-            show(link)
+            print_images(show(link))
         elif args.command == "upload":
             upload(link, args.image.read_bytes())
             link.request(OP_WRITE, GROUP_OS, ID_OS_RESET, {})

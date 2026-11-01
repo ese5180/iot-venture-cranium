@@ -134,7 +134,9 @@ more. Only then does it ask the bootloader for the swap, so a reset during the w
 installs nothing.
 
 Failure reasons a board can report: `download_failed`, `digest_mismatch`,
-`header_mismatch`, `flash_error`, `interrupted`, `rolled_back`, `not_installed`.
+`header_mismatch`, `flash_error`, `interrupted`, `rolled_back`, `not_installed`, `trial_lost`. The last
+means that the board runs the update's version with nothing proving it and nothing to revert to: a
+golden image restore cut off at its start can leave that, as can a serial upload of the same version.
 Refusal reasons: `bad_document`, `unsupported`, `url_not_allowed`, `not_newer`,
 `too_large`, `declined`.
 
@@ -256,6 +258,14 @@ Stated plainly:
   (sign with `imgtool --vector-to-sign`, `aws kms sign`, `imgtool --fix-sig`) would mean
   no person holds it at all.
 - Downgrade protection is by version comparison in MCUboot, not by a hardware counter.
+- A compromised application can get round that comparison. It can write the primary slot's trailer,
+  and MCUboot does not apply the check to a revert (`loader.c`). So it can swap in any older signed image
+  it has put in the secondary slot, and on a board with a golden image it has one in external flash,
+  with no network needed. It cannot run unsigned code this way. This was read from source and not run.
+- MCUboot does not check the image number in a serial recovery upload, and uses it as an index,
+  so an upload could erase and write other flash areas, the bootloader's own among them.
+  `CONFIG_BOOT_FLASH_AREA_HOOKS` and `image_number_guard.c` refuse every number but 0. A board keeps the
+  hole until its bootloader is flashed over the debug port, since MCUboot is not updated over the air.
 - Serial recovery has no version check. It writes straight into the primary slot, and the next
   boot checks the signature only, so any image ever signed with this key can be installed over
   a newer one, with no trial and no revert. No button is needed, because the bootloader also takes

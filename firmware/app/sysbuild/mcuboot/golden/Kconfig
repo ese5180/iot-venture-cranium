@@ -1,0 +1,32 @@
+#
+# The golden image, built into MCUboot only. See firmware/README.md.
+#
+
+config CRANIUM_GOLDEN
+	bool "Store and restore one pinned image under a Button 2 gesture"
+	select MCUBOOT_ACTION_HOOKS
+	help
+	  A person who holds Button 2 through a reset makes the bootloader store the running
+	  image in external flash, or put it back from there. Only one image qualifies: the
+	  one whose digest is compiled in below. tools/golden.py freeze writes these settings
+	  into sysbuild/mcuboot/prj.conf. No software can start the restore, on purpose: not
+	  the application, not the cloud and not the serial console. That is a statement about
+	  this code path. See the limits in firmware/README.md for what a compromised application
+	  can still do with the copy in external flash.
+
+if CRANIUM_GOLDEN
+
+config CRANIUM_GOLDEN_SHA256
+	string "SHA-256 TLV of the one image this bootloader will store or restore"
+	default ""
+	help
+	  64 hex digits: the hash in the image's own metadata, which covers its header and
+	  body but not its signature. This is what `tools/recover.py list` prints as well.
+
+config CRANIUM_GOLDEN_SIZE
+	int "Size in bytes of that signed image"
+	default 0
+	help
+	  The whole signed file, up to the end of its metadata.
+
+endif # CRANIUM_GOLDEN

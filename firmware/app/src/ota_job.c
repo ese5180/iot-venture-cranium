@@ -366,3 +366,17 @@ const char *ota_job_result_reason(enum ota_job_result result)
 		return "bad_document";
 	}
 }
+
+enum ota_restart_outcome ota_restart_outcome(bool running_target, bool on_trial, bool has_trailer,
+					     bool was_testing)
+{
+	if (running_target && on_trial) {
+		return OTA_RESTART_ON_TRIAL;
+	}
+
+	if (running_target) {
+		return has_trailer ? OTA_RESTART_CONFIRMED : OTA_RESTART_TRIAL_LOST;
+	}
+
+	return was_testing ? OTA_RESTART_ROLLED_BACK : OTA_RESTART_NOT_INSTALLED;
+}

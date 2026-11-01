@@ -67,6 +67,16 @@ static void on_input(struct input_event *event, void *user_data)
 		return;
 	}
 
+	/*
+	 * A release with no press seen: the button was already down when the input driver
+	 * started, so its press was never reported. Holding it through a boot says nothing,
+	 * and without this check the uptime alone would make it a long press, which is a
+	 * factory reset.
+	 */
+	if (pressed_at[button] == 0) {
+		return;
+	}
+
 	/* Act on release so that a long press can be told apart from a short one. */
 	const struct app_event app_event = {
 		.type = APP_EVENT_BUTTON,
@@ -75,6 +85,8 @@ static void on_input(struct input_event *event, void *user_data)
 			.long_press = (k_uptime_get() - pressed_at[button]) >= LONG_PRESS_MS,
 		},
 	};
+
+	pressed_at[button] = 0;
 
 	(void)app_event_post(&app_event);
 }

@@ -150,7 +150,30 @@ config APP_TEST_FAULT_INIT_POWER_LOSS
 	  A power cut at the worst moment of first-time setup, for
 	  firmware/tests/hil/console_bench.py.
 
+config APP_TEST_FAULT_WRECK_SLOTS
+	bool "Damages both image slots and restarts"
+	help
+	  Clears a word of the primary slot's hash and the first word of the secondary slot,
+	  as a compromised application could. MCUboot then has no valid image, and the golden
+	  image is the way back, for firmware/tests/hil/golden_bench.py.
+
+config APP_TEST_FAULT_GOLDEN_FLIP
+	bool "Damages the golden image in external flash, and runs on"
+	help
+	  Clears one bit of the golden copy at APP_TEST_GOLDEN_FLIP_OFFSET, through the flash
+	  device, since this application's flash map has no area for it. A restore has to refuse
+	  it whether the bit is in the image or in its signature, for
+	  firmware/tests/hil/golden_bench.py.
+
 endchoice
+
+config APP_TEST_GOLDEN_FLIP_OFFSET
+	int "Offset in the golden image of the byte that loses a bit"
+	depends on APP_TEST_FAULT_GOLDEN_FLIP
+	default 0
+	range 0 933887
+	help
+	  `tools/golden.py offsets` gives one in the image's body and one in its signature.
 
 module = APP
 module-str = Cranium application

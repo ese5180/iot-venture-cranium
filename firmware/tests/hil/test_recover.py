@@ -9,10 +9,13 @@ answer late, or lose an answer.
 """
 
 import base64
+import contextlib
+import io
 import struct
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools"))
 
@@ -46,6 +49,7 @@ class FakeBootloader:
         self.late_echoes = 0
         self.fail_upload_with = 0
         self.say_offset = None
+        self.images = []
 
     def write(self, data):
         self.lines.append(data)
@@ -70,6 +74,8 @@ class FakeBootloader:
             # Answers to greetings before this one that are only arriving now.
             for earlier in range(1, self.late_echoes + 1):
                 self.reply += frame(op, group, (sequence - earlier) & 0xff, command, {"r": "late"})
+        elif (group, command) == (recover.GROUP_IMAGE, recover.ID_IMAGE_STATE):
+            answer = {"images": self.images}
         elif (group, command) == (recover.GROUP_IMAGE, recover.ID_IMAGE_UPLOAD):
             if self.fail_upload_with:
                 answer = {"rc": self.fail_upload_with}
@@ -239,6 +245,142 @@ class RecoverTest(unittest.TestCase):
         fake.fail_upload_with = 3
         with self.assertRaisesRegex(BoardError, "error 3"):
             recover.upload(link_to(fake), bytes(1000))
+
+    def test_show_returns_what_the_bootloader_lists(self):
+        fake = FakeBootloader()
+        fake.images = [{"slot": 0, "version": "1.4.1", "hash": bytes(range(32))},
+                       {"slot": 1, "version": "1.5.0"}]
+        self.assertEqual(recover.show(link_to(fake)), [
+            {"slot": 0, "version": "1.4.1", "hash": bytes(range(32)).hex()},
+            {"slot": 1, "version": "1.5.0", "hash": None}])
+
+    def test_show_returns_nothing_when_no_image_is_valid(self):
+        self.assertEqual(recover.show(link_to(FakeBootloader())), [])
+
+    def test_printing_the_images_is_a_separate_step(self):
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            recover.print_images([{"slot": 0, "version": "1.4.1", "hash": "ab"},
+                                  {"slot": 1, "version": "1.5.0", "hash": None}])
+        self.assertEqual(printed.getvalue(),
+                         "slot 0: version 1.4.1, hash ab\nslot 1: version 1.5.0\n")
+
+    def waited(self, **arguments):
+        """How long enter() kept trying with a board that never answers, by its own clock."""
+        fake = FakeBoardRunningTheApplication(boot_after_writes=10**9)
+        fake.read = lambda size: b""
+        now = [0.0]
+
+        def clock():
+            now[0] += 0.5
+            return now[0]
+
+        real_time = recover.time.time
+        real_popen = recover.subprocess.Popen
+        recover.time.time = clock
+        recover.subprocess.Popen = mock.Mock(return_value=mock.Mock(poll=mock.Mock(return_value=0)))
+        try:
+            with self.assertRaisesRegex(BoardError, "not listening"):
+                recover.enter(link_to(fake), arguments.pop("serial_number", None), **arguments)
+        finally:
+            recover.time.time = real_time
+            recover.subprocess.Popen = real_popen
+        return now[0]
+
+    def test_a_board_may_take_longer_when_asked_to_wait(self):
+        self.assertLess(self.waited(through_console=True), recover.ENTER_AFTER_RESTART + 5)
+        self.assertLess(self.waited(serial_number="1"), recover.ENTER_AFTER_RESTART + 5)
+        self.assertLess(self.waited(), recover.ENTER_ALREADY_LISTENING + 5)
+        self.assertGreater(self.waited(through_console=True, deadline_seconds=recover.ENTER_THROUGH_A_SWAP),
+                           recover.ENTER_THROUGH_A_SWAP)
+        # Longer than the slowest swap that was measured.
+        self.assertGreater(recover.ENTER_THROUGH_A_SWAP, 81)
+
+    def restarts(self, fake, poll=None):
+        """How many restarts enter() asks for through the debug port, on this board."""
+        calls = []
+
+        def popen(arguments, **_):
+            calls.append(arguments)
+            if len(calls) == fake.listens_at_restart:
+                fake.running_application = False
+            return mock.Mock(poll=mock.Mock(side_effect=poll) if poll else mock.Mock(return_value=0))
+
+        with mock.patch.object(recover.subprocess, "Popen", popen), \
+                mock.patch.object(recover, "GREETING_EVERY", 0.01), \
+                contextlib.redirect_stdout(io.StringIO()):
+            recover.enter(link_to(fake), "1", deadline_seconds=fake.seconds)
+        self.assertTrue(all("RESET_PIN" in call for call in calls))
+        return len(calls)
+
+    def a_board(self, listens_at_restart, seconds=1.0):
+        fake = FakeBoardRunningTheApplication(boot_after_writes=10**9)
+        fake.listens_at_restart = listens_at_restart
+        fake.seconds = seconds
+        return fake
+
+    def test_a_restart_that_goes_past_the_bootloader_is_tried_again(self):
+        self.assertEqual(self.restarts(self.a_board(listens_at_restart=2)), 2)
+
+    def test_a_board_that_listens_the_first_time_is_restarted_once(self):
+        self.assertEqual(self.restarts(self.a_board(listens_at_restart=1)), 1)
+
+    def test_it_gives_up_restarting_after_a_few_tries(self):
+        fake = self.a_board(listens_at_restart=10**9)
+        with self.assertRaisesRegex(BoardError, "not listening"):
+            self.restarts(fake)
+        fake = self.a_board(listens_at_restart=recover.ENTER_RESTARTS + 1)
+        self.assertEqual(self.restarts(fake), recover.ENTER_RESTARTS + 1)
+
+    def test_what_the_application_says_before_the_restart_does_not_count(self):
+        fake = self.a_board(listens_at_restart=10**9)
+        # nrfutil is still at it for a while, then the bootloader listens, and it has said nothing new.
+        answers = iter([None] * 5)
+
+        def poll():
+            answer = next(answers, 0)
+            if answer == 0:
+                fake.running_application = False
+            return answer
+
+        self.assertEqual(self.restarts(fake, poll), 1)
+
+    def test_a_silent_board_is_left_alone_as_it_may_be_in_a_swap(self):
+        calls = []
+        fake = self.a_board(listens_at_restart=10**9, seconds=0.3)
+        fake.read = lambda size: b""
+        with mock.patch.object(recover.subprocess, "Popen",
+                               lambda arguments, **_: calls.append(arguments) or mock.Mock(poll=lambda: 0)), \
+                mock.patch.object(recover, "GREETING_EVERY", 0.01), \
+                self.assertRaisesRegex(BoardError, "not listening"):
+            recover.enter(link_to(fake), "1", deadline_seconds=fake.seconds)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_restart_that_fails_is_reported_at_once_with_what_nrfutil_said(self):
+        fake = self.a_board(listens_at_restart=10**9, seconds=30.0)
+        fake.read = lambda size: b""
+        failed = mock.Mock(poll=mock.Mock(return_value=1), stderr=io.StringIO("no such probe\n"))
+        with mock.patch.object(recover.subprocess, "Popen", return_value=failed), \
+                mock.patch.object(recover, "GREETING_EVERY", 0.01), \
+                self.assertRaisesRegex(BoardError, r"(?s)probe 9.*no such probe.*--serial-number") as caught:
+            recover.enter(link_to(fake), "9", deadline_seconds=fake.seconds)
+        self.assertNotIn("not listening", str(caught.exception))
+
+    def test_a_restart_that_is_still_running_is_not_a_failure(self):
+        fake = self.a_board(listens_at_restart=10**9, seconds=0.2)
+        fake.read = lambda size: b""
+        running = mock.Mock(poll=mock.Mock(return_value=None))
+        with mock.patch.object(recover.subprocess, "Popen", return_value=running), \
+                mock.patch.object(recover, "GREETING_EVERY", 0.01), \
+                self.assertRaisesRegex(BoardError, "not listening"):
+            recover.enter(link_to(fake), "9", deadline_seconds=fake.seconds)
+
+    def test_giving_up_says_how_to_give_a_slow_board_longer(self):
+        fake = self.a_board(listens_at_restart=10**9, seconds=0.2)
+        fake.read = lambda size: b""
+        with mock.patch.object(recover, "GREETING_EVERY", 0.01), \
+                self.assertRaisesRegex(BoardError, rf"Button 2.*--wait {recover.ENTER_THROUGH_A_SWAP}"):
+            recover.enter(link_to(fake), None, deadline_seconds=fake.seconds)
 
     def test_a_reply_with_a_bad_checksum_is_ignored(self):
         fake = FakeBootloader()

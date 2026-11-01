@@ -1,0 +1,4 @@
+name: cranium-golden
+build:
+  cmake: .
+  kconfig: Kconfig

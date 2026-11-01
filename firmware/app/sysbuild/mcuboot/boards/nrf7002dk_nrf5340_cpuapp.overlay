@@ -57,5 +57,15 @@
 			label = "image-1";
 			reg = <0x0 0xe4000>;
 		};
+
+		/*
+		 * The golden image, the same size as a slot: the plain signed file, with no
+		 * trailer. Declared here and not in the application's overlay, so that the
+		 * application's flash map has no area for it. See firmware/README.md.
+		 */
+		golden_partition: partition@700000 {
+			label = "golden";
+			reg = <0x700000 0xe4000>;
+		};
 	};
 };

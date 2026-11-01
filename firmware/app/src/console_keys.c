@@ -50,9 +50,12 @@ static int csr_length;
 
 /*
  * Create the device identity on the device. The key pair is generated inside TF-M
- * with its random number generator. The private half passes through this
- * application's memory once, on its way into protected storage, and is wiped
- * afterwards; only a certificate signing request leaves the device.
+ * with its random number generator, and only a certificate signing request leaves
+ * the device. It does not stay inside TF-M, though. The private half is exported into
+ * this application's memory to make the request and to go into protected storage; those
+ * copies are wiped afterwards (console_port_keygen_end() and mbedtls_pk_free()). After
+ * that the TLS stack reads it back from protected storage into this application's heap
+ * for every connection to the cloud, and the code that frees that buffer does not wipe it.
  */
 int console_port_keygen_create(const char **reason)
 {

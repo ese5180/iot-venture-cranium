@@ -302,6 +302,29 @@ static void test_versions(void)
 	CHECK(fw_version_to_string(&a, text, 5) < 0);
 }
 
+static void test_restart_outcomes(void)
+{
+	/* The target runs, on trial. */
+	CHECK(ota_restart_outcome(true, true, true, false) == OTA_RESTART_ON_TRIAL);
+	CHECK(ota_restart_outcome(true, true, true, true) == OTA_RESTART_ON_TRIAL);
+
+	/* The target runs, confirmed earlier. */
+	CHECK(ota_restart_outcome(true, false, true, true) == OTA_RESTART_CONFIRMED);
+	CHECK(ota_restart_outcome(true, false, true, false) == OTA_RESTART_CONFIRMED);
+
+	/* The target runs and its trailer is gone. It must not be reported as a success. */
+	CHECK(ota_restart_outcome(true, false, false, true) == OTA_RESTART_TRIAL_LOST);
+	CHECK(ota_restart_outcome(true, false, false, false) == OTA_RESTART_TRIAL_LOST);
+
+	/* Another image runs, on trial or not: only the target's own trial counts. */
+	CHECK(ota_restart_outcome(false, true, true, true) == OTA_RESTART_ROLLED_BACK);
+	CHECK(ota_restart_outcome(false, true, true, false) == OTA_RESTART_NOT_INSTALLED);
+	CHECK(ota_restart_outcome(false, false, true, true) == OTA_RESTART_ROLLED_BACK);
+	CHECK(ota_restart_outcome(false, false, false, true) == OTA_RESTART_ROLLED_BACK);
+	CHECK(ota_restart_outcome(false, false, true, false) == OTA_RESTART_NOT_INSTALLED);
+	CHECK(ota_restart_outcome(false, false, false, false) == OTA_RESTART_NOT_INSTALLED);
+}
+
 int main(void)
 {
 	test_valid_job();
@@ -310,6 +333,7 @@ int main(void)
 	test_refused_documents();
 	test_policy();
 	test_versions();
+	test_restart_outcomes();
 
 	printf("%d checks, %d failed\n", checks, failures);
 	return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
