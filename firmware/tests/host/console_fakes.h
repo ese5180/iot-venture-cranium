@@ -16,7 +16,7 @@
 #include "net.h"
 #include "ota.h"
 
-#define FAKE_RECORDS      8
+#define FAKE_RECORDS      9
 #define FAKE_RECORD_MAX   512
 #define FAKE_OUTPUT_MAX   32768
 #define FAKE_OPS_MAX      4096
