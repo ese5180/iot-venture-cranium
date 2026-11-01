@@ -232,8 +232,8 @@ no Wi-Fi and no cloud. It is sealed in external flash, and only the bootloader c
 only under a physical gesture, and only if it is the one image pinned by a digest compiled into
 the bootloader. There is no cloud, job, console, serial or automatic way to start this.
 
-`CONFIG_CRANIUM_GOLDEN` is **off** in the bootloader's committed `prj.conf`, and stays off until
-an image has been frozen. With it off nothing of this is built into the bootloader. The one
+`CONFIG_CRANIUM_GOLDEN` stays off in the bootloader's `prj.conf` until an image has been frozen, and
+is on now: firmware 1.5.0 is the frozen image. With it off nothing of this is built into the bootloader. The one
 trace is `golden_partition` in its devicetree, which adds one 16-byte entry to its flash map. With it
 on, the bootloader was 50,324 bytes of its 64 KiB when this was written, against 47,452 with it off.
 Both counts include the check on serial recovery's image number, described under
@@ -326,7 +326,9 @@ but the secondary slot stays as it was, and an image waiting there for a swap wo
 2. `python tools/golden.py freeze binaries/cranium-<version>.signed.bin`. This verifies the
    signature with `keys/fw_signing_pub.pem`, copies the file to `binaries/golden/`, writes
    `golden.json`, and sets the three lines in `app/sysbuild/mcuboot/prj.conf`. Commit those two
-   files. The image's digest does not depend on the pin, so this does not change the image.
+   files. From here on the copy in `binaries/golden/` is the golden image, and no other: the next step
+   builds the same commit again, which writes a new `binaries/cranium-<version>.signed.bin` with
+   another digest, because TF-M and Zephyr put the build time in their boot banners.
 3. Save the bootloader that is on the board now: `golden_bench.py run G0` reads it back through
    the debug port, into `binaries/golden/mcuboot-before-golden.hex`.
 4. Rebuild, check that the build used the pin with

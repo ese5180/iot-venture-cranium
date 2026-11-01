@@ -705,10 +705,16 @@ class StoreBinaryTest(unittest.TestCase):
 class SettingsTest(unittest.TestCase):
     """What is committed, as it is now."""
 
-    def test_the_committed_bootloader_has_it_turned_off(self):
+    def test_the_committed_bootloader_pins_what_is_frozen_or_has_it_turned_off(self):
         text = (FIRMWARE / "sysbuild/mcuboot/prj.conf").read_text()
-        self.assertIn("CONFIG_CRANIUM_GOLDEN=n\n", text)
-        self.assertEqual(golden.read_pin(text), (False, None, None))
+        manifest = REPO / "firmware/golden.json"
+        if manifest.exists():
+            frozen = json.loads(manifest.read_text())
+            self.assertIn("CONFIG_CRANIUM_GOLDEN=y\n", text)
+            self.assertEqual(golden.read_pin(text), (True, frozen["hash_tlv"], frozen["size"]))
+        else:
+            self.assertIn("CONFIG_CRANIUM_GOLDEN=n\n", text)
+            self.assertEqual(golden.read_pin(text), (False, None, None))
         # And the tool has its place to write.
         golden.set_pin(text, "ab" * 32, 1234)
 
@@ -1201,7 +1207,7 @@ class ScratchCheckoutTest(unittest.TestCase):
 class PlanTest(unittest.TestCase):
     def test_every_test_of_the_design_is_there(self):
         expected = {"G0", "G1", "G2", "G3", "G4", "G5a", "G5b", "G5c", "G5d", "G5e", "G5f", "G6", "G7", "G8",
-                    "G9", "G10", "G11", "G12", "G13", "G14"}
+                    "G9", "G10", "G11", "G12", "G13", "G14", "G15", "G16"}
         self.assertEqual(set(golden_bench.TESTS), expected)
 
     def test_the_plan_prints_them_and_opens_nothing(self):
@@ -1973,7 +1979,8 @@ class SimulatedRunTest(unittest.TestCase):
     NEEDS_MORE = {"G5c", "G5d", "G5e", "G11"}
 
     def test_every_test_on_a_board_that_does_what_the_design_says(self):
-        names = [name for name in golden_bench.TESTS if name != "G1"]
+        # G15 and G16 need a real update, so that only a board and AWS can run them.
+        names = [name for name in golden_bench.TESTS if name not in ("G1", "G15", "G16")]
         records = self.run_tests(*names)
         self.assertEqual([record["test"] for record in records], names)
         for record in records:

@@ -24,7 +24,8 @@ the boot configures the pin again and that ends the drive. So with --gesture jli
 reach the code in ui.c that it is there for. G5f does, from the input driver on (--app-elf), and G5c
 with --gesture person is the whole path. It has never seen a hand either: bounce, the RESET pin, and
 anything that reads the pin before the bench drives it. G5e, a gesture from power-off, and pulling
-USB (G5d, G11, with --power-cuts) need a person.
+USB (G5d, G11, with --power-cuts) need a person. G15 and G16 are the two that also need Wi-Fi and
+AWS, because they do the gesture in the middle of a real update.
 
 Everything both serial ports print goes to --out, with time stamps. A test ends with PASS, FAIL or
 PARTIAL and appends one line to results.jsonl there. PARTIAL means that what it ran passed and that
@@ -59,6 +60,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import golden  # noqa: E402
 import recover  # noqa: E402
 from board import BoardError, Console, find_console_port, parse_key_values  # noqa: E402
+import ota_bench  # noqa: E402
 from ota_bench import LoggedPort, TestFailed, note  # noqa: E402
 from serial.tools import list_ports  # noqa: E402
 
@@ -89,6 +91,10 @@ HOLD_GIVES_UP = 60.0
 HOLD_INTO_THE_APPLICATION = 80.0
 
 RESTORE_SECONDS = 300
+# From Button 1 to the bootloader starting its swap: download included.
+UPDATE_SECONDS = 480
+# How far into a swap G16 goes. The whole swap takes about 81 s.
+SWAP_RUNNING_SECONDS = 6
 SEAL_SECONDS = 180
 BOOT_SECONDS = 60
 # Seconds after the bootloader says it started. Measured on the board, a restore takes 53 s: the
@@ -434,6 +440,28 @@ def scratch_checkout(folder: Path, image: Path) -> golden.Checkout:
     checkout.frozen.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(image, checkout.frozen_image(manifest))
     return checkout
+
+
+class CloudJobs(ota_bench.Bench):
+    """ota_bench's jobs on this bench's ports, for G15 and G16: a port has one owner."""
+
+    def __init__(self, bench: "Bench"):
+        self.bench = bench
+        self.args = argparse.Namespace(real_button=False, serial_number=bench.args.serial_number)
+        self.outputs = json.loads(ota_bench.OUTPUTS.read_text())
+        self.region = self.outputs["Region"]
+        self.bucket = self.outputs["FirmwareBucketName"]
+        self.aws = ota_bench.Aws(os.environ.get("AWS_PROFILE", "cranium"), self.region)
+        self.out = bench.out
+        self.boot_lines = bench.boot_lines
+        self.thing = None
+        self.release_manager = None
+        self.presign_role = None
+
+    @property
+    def console(self):
+        # Going through serial recovery closes the port and opens it again.
+        return self.bench.console
 
 
 class Bench:
@@ -1096,6 +1124,50 @@ class Bench:
         result["forward to"] = status["firmware"]
         return result
 
+    def update_in_progress(self, image: Path) -> tuple[CloudJobs, str, str, int]:
+        """A real update, from the golden image, up to the point where the bootloader starts its
+        swap. Needs Wi-Fi and AWS, unlike the rest of this bench."""
+        self.get_golden_running_and_sealed()
+        cloud = CloudJobs(self)
+        cloud.wait_online()
+        data = image.read_bytes()
+        target = ota_bench.image_version(data)
+        sha256 = hashlib.sha256(data).hexdigest()
+        cloud.put_object(data, sha256)
+        job_id = cloud.bench_job(target, len(data), sha256)
+        cloud.wait_offered(job_id)
+        mark = self.mark()
+        cloud.press(1)
+        self.wait_said(r"Swap type: test", mark, UPDATE_SECONDS)
+        return cloud, job_id, target, mark
+
+    def update_did_not_succeed(self, cloud: CloudJobs, job_id: str) -> dict:
+        execution = cloud.wait_job(job_id, UPDATE_SECONDS)
+        if execution.get("status") == "SUCCEEDED":
+            raise TestFailed(f"the update reports success, and golden runs: {execution}")
+        return {"job": execution.get("status"),
+                "reason": execution.get("statusDetails", {}).get("detailsMap", {}).get("reason")}
+
+    def g15(self) -> dict:
+        if not self.args.trial_image:
+            raise TestFailed("G15 needs --trial-image: one that never confirms itself")
+        cloud, job_id, target, _ = self.update_in_progress(self.args.trial_image)
+        cloud.wait_status(f"{target} to run on trial", lambda s: s.get("firmware") == target, BOOT_SECONDS * 4)
+        mark = self.mark()
+        result = self.gesture_restores()
+        self.did_not_say(r"Swap type: (test|revert)", mark)
+        result.update(self.update_did_not_succeed(cloud, job_id))
+        return result
+
+    def g16(self) -> dict:
+        cloud, job_id, _, _ = self.update_in_progress(self.args.forward_image)
+        time.sleep(SWAP_RUNNING_SECONDS)
+        mark = self.mark()
+        result = self.gesture_restores()
+        self.did_not_say(r"Swap type: (test|revert)", mark)
+        result.update(self.update_did_not_succeed(cloud, job_id))
+        return result
+
     def g14(self) -> dict:
         # Never on a bootloader without the guard: there these numbers select flash areas.
         elf_symbol(self.args.mcuboot_elf, GUARD_SYMBOL)
@@ -1289,6 +1361,8 @@ TESTS = {
     "G12": (Bench.g12, "G3", "another key and a flipped golden, with no tool in the way: refused"),
     "G13": (Bench.g13, "G3, --forward-image", "forward from golden, and the gesture still restores"),
     "G14": (Bench.g14, "G3", "an upload for another image number: refused, and nothing changed"),
+    "G15": (Bench.g15, "G3, --trial-image, Wi-Fi, AWS", "the gesture during an update's trial: golden, no revert"),
+    "G16": (Bench.g16, "G3, --forward-image, Wi-Fi, AWS", "the gesture during an update's swap: golden, no resume"),
 }
 
 
@@ -1402,6 +1476,8 @@ def main() -> int:
                         help="a validly signed image that is not the pinned one, for images")
     parser.add_argument("--forward-image", type=Path, default=REPO / "binaries/latest.signed.bin",
                         help="for G13: an image newer than the golden one")
+    parser.add_argument("--trial-image", type=Path,
+                        help="for G15: a newer image built with APP_TEST_FAULT_NO_CONFIRM")
     parser.add_argument("--images", type=Path, default=REPO / "build-bench/images")
     parser.add_argument("--power-cuts", action="store_true",
                         help="G5d and G11 also pull USB, with G11 during a restore and a seal. "
