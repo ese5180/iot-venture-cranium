@@ -911,6 +911,8 @@ test('a token the API refuses counts as over, whatever time it had left', async 
   assert.deepEqual(tab.navigations, []);
   await tab.press(tab.dialog(), 'button', 'Keep the release');
   await tab.wait(5000);
+  // The way there hashes a code, which takes real time and is not on the test's clock.
+  await leaving(tab);
   assert.equal(tab.navigations.length, 1);
   assert.match(tab.navigations[0], /\/oauth2\/authorize\?/);
 });
