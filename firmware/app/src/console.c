@@ -597,6 +597,11 @@ const char *console_port_reset_reason(void)
 	return "power-on";
 }
 
+uint32_t console_last_reset_cause(void)
+{
+	return last_reset_cause;
+}
+
 /* ---- the task ------------------------------------------------------------------- */
 
 /*

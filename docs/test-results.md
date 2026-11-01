@@ -48,6 +48,10 @@ does not explain it. The difference between those runs is the USB connection, an
 may be the cause, and no test has shown it yet. Either way the board recovered by itself each time, which is the first
 real rollback on this bootloader. It was seen from the cloud only.
 
+The power source those two failures ran on is no longer available, so they have not been reproduced, and this has
+**not been fixed**. From 1.7.4 the board keeps a [boot diary](../firmware/README.md#boot-diary), which should show the reason
+if it happens again. Until then, the successful updates are all from a board on a computer's USB port.
+
 The update at 12:15 is the one timed here:
 
 | Step | After the button |

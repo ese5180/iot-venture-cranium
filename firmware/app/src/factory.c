@@ -66,6 +66,7 @@ int factory_reset(void)
 	note_error(&first, store_erase(STORE_BT_OTA_RECORD));
 #endif
 	note_error(&first, store_erase(STORE_STUCK));
+	note_error(&first, store_erase(STORE_BOOT_DIARY));
 
 	delete_credential(&first, FACTORY_CLOUD_SEC_TAG, TLS_CREDENTIAL_PRIVATE_KEY);
 	delete_credential(&first, FACTORY_CLOUD_SEC_TAG, TLS_CREDENTIAL_PUBLIC_CERTIFICATE);

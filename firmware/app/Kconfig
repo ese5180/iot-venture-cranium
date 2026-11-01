@@ -161,6 +161,15 @@ config APP_VERSION_FROM_BUILD
 	help
 	  Take the firmware version from the VERSION file. Off only in host-side tests.
 
+config APP_BOOT_DIARY
+	bool "Keep a record of the last boots and send it to the shadow"
+	depends on APP_CONSOLE
+	default y
+	help
+	  For finding out over the cloud why a board reset, when nobody can read its serial
+	  port. Eight entries: the version, why the boot before it ended, and how far it got.
+	  It writes to storage up to four times each boot.
+
 choice APP_TEST_FAULT
 	prompt "Fault built into a test image"
 	default APP_TEST_FAULT_NONE

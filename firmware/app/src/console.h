@@ -24,6 +24,8 @@
 #ifndef CONSOLE_H_
 #define CONSOLE_H_
 
+#include <stdint.h>
+
 #include <zephyr/toolchain.h>
 
 #if defined(CONFIG_APP_CONSOLE)
@@ -50,5 +52,8 @@ static inline void __printf_like(2, 3) console_event(const char *tag, const char
 }
 
 #endif /* CONFIG_APP_CONSOLE */
+
+/* Why the last boot ended, as Zephyr's hwinfo RESET_ bits. */
+uint32_t console_last_reset_cause(void);
 
 #endif /* CONSOLE_H_ */

@@ -1604,6 +1604,7 @@ static void test_factory_reset(void)
 	fake.records[STORE_BT_OTA_RECORD].present = true;
 #endif
 	fake.records[STORE_STUCK].present = true;
+	fake.records[STORE_BOOT_DIARY].present = true;
 	command("FACTORY_RESET");
 	CHECK_TEXT(final_line(), "OK erased, rebooting into factory mode");
 	CHECK(fake.reboots == 1);
@@ -1617,6 +1618,7 @@ static void test_factory_reset(void)
 	CHECK(!fake.records[STORE_BT_OTA_RECORD].present);
 #endif
 	CHECK(!fake.records[STORE_STUCK].present);
+	CHECK(!fake.records[STORE_BOOT_DIARY].present);
 	CHECK(!fake.wifi_stored);
 	CHECK(!fake.private_key);
 	CHECK(!fake.certificate);

@@ -611,6 +611,18 @@ installed over a newer one. The image does not run on trial and there is no reve
 development kit this adds no power, because the debug port is open. A product build has to narrow
 it or turn serial recovery off: [`docs/aws-iot.md`](../docs/aws-iot.md#known-limits) says how.
 
+## Boot diary
+
+From firmware 1.7.4 the board keeps its last eight boots in storage and sends them to the device shadow as `diary`, so that
+a reset can be explained with no serial port. Each entry is `version/cause/stage`:
+
+- **cause** is why the boot before it ended, in hex, as Zephyr's `RESET_` bits: `1` reset pin, `2` software, `4` brownout,
+  `8` power-on, `10` watchdog, `20` debugger, `100` CPU lockup.
+- **stage** is how far that boot got: `1` reached `main`, `2` the update manager started, `3` network up, `4` cloud up.
+
+An image that fails on trial and is swapped back shows up here, if it reached `main`. If it did not, its entry is missing,
+and that says something too. It writes to storage up to four times each boot. A factory reset erases it.
+
 ## Firmware update over Bluetooth
 
 An image can be uploaded from a phone over Bluetooth LE, with nothing of the cloud involved, for a

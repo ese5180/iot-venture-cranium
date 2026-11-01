@@ -25,6 +25,9 @@
 #if defined(CONFIG_APP_TEST_FAULT_WIFI_DEAD)
 #include "fault_wifi.h"
 #endif
+#if defined(CONFIG_APP_BOOT_DIARY)
+#include "boot_diary.h"
+#endif
 #include "identity.h"
 #include "factory.h"
 #include "health.h"
@@ -273,6 +276,9 @@ static void handle(const struct app_event *event)
 	switch (event->type) {
 	case APP_EVENT_NET_UP:
 		LOG_INF("Network is up");
+#if defined(CONFIG_APP_BOOT_DIARY)
+		boot_diary_stage(BOOT_DIARY_NET_UP);
+#endif
 		net_report_up();
 		cloud_retry_in = CLOUD_SETTLE_SECONDS;
 		break;
@@ -295,6 +301,10 @@ static void handle(const struct app_event *event)
 		cloud_retry_in = -1;
 		ota_on_cloud_up();
 		publish_report();
+#if defined(CONFIG_APP_BOOT_DIARY)
+		boot_diary_stage(BOOT_DIARY_CLOUD_UP);
+		boot_diary_report();
+#endif
 		break;
 	case APP_EVENT_CLOUD_DOWN:
 		LOG_INF("Disconnected from AWS IoT");
@@ -462,6 +472,10 @@ int main(void)
 
 	LOG_INF("Cranium firmware %s", fw_version_running_string());
 
+#if defined(CONFIG_APP_BOOT_DIARY)
+	boot_diary_begin();
+#endif
+
 	cJSON_Init();
 
 	if (health_init() != 0) {
@@ -483,6 +497,10 @@ int main(void)
 	if (ota_init() != 0) {
 		LOG_ERR("Update manager could not start");
 	}
+
+#if defined(CONFIG_APP_BOOT_DIARY)
+	boot_diary_stage(BOOT_DIARY_OTA_READY);
+#endif
 
 	if (net_init() != 0) {
 		LOG_ERR("Networking could not start");

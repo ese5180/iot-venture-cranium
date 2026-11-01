@@ -26,6 +26,8 @@ enum store_id {
 	STORE_STUCK = 6,
 	/* The version that a test image's fault fired on, with APP_TEST_FAULT_WIFI_DEAD only. */
 	STORE_TEST_FAULT = 7,
+	/* The last boots, with APP_BOOT_DIARY. See boot_diary.h. */
+	STORE_BOOT_DIARY = 8,
 };
 
 /* Read a record of exactly size bytes. -ENOENT if it does not exist. */
